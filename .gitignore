@@ -5,3 +5,4 @@ venv/
 build/
 install/
 log/
+.claude/

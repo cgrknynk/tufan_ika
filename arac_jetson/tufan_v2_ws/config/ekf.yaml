@@ -1,0 +1,46 @@
+ekf_filter_node:
+  ros__parameters:
+    use_sim_time: false
+    frequency: 20.0
+    two_d_mode: true
+    publish_tf: true
+    publish_acceleration: false
+
+    odom_frame: odom
+    base_link_frame: base_footprint
+    # world_frame == odom_frame: there is no map/AMCL in this mapless setup,
+    # the EKF only produces the odom -> base_footprint transform.
+    world_frame: odom
+
+    # NOT: Gercek tekerlek enkoderi/GPS YOK. rf2o UC farkli gurultu azaltma
+    # denemesiyle test edildi ama arac DURURKEN bile kayma devam etti - kesin
+    # olarak kaldirildi. Acik dongu (open-loop, komut entegrasyonu) da denendi
+    # ve calisti ama sadece YAKLASIK bir tahmindi.
+    #
+    # Su an ana konum kaynagi laser_scan_matcher (/odom_lsm) - CSM/ICP tabanli
+    # scan matching, rf2o'dan FARKLI bir algoritma. Bagimsiz testte 10sn
+    # durgunken max 1.1cm sapma / 0.14 derece yaw sapmasi olcüldu, ve gercek
+    # kisa bir surus sirasinda dogru mesafe yakalayip sonrasinda uzun sure
+    # (~58sn) 2mm gurultu bandinda sabit kaldi - rf2o'dan cok daha stabil.
+    # Yon (yaw) hala ayri olarak gercek IMU'dan fuzyonlanir (asagida).
+    odom0: odom_lsm
+    odom0_config: [true,  true,  false,
+                   false, false, false,
+                   true,  true,  false,
+                   false, false, false,
+                   false, false, false]
+    odom0_differential: false
+    odom0_relative: false
+    odom0_queue_size: 10
+
+    # IMU: mutlak yaw (ve roll/pitch) + açısal hızlar. İvme fuzyonlanmıyor (drift'i önlemek için).
+    imu0: imu/data
+    imu0_config: [false, false, false,
+                  true,  true,  true,
+                  false, false, false,
+                  true,  true,  true,
+                  false, false, false]
+    imu0_differential: false
+    imu0_relative: true
+    imu0_remove_gravitational_acceleration: true
+    imu0_queue_size: 10

@@ -1,0 +1,31 @@
+# Here4 (u-blox ZED-F9P tabanli, multiband RTK) - ROVER konfigurasyonu.
+# Jetson Orin Nano UART1 (/dev/ttyTHS1 = 40-pin header pin 8 TXD / pin 10 RXD / pin 6 GND, 3.3V)
+#
+# Baglanti: Here4 GPS_TX -> Jetson pin 10 (RXD) | Here4 GPS_RX -> Jetson pin 8 (TXD) | Here4 GND -> Jetson pin 6
+#
+# NOT: uart1.baudrate asagida 38400 olarak varsayildi (ZED-F9P tipik varsayilani) --
+# donanim gercekten baglaninca dogrulanmali/gerekirse duzeltilmeli. Baglanti
+# kurulmuyorsa ilk denenecek şey budur.
+#
+# NOT (RTK/NTRIP): TUSAGA-Aktif hesabi acilinca, RTCM duzeltmelerini bu node'a
+# nasil besleyecegimizi (rtcm_msgs uzerinden mi, dogrudan port'a mi) bu
+# paketin (ros-humble-ublox-gps) tam kaynagina bakip netlestirecegiz -- simdilik
+# bu adim BEKLETILIYOR (kullanici talebiyle).
+ublox_gps_node:
+  ros__parameters:
+    debug: 0
+    device: /dev/ttyTHS1
+    frame_id: gnss_link
+    uart1:
+      baudrate: 38400
+    tmode3: 0          # 0 = Disabled (ROVER modu; 1=Survey-In/BASE kullanilmiyor)
+
+    inf:
+      all: true
+
+    publish:
+      all: true
+      aid:
+        hui: false
+      nav:
+        posecef: false

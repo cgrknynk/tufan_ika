@@ -1,0 +1,27 @@
+<!--
+  Haritasiz, hareketli/gecici engeller icin ozellestirilmis davranis agaci.
+  Varsayilan nav2 agacindan farki: yol tamamen kapandiginda (planlayici basarisiz
+  olduğunda) veya kontrolcu ilerleyemediginde SADECE BEKLER - hicbir zaman
+  Spin (donme) veya BackUp (geri geri gitme) kurtarma hareketi denemez.
+  Engel (ör. kayar bariyer) yoldan cekilince planlama tekrar basarili olur ve
+  arac kaldigi yerden yoluna devam eder.
+-->
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="1000000" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithReplanning">
+        <RateController hz="1.0">
+          <RecoveryNode number_of_retries="1000000" name="ComputePathToPoseRecovery">
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+            <Wait wait_duration="1"/>
+          </RecoveryNode>
+        </RateController>
+        <RecoveryNode number_of_retries="1000000" name="FollowPathRecovery">
+          <FollowPath path="{path}" controller_id="FollowPath"/>
+          <Wait wait_duration="1"/>
+        </RecoveryNode>
+      </PipelineSequence>
+      <Wait wait_duration="1"/>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

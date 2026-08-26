@@ -148,7 +148,15 @@ class SshTerminalWidget(QTextEdit):
         if self._master_fd is None:
             return
         try:
-            os.write(self._master_fd, f"cd {BASLANGIC_DIZINI} && clear\r".encode())
+            # PROMPT_COMMAND='history -a': her komut CALISTIKTAN HEMEN SONRA
+            # ~/.bash_history dosyasina yazilir. Bu olmadan bash gecmisi
+            # SADECE duzgun bir "exit" ile kapanan oturumlarda diske yazar --
+            # arayuz kapanirken ssh baglantisini SIGTERM ile kestigimiz icin
+            # (bkz. baglantiyi_kapat) o oturumdaki komutlar kaybolurdu. Bu
+            # sayede yazilan komutlar bir sonraki baglantida (yukari ok /
+            # gecmis) hala goruntur.
+            os.write(self._master_fd,
+                     f"export PROMPT_COMMAND='history -a'; cd {BASLANGIC_DIZINI} && clear\r".encode())
         except OSError:
             pass
 

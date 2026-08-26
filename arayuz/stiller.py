@@ -41,6 +41,39 @@ YEDEK_PASIF = """
     QPushButton:hover { background-color: rgba(0, 85, 255, 40); color: white; border: 2px solid white; }
 """
 
+# 4. PWM HIZ SINIRI KUTUSU (eski "Telefon" kutusu) - diger tum ayarlar
+# kutularindan (kullanici adi, sifre - hepsi notr gri/beyaz) BILEREK farkli
+# bir kimlikte (kehribar/turuncu, hem kutu hem yazi rengi) - her zaman,
+# deger girilmemisken bile, goze carpsin diye. Aktif (bir sinir onaylanmis)
+# durumda renk daha da doygunlasiyor.
+PWM_LIMIT_VARSAYILAN = """
+    QLineEdit {
+        background-color: #2A1D0E;
+        color: #FFB454;
+        border: 2px solid #B5750F;
+        border-radius: 12px;
+        padding: 4px 9px;
+        font-size: 26px;
+        font-weight: bold;
+        font-family: "Roboto Mono";
+    }
+    QLineEdit::placeholder { color: #8A6A3A; }
+    QLineEdit:focus { border: 2px solid #FFB454; background-color: #331F0A; }
+"""
+PWM_LIMIT_AKTIF = """
+    QLineEdit {
+        background-color: #3A2400;
+        color: #FFD27A;
+        border: 2px solid #FF9F1C;
+        border-radius: 12px;
+        padding: 4px 9px;
+        font-size: 26px;
+        font-weight: bold;
+        font-family: "Roboto Mono";
+    }
+    QLineEdit:focus { border: 2px solid #FFC266; background-color: #402A00; }
+"""
+
 # ... (Üstteki AYAR_AKTIF, MOD_AKTIF kısımları aynen kalıyor) ...
 
 # ... (AYAR_AKTIF, MOD_AKTIF vb. kısımlar aynen kalıyor) ...

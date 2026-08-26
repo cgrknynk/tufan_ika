@@ -26,11 +26,10 @@ else:
 from kamera_sistemi import KameraThread
 from telemetri_sistemi import TelemetriThread
 from harita_sistemi import HaritaYoneticisi
-from joystick_sistemi import SanalJoystickPaneli
-from stiller import * 
-from arayuz import Ui_MainWindow 
+from surus_joystick_sistemi import SurusJoystickThread
+from stiller import *
+from arayuz import Ui_MainWindow
 from diller import CEVIRILER
-from silah_kontrol_sistemi import SilahKontrolSistemi
 from terminal_widget import SshTerminalWidget
 
 
@@ -164,7 +163,6 @@ class TufanGCS(QMainWindow):
         self._baslangic_stilleri_uygula()
         self.arayuz_esneklik_ayarlarini_uygula()
 
-        self._silah_sekmesi_olustur()
         self._telemetri_baglantilari_kur()
         self._buton_baglantilarini_kur()
 
@@ -249,17 +247,22 @@ class TufanGCS(QMainWindow):
         self.telemetri_motoru.batarya_sinyali.connect(self.arac_batarya_renklendir)
         self.telemetri_motoru.etap_sinyali.connect(self.ui.label_etapNo.setText) 
         self.telemetri_motoru.yer_batarya_sinyali.connect(self.yer_batarya_renklendir)
-        self.telemetri_motoru.motor_durum_sinyali.connect(self.motor_arayuz_guncelle)
+        self.telemetri_motoru.imu_durum_sinyali.connect(self.imu_arayuz_guncelle)
         self.telemetri_motoru.guc_durum_sinyali.connect(self.guc_arayuz_guncelle)
         self.telemetri_motoru.gps_durum_sinyali.connect(self.gps_arayuz_guncelle)
         self.telemetri_motoru.kamera_durum_sinyali.connect(self.kamera_arayuz_guncelle)
         self.telemetri_motoru.wifi_durum_sinyali.connect(self.wifi_arayuz_guncelle)
         self.telemetri_motoru.lidar_durum_sinyali.connect(self.lidar_arayuz_guncelle)
-        self.telemetri_motoru.sistem_merkez_sinyali.connect(self.sistem_merkez_guncelle)
-        # Gercek /scan heartbeat'i henuz ilk kez tetiklenmeden once panel
-        # tasarim-zamani varsayilan metnini ("TARANIYOR") gostermeye devam
-        # etmesin diye baslangicta acikca PASIF'e cekiyoruz.
+        self.telemetri_motoru.mod_durum_sinyali.connect(self.mod_durum_guncelle)
+        self.telemetri_motoru.hedef_mesafe_sinyali.connect(self.hedef_mesafe_guncelle)
+        self.son_hedef_mesafe = None
+        self.son_hedef_mesafe_zamani = 0.0
+        # Gercek heartbeat'ler ilk kez tetiklenmeden once panel tasarim-zamani
+        # varsayilan metinlerini gostermeye devam etmesin diye baslangicta
+        # acikca PASIF'e cekiyoruz.
         self.lidar_arayuz_guncelle(False)
+        self.imu_arayuz_guncelle(False)
+        self.mod_durum_guncelle(False, False)
         
         # --- GÜNCELLEME 1: TELEMETRİ LOGLARINI TERMINALE BAĞLA ---
         # Tuşlara basıldığında palet hız bildirimlerinin GUI terminaline düşmesi sağlandı!
@@ -267,94 +270,13 @@ class TufanGCS(QMainWindow):
         
         self.telemetri_motoru.start()
 
-    def _silah_sekmesi_olustur(self):
-        self.silah_kontrol = SilahKontrolSistemi(self)
-        self.silah_page = QWidget()
-        self.silah_page.setObjectName("page_silah")
-        self.silah_page.setStyleSheet("background-color: #111116;")
-
-        ana_layout = QVBoxLayout(self.silah_page)
-        ana_layout.setContentsMargins(40, 40, 40, 40)
-        ana_layout.setSpacing(24)
-
-        baslik = QLabel("SİLAH KONTROL")
-        baslik.setStyleSheet("color: white; font-size: 32px; font-weight: bold;")
-        baslik.setAlignment(Qt.AlignCenter)
-        ana_layout.addWidget(baslik)
-
-        aciklama = QLabel("Yön tuşlarını kullanarak silahı yönlendirin.")
-        aciklama.setStyleSheet("color: #b0b0b0; font-size: 18px;")
-        aciklama.setAlignment(Qt.AlignCenter)
-        ana_layout.addWidget(aciklama)
-
-        grid = QFrame(self.silah_page)
-        grid.setStyleSheet("background-color: transparent;")
-        grid_layout = QVBoxLayout(grid)
-        grid_layout.setSpacing(16)
-
-        satir1 = QHBoxLayout()
-        satir1.addStretch()
-        self.silah_up = QPushButton("▲")
-        self.silah_up.setFixedSize(110, 80)
-        self.silah_up.setStyleSheet("font-size: 28px; font-weight: bold; background-color: #2D2D44; color: white; border-radius: 16px;")
-        self.silah_up.pressed.connect(lambda: self.silah_kontrol.yon_bas("YUKARI"))
-        self.silah_up.released.connect(lambda: self.silah_kontrol.yon_birak("YUKARI"))
-        satir1.addWidget(self.silah_up)
-        satir1.addStretch()
-        grid_layout.addLayout(satir1)
-
-        satir2 = QHBoxLayout()
-        self.silah_left = QPushButton("◀")
-        self.silah_left.setFixedSize(110, 80)
-        self.silah_left.setStyleSheet("font-size: 28px; font-weight: bold; background-color: #2D2D44; color: white; border-radius: 16px;")
-        self.silah_left.pressed.connect(lambda: self.silah_kontrol.yon_bas("SOL"))
-        self.silah_left.released.connect(lambda: self.silah_kontrol.yon_birak("SOL"))
-        satir2.addWidget(self.silah_left)
-
-        self.silah_stop = QPushButton("●")
-        self.silah_stop.setFixedSize(110, 80)
-        self.silah_stop.setStyleSheet("font-size: 24px; font-weight: bold; background-color: #8B0000; color: white; border-radius: 16px;")
-        self.silah_stop.pressed.connect(self.silah_kontrol.dur)
-        satir2.addWidget(self.silah_stop)
-
-        self.silah_right = QPushButton("▶")
-        self.silah_right.setFixedSize(110, 80)
-        self.silah_right.setStyleSheet("font-size: 28px; font-weight: bold; background-color: #2D2D44; color: white; border-radius: 16px;")
-        self.silah_right.pressed.connect(lambda: self.silah_kontrol.yon_bas("SAG"))
-        self.silah_right.released.connect(lambda: self.silah_kontrol.yon_birak("SAG"))
-        satir2.addWidget(self.silah_right)
-        grid_layout.addLayout(satir2)
-
-        satir3 = QHBoxLayout()
-        satir3.addStretch()
-        self.silah_down = QPushButton("▼")
-        self.silah_down.setFixedSize(110, 80)
-        self.silah_down.setStyleSheet("font-size: 28px; font-weight: bold; background-color: #2D2D44; color: white; border-radius: 16px;")
-        self.silah_down.pressed.connect(lambda: self.silah_kontrol.yon_bas("ASAGI"))
-        self.silah_down.released.connect(lambda: self.silah_kontrol.yon_birak("ASAGI"))
-        satir3.addWidget(self.silah_down)
-        satir3.addStretch()
-        grid_layout.addLayout(satir3)
-
-        ana_layout.addWidget(grid)
-        ana_layout.addStretch()
-
-        self.ui.stackedWidget.addWidget(self.silah_page)
-
-        self.silah_menu_button = QPushButton("SİLAH")
-        self.silah_menu_button.setMinimumSize(148, 64)
-        self.silah_menu_button.setMaximumSize(148, 64)
-        self.silah_menu_button.setStyleSheet("QPushButton { border: none; background-color: transparent; text-align: left; padding-left: 28px; color: white; } QPushButton:hover { background-color: #2D2D44; border-left: 4px solid #00E5FF; } QPushButton:pressed { background-color: #00E5FF; }")
-        self.ui.verticalLayout_8.addWidget(self.silah_menu_button)
-
-    def _buton_baglantilarini_kur(self):    
+    def _buton_baglantilarini_kur(self):
         self.ui.home_button.clicked.connect(lambda: self.ui.stackedWidget.setCurrentIndex(0))
         self.ui.kamera_button.clicked.connect(lambda: self.ui.stackedWidget.setCurrentIndex(1))
         self.ui.navigasyon_button.clicked.connect(lambda: self.ui.stackedWidget.setCurrentIndex(2))
         self.ui.hakkinda_button.clicked.connect(lambda: self.ui.stackedWidget.setCurrentIndex(3))
         self.ui.ayarlar_button.clicked.connect(lambda: self.ui.stackedWidget.setCurrentIndex(4))
-        self.silah_menu_button.clicked.connect(lambda: self.ui.stackedWidget.setCurrentIndex(self.ui.stackedWidget.count() - 1))
-        
+
         self.ui.pushButton_bildirimler.clicked.connect(self.ayar_bildirim_tetikle)
         self.ui.pushButton_joystick.clicked.connect(self.ayar_joystick_tetikle)
         self.ui.pushButton_klavye.clicked.connect(self.ayar_klavye_tetikle)
@@ -370,6 +292,22 @@ class TufanGCS(QMainWindow):
 
         self.ui.comboBox_temaSecimi.currentIndexChanged.connect(self.tema_degistir)
         self.ui.comboBox_dilSecimi.currentTextChanged.connect(self.dil_degistir)
+
+        # Eskiden "Telefon" kutusu - kullanilmiyordu, kolay surus icin
+        # PWM ust sinir girisine cevrildi (bkz. pwm_sinirini_uygula).
+        # NOT: label_telefon.setText() normalde SADECE dil_degistir()
+        # icinde cagriliyor (dil degistirilene kadar arayuz.py'nin sabit
+        # "Telefon:" yazisi kalir) - bu yuzden ilk acilista da burada
+        # ACIKCA guncelliyoruz.
+        dil_baslangic = CEVIRILER.get(self.aktif_dil, CEVIRILER["Türkçe"])
+        self.ui.label_telefon.setText(dil_baslangic["telefon"])
+        self.ui.label_telefon.setStyleSheet(
+            "color: #FFB454; font-size: 24px; font-weight: bold; "
+            "border: none; background-color: transparent;"
+        )
+        self.ui.lineEdit_kullaniciAdi_2.setText(f"{self.telemetri_motoru.pwm_ust_sinir:.0f}")
+        self.ui.lineEdit_kullaniciAdi_2.setStyleSheet(PWM_LIMIT_VARSAYILAN)
+        self.ui.lineEdit_kullaniciAdi_2.editingFinished.connect(self.pwm_sinirini_uygula)
 
     def _kamera_tuvallerini_kur(self):
         self.aktif_kamera = 1  
@@ -434,8 +372,6 @@ class TufanGCS(QMainWindow):
     def _kamera_heartbeat_kontrol(self):
         hazir_mi = (time.time() - self.son_kamera_frame_zamani) < 1.5
         self.kamera_arayuz_guncelle(hazir_mi)
-        self.donanim_simulatör = SanalJoystickPaneli()
-        self.donanim_simulatör.durum_sinyali.connect(self.log_yaz)
 
     # --- ROS 2 LİDAR THREAD BAŞLATICI ---
     def _lidar_motoru_baslat(self):
@@ -465,11 +401,12 @@ class TufanGCS(QMainWindow):
     # ==========================================
     # ANA EKRAN TELEMETRİ GÜNCELLEME FONKSİYONLARI
     # ==========================================
-    def motor_arayuz_guncelle(self, aktif_mi):
+    def imu_arayuz_guncelle(self, aktif_mi):
+        # Eskiden "MOTORLAR" olan bu gosterge artik gercek /imu/data
+        # heartbeat'ine gore IMU durumunu gosteriyor.
         dil = getattr(self, 'current_lang', 'Türkçe')
-        baslik = "MOTORS" if dil == "English" else "MOTORLAR"
         durum = "ACTIVE" if aktif_mi else ("PASSIVE" if dil == "English" else "PASİF")
-        self.ui.label_motorYazi.setText(f"{baslik} : {durum}")
+        self.ui.label_motorYazi.setText(f"IMU : {durum}")
         self.ui.label_motorYazi.setStyleSheet(f"color: {'#00ff00' if aktif_mi else 'red'}; font-weight: bold; font-size: 24px; border: none; background-color: transparent;")
 
     def guc_arayuz_guncelle(self, normal_mi):
@@ -513,13 +450,55 @@ class TufanGCS(QMainWindow):
         self.ui.label_lidarYazi.setText(f"{baslik} : {durum}")
         self.ui.label_lidarYazi.setStyleSheet(f"color: {renk}; font-weight: bold; font-size: 24px; border: none; background-color: transparent;")
 
-    def sistem_merkez_guncelle(self, hazir_mi):
+    def hedef_mesafe_guncelle(self, mesafe):
+        self.son_hedef_mesafe = mesafe
+        self.son_hedef_mesafe_zamani = time.time()
+
+    def mod_durum_guncelle(self, otonom_hazir, manuel_hazir):
+        # Eskiden genel PASİF/AKTİF heartbeat'i gosteren "SİSTEM" gostergesi,
+        # artik aractaki Jetson'da hangi surus modunun (otonom: goal_manager
+        # heartbeat'i / manuel: arduino seri baglantisi) gercekten calisir
+        # durumda oldugunu gosteriyor. Ikisi de hazirsa aralarinda donusumlu
+        # yazi gosterir (bkz. _mod_cycle_zamanlayici).
+        self._otonom_hazir = otonom_hazir
+        self._manuel_hazir = manuel_hazir
+        if not hasattr(self, 'mod_cycle_zamanlayici'):
+            self.mod_cycle_zamanlayici = QTimer()
+            self.mod_cycle_zamanlayici.timeout.connect(self._mod_cycle_tetikle)
+            self._mod_cycle_goster_otonom = True
+
+        if otonom_hazir and manuel_hazir:
+            if not self.mod_cycle_zamanlayici.isActive():
+                self._mod_cycle_goster_otonom = True
+                self.mod_cycle_zamanlayici.start(2000)
+        else:
+            self.mod_cycle_zamanlayici.stop()
+        self._mod_metni_ciz()
+
+    def _mod_cycle_tetikle(self):
+        self._mod_cycle_goster_otonom = not self._mod_cycle_goster_otonom
+        self._mod_metni_ciz()
+
+    def _mod_metni_ciz(self):
         dil = getattr(self, 'current_lang', 'Türkçe')
         baslik = "SYSTEM" if dil == "English" else "SİSTEM"
-        # HATA yazısı yerine PASİF yapıldı:
-        durum = "READY" if hazir_mi else ("PASSIVE" if dil == "English" else "PASİF")
+        otonom_metni = "AUTONOMOUS READY" if dil == "English" else "OTONOM HAZIR"
+        manuel_metni = "MANUAL READY" if dil == "English" else "MANUEL HAZIR"
+
+        if self._otonom_hazir and self._manuel_hazir:
+            if self._mod_cycle_goster_otonom:
+                durum, renk = otonom_metni, "#00AAFF"
+            else:
+                durum, renk = manuel_metni, "#00ff00"
+        elif self._otonom_hazir:
+            durum, renk = otonom_metni, "#00AAFF"
+        elif self._manuel_hazir:
+            durum, renk = manuel_metni, "#00ff00"
+        else:
+            durum, renk = ("PASSIVE" if dil == "English" else "PASİF"), "red"
+
         self.ui.label_sistemYazi.setText(f"{baslik} : {durum}")
-        self.ui.label_sistemYazi.setStyleSheet(f"color: {'#00ff00' if hazir_mi else 'red'}; font-weight: bold;")
+        self.ui.label_sistemYazi.setStyleSheet(f"color: {renk}; font-weight: bold;")
 
     def manuel_sec(self):
         self.ui.pushButton_manuel.setStyleSheet(MOD_AKTIF)
@@ -731,17 +710,19 @@ class TufanGCS(QMainWindow):
 
         try:
             m_metin = self.ui.label_motorYazi.text().upper()
-            self.motor_arayuz_guncelle("AKTİF" in m_metin or "ACTIVE" in m_metin)
+            self.imu_arayuz_guncelle("AKTİF" in m_metin or "ACTIVE" in m_metin)
             g_metin = self.ui.label_GucYazi.text().upper()
             self.guc_arayuz_guncelle("NORMAL" in g_metin)
             gps_metin = self.ui.label_gpsYazi.text().upper()
             self.gps_arayuz_guncelle("ETKİN" in gps_metin or "ACTIVE" in gps_metin)
             k_metin = self.ui.label_kameraYazi.text().upper()
             self.kamera_arayuz_guncelle("HAZIR" in k_metin or "READY" in k_metin)
-            l_metin = self.ui.label_lidarYazi.text()
-            self.lidar_arayuz_guncelle(l_metin) 
-            s_metin = self.ui.label_sistemYazi.text().upper()
-            self.sistem_merkez_guncelle("HAZIR" in s_metin or "READY" in s_metin)
+            l_metin = self.ui.label_lidarYazi.text().upper()
+            self.lidar_arayuz_guncelle("TARANIYOR" in l_metin or "SCANNING" in l_metin)
+            # Otonom/manuel: metni geri ayristirmak yerine son bilinen gercek
+            # durumu kullaniyoruz (daha guvenilir) -- yoksa dil metniyle esler.
+            self.mod_durum_guncelle(getattr(self, '_otonom_hazir', False),
+                                     getattr(self, '_manuel_hazir', False))
         except Exception as e:
             print(f"Dil Güncelleme Hatası (Ana Sayfa): {e}")
 
@@ -806,9 +787,19 @@ class TufanGCS(QMainWindow):
         if goruntu_sozlugu.get(1) is not None:
             self.son_kamera_frame_zamani = time.time()
         try:
-            pix1 = self.resmi_yuvarla(goruntu_sozlugu.get(1), 48, self.kamera_yazi_on)
-            pix2 = self.resmi_yuvarla(goruntu_sozlugu.get(2), 48, self.kamera_yazi_arka)
-            pix3 = self.resmi_yuvarla(goruntu_sozlugu.get(3), 48, self.kamera_yazi_silah)
+            # kamera_sistemi.py gercek silah/turret karesini anahtar 1'e,
+            # TABELA karesini anahtar 2'ye koyuyor. Tabela tespiti ON kameradan
+            # yapiliyor (silah/arka ile alakasi yok) - o yuzden anahtar 2 ON
+            # kutusunda gosteriliyor. ARKA kamera donanimi henuz baglanmadi,
+            # gercek donanim eklenene kadar bos kalsin.
+            mesafe_canli_mi = (time.time() - self.son_hedef_mesafe_zamani) < 1.0
+            if mesafe_canli_mi and self.son_hedef_mesafe is not None:
+                silah_etiketi = f"{self.kamera_yazi_silah}  {self.son_hedef_mesafe:.1f}m"
+            else:
+                silah_etiketi = self.kamera_yazi_silah
+            pix1 = self.resmi_yuvarla(goruntu_sozlugu.get(1), 48, silah_etiketi)
+            pix2 = self.resmi_yuvarla(goruntu_sozlugu.get(2), 48, self.kamera_yazi_on)
+            pix3 = self.resmi_yuvarla(None, 48, self.kamera_yazi_arka)
 
             if not pix1.isNull(): self.tuval_sag1.setPixmap(pix1)
             if not pix2.isNull(): self.tuval_sag2.setPixmap(pix2)
@@ -821,6 +812,54 @@ class TufanGCS(QMainWindow):
                     self.tuval_ana.setPixmap(buyuk_pix)
         except Exception as e:
             print(f"Çizim Hatası Detayı: {e}")
+
+    def pwm_sinirini_uygula(self):
+        # Eskiden "Telefon" kutusu - artik kolay surus icin PWM ust
+        # sinirini (85-255) burada giriyoruz. editingFinished hem Enter'a
+        # hem odaktan cikisa tepki verir; QMessageBox modal oldugu icin
+        # tekrar tetiklenmeyi onlemek icin basit bir kilit kullaniyoruz.
+        if getattr(self, '_pwm_sinir_isliyor', False):
+            return
+        kutu = self.ui.lineEdit_kullaniciAdi_2
+        metin = kutu.text().strip()
+        if not metin:
+            return
+
+        try:
+            deger = float(metin)
+        except ValueError:
+            QMessageBox.warning(self, "Geçersiz Değer", "Geçersiz sayı. 85 ile 255 arasında bir değer girin.")
+            kutu.clear()
+            kutu.setStyleSheet(PWM_LIMIT_VARSAYILAN)
+            return
+
+        if deger < 85 or deger > 255:
+            QMessageBox.warning(self, "Geçersiz Değer", "PWM üst sınırı 85 ile 255 arasında olmalı.")
+            kutu.clear()
+            kutu.setStyleSheet(PWM_LIMIT_VARSAYILAN)
+            return
+
+        self._pwm_sinir_isliyor = True
+        try:
+            onay = QMessageBox.question(
+                self, "PWM Üst Sınırı",
+                f"PWM üst sınırı {deger:.0f} olarak ayarlanacak.\n"
+                f"(Alt sınır her zaman 85 sabit kalır — motorlar altında dönmüyor.)\n\n"
+                f"Onaylıyor musunuz?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
+            )
+            if onay == QMessageBox.Yes:
+                if hasattr(self, 'telemetri_motoru'):
+                    uygulanan = self.telemetri_motoru.pwm_ust_sinirini_ayarla(deger)
+                else:
+                    uygulanan = deger
+                kutu.setText(f"{uygulanan:.0f}")
+                kutu.setStyleSheet(PWM_LIMIT_AKTIF)
+            else:
+                kutu.clear()
+                kutu.setStyleSheet(PWM_LIMIT_VARSAYILAN)
+        finally:
+            self._pwm_sinir_isliyor = False
 
     def ayar_bildirim_tetikle(self):
         dil = CEVIRILER.get(self.aktif_dil, CEVIRILER["Türkçe"])
@@ -850,17 +889,29 @@ class TufanGCS(QMainWindow):
         dil = CEVIRILER.get(self.aktif_dil, CEVIRILER["Türkçe"])
         self.joystick_bagli = not getattr(self, 'joystick_bagli', False)
         if self.joystick_bagli:
-            self.donanim_simulatör.show()
             self.ui.pushButton_joystick.setStyleSheet(AYAR_AKTIF)
             self.ui.pushButton_joystick.setText(dil["btn_bagli"])
             self.log_yaz("Donanım: USB Joystick portları taranıyor...")
-            if hasattr(self, 'telemetri_motoru'): self.telemetri_motoru.surus_kaynagi = "JOYSTICK" 
+            if hasattr(self, 'telemetri_motoru'): self.telemetri_motoru.surus_kaynagi = "JOYSTICK"
+            if not hasattr(self, 'surus_joystick_motoru'):
+                self.surus_joystick_motoru = SurusJoystickThread()
+                self.surus_joystick_motoru.pwm_sinyali.connect(self.joystick_pwm_geldi)
+                self.surus_joystick_motoru.baglanti_sinyali.connect(self.joystick_baglanti_degisti)
+            self.surus_joystick_motoru.start()
         else:
-            self.donanim_simulatör.hide()
             self.ui.pushButton_joystick.setStyleSheet(AYAR_PASIF)
-            self.ui.pushButton_joystick.setText(dil["btn_baglantiyok"]) 
+            self.ui.pushButton_joystick.setText(dil["btn_baglantiyok"])
             self.log_yaz("Donanım: Joystick bağlantısı YAZILIMSAL OLARAK KESİLDİ.")
             if hasattr(self, 'telemetri_motoru'): self.telemetri_motoru.surus_kaynagi = "KLAVYE"
+            if hasattr(self, 'surus_joystick_motoru'):
+                self.surus_joystick_motoru.durdur()
+
+    def joystick_pwm_geldi(self, sol_pwm, sag_pwm):
+        if hasattr(self, 'telemetri_motoru'):
+            self.telemetri_motoru.joystick_pwm_gonder(sol_pwm, sag_pwm)
+
+    def joystick_baglanti_degisti(self, bagli):
+        self.log_yaz("🕹️ Joystick Arduino bağlandı." if bagli else "⚠️ Joystick Arduino bağlantısı yok/koptu.")
 
     def sayfa_odak_ayarla(self, index):
         if index in [0, 1, 2]:

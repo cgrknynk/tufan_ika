@@ -26,6 +26,9 @@ from PyQt5.QtWidgets import QTextEdit
 import pyte
 
 VARSAYILAN_KULLANICI = "arf203"
+# Ubiquiti su an port ayarlari yapildigi icin bagli degil - araclar WiFi
+# uzerinden baglilar, o yuzden WiFi IP'si kullaniliyor. Ubiquiti tekrar
+# aktif olunca 192.168.1.22'ye geri donulebilir.
 VARSAYILAN_HOST = "10.40.64.43"
 BASLANGIC_DIZINI = "~/Desktop/tufan_v2_ws"
 
@@ -155,8 +158,14 @@ class SshTerminalWidget(QTextEdit):
             # (bkz. baglantiyi_kapat) o oturumdaki komutlar kaybolurdu. Bu
             # sayede yazilan komutlar bir sonraki baglantida (yukari ok /
             # gecmis) hala goruntur.
+            # NOT: eskiden baglanir baglanmaz /palet_hizlari canli akmaya
+            # baslardi - kullanici isteği ile bu kaldirildi, artik sadece
+            # normal, bagli bir terminal prompt'u geliyor. Canli PWM akisi
+            # istege bagli: sol bardaki PWM butonuna basinca (main.py -
+            # _pwm_akisini_goster) tetiklenir (bkz. pwm_akisina_don()).
             os.write(self._master_fd,
-                     f"export PROMPT_COMMAND='history -a'; cd {BASLANGIC_DIZINI} && clear\r".encode())
+                     f"export PROMPT_COMMAND='history -a'; cd {BASLANGIC_DIZINI} && clear && "
+                     f"source /opt/ros/humble/setup.bash\r".encode())
         except OSError:
             pass
 
@@ -314,6 +323,22 @@ class SshTerminalWidget(QTextEdit):
         Qt.Key_Return: b"\r",
         Qt.Key_Enter: b"\r",
     }
+
+    # Kullanicinin Ctrl+C ile canli PWM akisindan cikip baska bir komut
+    # calistirdiktan sonra, butun komutu elle yeniden yazmadan tek tikla
+    # akisa geri donebilmesi icin (bkz. main.py - sol bardaki PWM butonu).
+    _PWM_AKISINA_DON_KOMUTU = b"ros2 topic echo /palet_hizlari\r"
+
+    def pwm_akisina_don(self):
+        """Ne yaziliyor/calisiyor olursa olsun (once Ctrl+C ile keserek)
+        canli /palet_hizlari akisina geri doner."""
+        if self._master_fd is None:
+            return
+        try:
+            os.write(self._master_fd, b"\x03")
+            os.write(self._master_fd, self._PWM_AKISINA_DON_KOMUTU)
+        except OSError:
+            pass
 
     def keyPressEvent(self, event):
         if self._master_fd is None:

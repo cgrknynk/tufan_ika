@@ -432,11 +432,11 @@ kamera_sistemi.py          UDP JPEG kamera alıcısı (silah/turret + tabela kan
 uydu_harita_widget.py      Esri uydu görüntüsü tabanlı harita widget'ı (ArduPilot/Mission Planner tarzı)
 terminal_widget.py         Gömülü gerçek SSH terminali (pyte + pty)
 surus_joystick_sistemi.py  Fiziksel joystick Arduino'sundan PWM üretimi
+ntrip_rtk_sistemi.py       NTRIP (Swift Navigation Skylark) -> mavros RTCM köprüsü (Cube/ArduPilot RTK düzeltmesi)
 arayuz.py                  pyuic5 ile OTOMATİK ÜRETİLMİŞ statik UI düzeni (elle DÜZENLENMEZ)
 kaynak_rc.py                pyrcc5 ile OTOMATİK ÜRETİLMİŞ, ikon/görsel ikili verisi
 stiller.py                  Qt Style Sheet (CSS benzeri) tanımları - buton renk/durum stilleri
 diller.py                   Türkçe/İngilizce arayüz metinleri (i18n sözlüğü)
-turret_cmd_listener.py      (Kullanılmıyor / eski) /turret_cmd_vel dinleyip Arduino'ya ileten test scripti
 ```
 
 ## 5. Görsel Gösterim Mekanizmaları
@@ -546,9 +546,85 @@ gecikmeyi önceliklendiren basit, bağlantısız bir protokol.
 
 ### 6.4 SSH
 
-`terminal_widget.py`, `arf203@10.40.64.43`'e otomatik bağlanır, proje
+`terminal_widget.py`, araç Jetson'a (`VARSAYILAN_HOST`, `terminal_widget.py:29`
+— ağ topolojisine göre değişebilir, örn. Ubiquiti üzerinden `192.168.1.22`
+veya doğrudan WiFi üzerinden `10.40.64.43`) otomatik bağlanır, proje
 klasörüne (`~/Desktop/tufan_v2_ws`) `cd` yapar — araç Jetson'a hiç monitör
 bağlanmadığı için TÜM komut satırı erişimi buradan sağlanır.
+
+### 6.5 mavros (Cube/ArduPilot) ve NTRIP/RTK köprüsü
+
+Araç Jetson'a **USB ile bağlı bir Cube (ArduPilot çalıştıran uçuş
+kontrolcüsü)** eklendi. Araç tarafında `mavros_node` çalışıyor
+(`fcu_url:=/dev/ttyACM0:57600`) ve **`/mavros/global_position/global`
+topic'i `/fix`'e yeniden adlandırılmış** durumda (launch parametresi:
+`-r /mavros/global_position/global:=/fix`) — yani arayüzün zaten var olan
+`/fix` tabanlı GNSS boru hattı (bkz. §6.1, §5.3, §5.5) hiçbir kod
+değişikliği gerekmeden gerçek Cube GPS verisiyle çalışır.
+
+**RTK düzeltmesi gönderimi** (`ntrip_rtk_sistemi.py`): arayüz Jetson,
+internet üzerinden **Swift Navigation Skylark** NTRIP caster'ına
+(`eu.l1l5.skylark.swiftnav.com:2101`, mountpoint `NXRTK-MSM5`) bağlanıp
+RTCM3 düzeltme baytlarını indirir, `mavros_msgs/RTCM` mesajına sarıp
+`/mavros/gps_rtk/send_rtcm` topic'ine yayınlar; mavros bunu otomatik
+olarak MAVLink `GPS_RTCM_DATA` ile Cube'a, oradan DroneCAN üzerinden
+Here4'e iletir. TUSAGA-Aktif'in ıslak imzalı kurumsal başvuru süreci
+yerine tercih edildi (öğrenci/yarışma zaman kısıtı). **Canlı test edildi
+(2026-08-28):** 18 saniyede
+90 RTCM mesajı / 13.181 bayt gerçek Skylark akışından `/mavros/gps_rtk/
+send_rtcm`'e başarıyla iletildi, GGA gerçek araç `/fix` konumunu (o an
+38.7082, 35.5195 civarı) doğru kullandı.
+
+- Kendi izole ROS2 node'unda çalışır (`tufan_ntrip_rtk_koprusu`) — diğer
+  hiçbir abonelik/yayınla aynı node'u paylaşmaz (bkz. §2'deki DDS
+  izolasyon dersi). Node ayrıca **doğrudan `/fix`'e abone olur**
+  (`_gps_callback`, `ARAC_GPS_TOPIC`) — arayüz Jetson'da GPS olmadığı
+  için GGA'daki konum, araç Jetson'un mavros'unun cross-machine ROS2
+  discovery ile yayınladığı gerçek konumdan okunur; ilk bağlantı anında
+  henüz veri gelmemişse geçici bir yer tutucu (Ankara civarı) kullanılır.
+- **GGA gönderimi 1Hz'de** (`GGA_GONDERIM_ARALIGI_SN = 1.0`) — bu
+  mountpoint konum tabanlı (MSM5) çalıştığından 10sn'de bir yeterli
+  değil, akışı zayıflatıyor/kesiyor (canlı test edilerek doğrulandı).
+- **Mesaj başına en fazla 700 bayt** (`MAKS_PARCA_BOYUTU`) — mavros'un
+  `gps_rtk` eklentisi `mavros_msgs/RTCM.data`'da 720 baytın (4×180,
+  MAVLink `GPS_RTCM_DATA` parçalama sınırı) üzerini **sessizce** atıyor
+  (hata vermiyor, sadece kayboluyor); Skylark bazen tek `recv()`'de
+  700+ baytlık parçalar gönderdiği için bu sınır gerçekten devreye
+  giriyor (canlı testte `max_mesaj_boyutu=700` gözlendi).
+- **İstek formatı PointOneNav referans istemcisinden doğrulanmış,
+  Skylark'a özel:** `GET /<mountpoint> HTTP/1.0` + `User-Agent` + `Accept`
+  + `Authorization: Basic` başlıkları, **`Host`/`Ntrip-Version`/
+  `Connection` başlıkları YOK** — farklı bir sıra/başlık seti
+  denenmemeli.
+- **Yanıt iki farklı biçimde gelebilir** ve ikisi de ele alınıyor:
+  NTRIP v1/ICY tarzı `ICY 200 OK\r\n` (TEK CRLF, hemen ardından binary
+  RTCM — ikinci bir `\r\n\r\n` beklemek sonsuza kadar takılmaya sebep
+  olurdu, bu yüzden `_ntrip_baglan` özel olarak bu tek-satır durumunu
+  ayrıca kontrol ediyor) **veya** standart `HTTP/1.x 200 OK` + başlık
+  bloğu (`\r\n\r\n` ile biter). HTTP durumunda `Transfer-Encoding:
+  chunked` olabiliyor — `_ParcaliCozucu` sınıfı bunu soket akışından
+  çözüyor (chunk uzunluk satırları + `\r\n` ayraçları RTCM verisine
+  karışmasın diye); bu sınıfın parça-sonu `\r\n`'i besle() çağrıları
+  arası bölünürse kilitlenen bir hatası bulunup düzeltildi (durum
+  bayrağıyla, `_kuyrukta_crlf_bekleniyor`).
+- **Yeniden bağlanma sadece gerçekten uzun süre (75sn, `STALE_ESIK_SN`)
+  veri gelmezse tetiklenir** — kısa `recv()` zaman aşımları normal
+  kabul edilir; çok agresif "stale" tespiti alıcının RTK Fixed'e
+  kilitlenme sürecini sürekli sıfırlıyor (bu yüzden bilinçli olarak
+  toleranslı tutuldu).
+- **Tek bağlantı kuralı:** Skylark hesabıyla aynı anda sadece BİR
+  bağlantı açılabilir — ikinci bir bağlantı (test scripti, ikinci
+  `main.py` instance'ı vb.) sunucu tarafından "DUPLICATE" olarak
+  kapatılabilir. `main.py`'yi yeniden başlatmadan/test etmeden önce
+  önceki instance'ın gerçekten kapandığından emin olunmalı
+  (`ps aux | grep main.py`).
+- `mavros_msgs` paketi bu makinede **apt ile `/opt/ros/humble`'a**
+  kurulu (kaynak-derlenmiş `~/ros2_humble` içinde değil) — bu yüzden bu
+  bileşeni çalıştırırken/geliştirirken **her iki ROS2 kurulumu da art
+  arda source edilmeli**: `source ~/ros2_humble/install/setup.bash &&
+  source /opt/ros/humble/setup.bash` (bu sırayla `rclpy` yine
+  kaynak-derlenmiş sürümden gelir, sadece eksik mesaj paketleri
+  `/opt/ros/humble`'dan tamamlanır).
 
 ## 7. Manuel Sürüş ve Güvenlik Mekanizmaları
 
@@ -562,12 +638,148 @@ bağlanmadığı için TÜM komut satırı erişimi buradan sağlanır.
 - **Joystick kalibrasyonu**: bağlantı kurulduğunda ilk ~0.5 saniye (25
   örnek) joystick'e dokunulmadığı varsayılıp gerçek elektriksel merkez
   otomatik ölçülür (bazı joystick modüllerinde merkez tam 512 olmayabiliyor,
-  sabit 512 varsayımı yanlış komut üretebilirdi).
+  sabit 512 varsayımı yanlış komut üretebilirdi). Sürüş sırasında da
+  sürekli oto-merkezleme çalışır (`surus_joystick_sistemi.py`), X ve Y
+  eksenleri **birbirinden bağımsız** kontrol edilir — eskiden ikisi birden
+  aynı anda sabit olmadıkça hiçbiri düzelmiyordu; sürüş titreşimi bir
+  eksende sürekli küçük gürültü yaratırsa diğeri gerçekten kaymış olsa
+  bile hiçbir zaman düzelemiyordu (canlı bildirilen "joystick hareketsizken
+  aracın durmaması" hatasının kök nedeni — watchdog bunu yakalayamaz,
+  çünkü joystick veri göndermeye devam eder, sadece merkezi yanlıştır).
+  Ayrıca `MAKS_MERKEZ_KAYMASI` (düzeltme kabul sınırı) `ADC_OLU_BOLGE`
+  (ölü bölge) ile AYNI değerde (60) olduğu için düzeltilmesi gereken her
+  kayma (>60) otomatik olarak düzeltme sınırının da dışında kalıyordu —
+  hiçbir zaman düzeltilemiyordu; artık 150'ye çıkarıldı (gerçekçi kaymayı
+  kapsar, tam itilmeden — ~400+ birim — hâlâ açıkça ayrışır).
+- **Klavye/joystick geçişinde odak (focus) kaybı**: `ayar_klavye_tetikle()`
+  ve `ayar_joystick_tetikle()` butonlarına tıklamak Qt odağını o butonda
+  bırakıyordu, `keyPressEvent` de odak ana pencerede değilse tuşları hiç
+  almıyordu — "joystick kapatıp klavye açtığımda süremiyorum" olarak canlı
+  bildirildi. İkisi de artık sonunda `self.setFocus()` çağırıyor; ayrıca
+  joystick kapatıldığında `surus_kaynagi` KLAVYE'ye dönerken klavye ayrıca
+  kapalıysa otomatik açılıyor.
 - **Mod bazlı erişim**: klavye/joystick komutları sadece `arac_modu ==
   "MANUEL"` iken etkilidir; OTONOM modda `surus_koprusu.py` (araç tarafı)
   Nav2 çıktısını `/palet_hizlari`'a çevirir, arayüz sessiz kalır.
 
-## 8. Bilinen Sınırlamalar / Gelecek İşler
+## 8. Dashboard Gösterge Referansı
+
+Ana ekrandaki her göstergenin **hangi veriden**, **nasıl bir mantıkla**
+tetiklendiği ve **kodun neresinde** olduğu. Her satır: *sinyal kaynağı
+(veri nereden geliyor) → arayüz fonksiyonu (nasıl çiziliyor)*.
+
+> **KURAL**: Bu bölüm, gösterge/veri akışı mantığını etkileyen her
+> değişiklikte (yeni gösterge, eşik değeri değişimi, kaynak değişimi vb.)
+> güncellenmelidir — hem bu dosyada hem GitHub'a giden repo kopyasında.
+
+### İMU
+
+| | |
+|---|---|
+| **Ne gösterir** | `/imu/data` (bno055) heartbeat'i — IMU verisi gerçekten geliyor mu |
+| **Eşik** | 1.0 saniye içinde veri gelmezse PASİF |
+| **Veri kaynağı** | `telemetri_sistemi.py:205` `imu_heartbeat_cb()` → zaman damgası günceller; asıl karar `telemetri_sistemi.py:301-304` `surekli_yayin_dongusu()` içinde (`imu_canli_mi = (time.time() - son_imu_zamani) < 1.0`) → `imu_durum_sinyali` sinyali |
+| **Arayüz çizimi** | `main.py:326` `imu_arayuz_guncelle(aktif_mi)` — yeşil "IMU : ACTIVE/AKTİF" veya kırmızı "PASİF" |
+| **Bağlantı** | `main.py:191` `telemetri_motoru.imu_durum_sinyali.connect(self.imu_arayuz_guncelle)` |
+
+### SİSTEM (OTONOM HAZIR / MANUEL HAZIR)
+
+| | |
+|---|---|
+| **Ne gösterir** | Araç Jetson'da otonom yığın (Nav2/goal_manager) ve/veya manuel sürüş köprüsü (Arduino) çalışıyor mu |
+| **Eşik** | Otonom: `/goal_manager_heartbeat` 3.0 saniye içinde gelmişse hazır. Manuel: `/arduino_baglanti_durumu` son gelen değer (seri port açık mı) |
+| **Veri kaynağı** | `telemetri_sistemi.py:210` `otonom_heartbeat_cb()`, `telemetri_sistemi.py:191` `motor_durum_cb()` → `telemetri_sistemi.py:286-290` `surekli_yayin_dongusu()` içinde `mod_durum_sinyali(otonom_hazir, manuel_hazir)` |
+| **Arayüz çizimi** | `main.py:381` `mod_durum_guncelle()` + `main.py:406` `_mod_metni_ciz()` — ikisi de hazırsa 2 saniyede bir "OTONOM HAZIR" (mavi `#00AAFF`) / "MANUEL HAZIR" (yeşil `#00ff00`) arasında dönüşümlü; hiçbiri değilse kırmızı "PASİF" |
+| **Font** | `main.py:406-424` `_sistem_yazisini_sigdir()` — metin uzunluğuna göre 32px'ten 14px'e kadar otomatik küçülen font (kutuya taşmasın diye) |
+
+### LİDAR
+
+| | |
+|---|---|
+| **Ne gösterir** | `/scan` heartbeat'i — LiDAR verisi gerçekten geliyor mu |
+| **Eşik** | 1.0 saniye |
+| **Veri kaynağı** | `telemetri_sistemi.py:199` `scan_heartbeat_cb()` → `telemetri_sistemi.py:293-297` `surekli_yayin_dongusu()` → `lidar_durum_sinyali` |
+| **Arayüz çizimi** | `main.py:365` `lidar_arayuz_guncelle()` — aktifken mavi "TARANIYOR...", pasifken kırmızı "PASİF" |
+| **Not** | Ana menüdeki dekoratif dönen radar çemberi (`main.py` `radar_cizimi_Guncelle`) BİLEREK gerçek LiDAR verisi çizmez — gerçek nokta bulutu sadece Navigasyon → TAKTİK LİDAR sekmesinde |
+
+### UBIQUITI (eski "WIFI")
+
+| | |
+|---|---|
+| **Ne gösterir** | Artık gerçek WiFi değil — araçla arayüz arasındaki Ubiquiti nokta-nokta kablosuz köprünün bağlantı kalitesi |
+| **Ölçüm yöntemi** | Her 3 saniyede bir araç Jetson'a (`UBIQUITI_LINK_HEDEF_IP`, `telemetri_sistemi.py:38`) 5 hızlı ping gönderilir, başarı yüzdesi hesaplanır (radyonun kendi yönetim IP'si ICMP'yi engellediği için doğrudan araç hedef alınıyor) |
+| **Veri kaynağı** | `telemetri_sistemi.py:224-230` `_wifi_kontrol_dongusu()` (ROS2'den bağımsız ayrı thread) → `telemetri_sistemi.py:232-247` `_wifi_kontrol()` → `wifi_durum_sinyali` |
+| **Arayüz çizimi** | `main.py:347` `wifi_arayuz_guncelle()` — "UBIQUITI : %XX", >%60 yeşil, %30-60 turuncu, <%30 kırmızı |
+| **Neden ayrı thread** | Ping bloklayıcı olabilir; ROS2 executor'ı içinde çalıştırılırsa (eskiden `nmcli` için olduğu gibi) `/palet_hizlari` dahil tüm yayın periyodik olarak birkaç saniyeliğine durur — canlı ölçümle doğrulanmış bir sorun |
+
+### KAMERA
+
+| | |
+|---|---|
+| **Ne gösterir** | Silah/turret kamerasından (UDP :5000) gerçekten kare gelip gelmediği |
+| **Eşik** | 1.5 saniye |
+| **Veri kaynağı** | `main.py:725-732` `video_ekrana_bas()` her karede `son_kamera_frame_zamani` günceller → `main.py:313-315` `_kamera_heartbeat_kontrol()` (500ms zamanlayıcı) |
+| **Arayüz çizimi** | `main.py:358` `kamera_arayuz_guncelle()` — hazırsa yeşil "KAMERA : READY/HAZIR", değilse kırmızı "BAĞLANTI KOPTU" |
+
+### SİLAH kamerası + hedef mesafesi
+
+| | |
+|---|---|
+| **Ne gösterir** | Silah/turret kamerasının küçük önizleme kutusu, üzerinde TF02-Pro lidar'dan gelen hedef mesafesi |
+| **Kanal eşlemesi** | `kamera_sistemi.py`'nin UDP :5000'den aldığı kare her zaman anahtar `1`'e denk gelir → `main.py:741` `pix1 = resmi_yuvarla(goruntu_sozlugu.get(1), ...)` |
+| **Mesafe verisi** | `/turret_hedef_mesafe` (Float32) → `telemetri_sistemi.py:216` `hedef_mesafe_cb()` → `main.py:377` `hedef_mesafe_guncelle()`; 1.0 saniyeden eskiyse (`main.py:736`) sadece "SİLAH" yazısına döner, mesafe göstermez |
+| **Sayfa bazlı optimizasyon** | `main.py:725-733` — Kamera sayfası (indeks 1) aktif değilken bu çizim tamamen atlanır, sadece kalp atışı zaman damgası güncellenir (performans, bkz. §Bilinen Sınırlamalar altındaki mimari notu) |
+
+### GÜÇ SİSTEMİ ve GPS (eski, statik göstergeler)
+
+| | |
+|---|---|
+| **Durum** | `main.py:334` `guc_arayuz_guncelle()` ve `main.py:341` `gps_arayuz_guncelle()` fonksiyonları hazır, `telemetri_sistemi.py:47-48`'de `guc_durum_sinyali`/`gps_durum_sinyali` sinyalleri tanımlı — ama hiçbir yerde `.emit()` edilmiyor. Tasarım zamanındaki sabit metinde donuk kalıyor, gerçek veriyle beslenmiyor |
+| **Not** | Bu bilerek dokunulmamış alanlar (kullanıcı isteğiyle önceki oturumlarda kapsam dışı bırakıldı). Gerçek GNSS konumu bu göstergeyle KARIŞTIRILMASIN — asıl GNSS verisi Navigasyon ekranındaki UYDU HARİTASI ve (artık) TAKTİK LİDAR sekmelerinde gösteriliyor (bkz. §Görsel Gösterim Mekanizmaları) |
+
+### Hız / Batarya (araç, yer)
+
+| | |
+|---|---|
+| **Hız** | `/odom` (`twist.linear.x`) → `telemetri_sistemi.py:178` `odom_cb()` → `hiz_sinyali` → `main.py:187` doğrudan `label_hizYazi.setText` |
+| **Batarya** | `/arac_batarya` (gerçek karşılığı yok, bkz. §Veri Kanalları notu) → `batarya_sinyali` → `main.py:188` `arac_batarya_renklendir` |
+
+### Canlı Sistem Logları (Ayarlar sayfası)
+
+| | |
+|---|---|
+| **Ne gösterir** | Uygulamanın kendi iç olayları — mod değişimi, joystick kalibrasyonu, PWM sınırı onayı, bağlantı durumları vb. (ham ROS2 verisi DEĞİL) |
+| **Eskiden** | Bu kutu (`textEdit_canliSistemLog`) tamamen kullanılmıyordu; `log_yaz()` ana ekrandaki terminale yazıyordu ama terminal artık gerçek bir SSH oturumu olduğu için o yazılar hiçbir yerde görünmüyordu (sadece konsola düşüyordu) |
+| **Şimdi** | `main.py:115-127` `log_yaz()` — zaman damgalı satırı hem konsola hem `textEdit_canliSistemLog`'a yazar; kutu 500 satırı geçerse eskiler otomatik silinir (uzun oturumlarda sınırsız büyümesin diye) |
+
+### Terminal (ana ekran, sol alt)
+
+| | |
+|---|---|
+| **Ne gösterir** | Araç Jetson'a gerçek SSH oturumu; bağlanır bağlanmaz normal, bağlı bir terminal prompt'u gelir (eskiden otomatik PWM akışı başlıyordu, kullanıcı isteğiyle kaldırıldı — artık isteğe bağlı) |
+| **Konum** | `terminal_widget.py` `_proje_dizinine_gec()` — sadece `cd` + `source` (ROS2) otomatik komutu |
+| **Canlı PWM akışını göster** | Sol bardaki, ACİL DURDUR'un hemen üstündeki nabız/sinyal ikonlu buton (`main.py` `_pwm_izleme_butonu_ekle()`, `pushButton_pwmIzle`) — tıklanınca ana ekrana geçer ve `terminal_ekrani.pwm_akisina_don()`'u çağırır: önce Ctrl+C ile o an çalışan/yazılmakta olanı keser, sonra `ros2 topic echo /palet_hizlari`'ı başlatır. İkon, mevcut SVG ikonlarla aynı renkte (`#00E5FF`) `QPainter` ile çiziliyor (yeni bir kaynak/SVG dosyasına gerek kalmadan — `arayuz.py` otomatik üretim olduğu için elle düzenlenmiyor) |
+| **Normal komut yazma** | Ctrl+C ile akışı durdurup normal komut satırına dönülebilir |
+| **Komut geçmişi** | `PROMPT_COMMAND='history -a'` sayesinde ani bağlantı kopmasında bile `~/.bash_history`'e anında yazılır |
+
+### PWM Hız Sınırı kutusu (Ayarlar sayfası, eski "Telefon" kutusu)
+
+| | |
+|---|---|
+| **Ne yapar** | Kolay sürüş için üst PWM sınırını (85-255 arası, alt sınır sabit 85) canlı ayarlar; hem klavye hem joystick bu sınıra uyar |
+| **Konum** | `main.py:277-283` (kurulum, her zaman kehribar renginde — diğer kutulardan bilerek farklı), `main.py:763-807` `pwm_sinirini_uygula()` (doğrulama + onay penceresi + `telemetri_motoru.pwm_ust_sinirini_ayarla()`) |
+| **Mantık** | `telemetri_sistemi.py:262-280` `pwm_ust_sinirini_ayarla()` / `_pwm_olcekle()` — deadzone-telafili ölçekleme: `oran=0` → PWM 0, `abs(oran)>0` → en az 85, `abs(oran)=1` → güncel üst sınır |
+| **Düzeltme** | `editingFinished` odak KAYBINDA da tetikleniyor; kutuda onaylanmış bir değer dururken (başarılı onaydan sonra kutu temizlenmiyor) başka bir yere (örn. kapatma butonuna) tıklamak odağı kaçırıp AYNI değeri tekrar tekrar onaya sokuyordu — `_pwm_son_uygulanan_metin` ile değer değişmediyse tekrar sorulmuyor artık |
+
+### Joystick butonu (Ayarlar sayfası)
+
+| | |
+|---|---|
+| **Ne yapar** | Sürüş kaynağını klavye ↔ fiziksel joystick arasında değiştirir (aynı anda sadece biri `/palet_hizlari`'a yazabilir) |
+| **Konum** | `main.py:835-857` `ayar_joystick_tetikle()` — `SurusJoystickThread` başlatma/durdurma, `telemetri_motoru.surus_kaynagi` ayarı |
+| **Kalibrasyon** | `surus_joystick_sistemi.py` — bağlantıda ilk 0.5sn ölçüm + sürekli oto-merkezleme (sadece mevcut merkeze yakın küçük kaymalar kabul edilir, tam itilmiş bir konum asla merkez sanılmaz — 300kg araç güvenliği için) |
+
+## 9. Bilinen Sınırlamalar / Gelecek İşler
 
 - Uydu harita disk önbelleği (`~/.cache/tufan_harita_tiles/`) süresiz
   saklanıyor, otomatik yenilenmiyor — Esri görüntüyü güncellese bile eski

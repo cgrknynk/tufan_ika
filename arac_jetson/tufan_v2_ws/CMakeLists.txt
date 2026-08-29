@@ -34,6 +34,8 @@ install(PROGRAMS
   src/nav2_cmd_vel_gate.py
   src/send_goal.py
   src/scan_matcher_filter.py
+  src/fix_qos_bridge.py
+  src/gps_hedef_donusturucu.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

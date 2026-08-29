@@ -48,6 +48,13 @@ class UyduHaritaWidget(QWidget):
         self.yon_derece = 0.0
         self.iz_noktalari = []   # [(lat, lon), ...] kat edilen yol
 
+        # IMU ve LiDAR - kullanicinin istegi uzerine, taktik lidar ekranindaki
+        # gibi bu ekranda da (uydu goruntusu uzerinde, gercek konuma gore
+        # bindirilmis olarak) gorunsun diye eklendi.
+        self.roll = 0.0
+        self.pitch = 0.0
+        self.lidar_noktalari = []   # [(ileri_m, sol_m), ...] arac govde cercevesinde
+
         self.tile_onbellek = {}          # (z,x,y) -> QPixmap
         self.beklemede = set()           # (z,x,y) agdan istendi, cevap bekleniyor
         self.basarisiz = set()           # (z,x,y) 404/hata -- tekrar denemeyi engelle
@@ -69,7 +76,23 @@ class UyduHaritaWidget(QWidget):
             self.iz_noktalari.append((enlem, boylam))
             if len(self.iz_noktalari) > 2000:
                 self.iz_noktalari.pop(0)
-        self.update()
+        # PERFORMANS: veri her zaman guncel (sekme degisince hemen dogru
+        # gorunur) ama pahali cizim/tile-yukleme SADECE bu widget gercekten
+        # ekranda gorunurken tetiklenir - gorunmuyorken surekli ag istegi +
+        # QPainter cizimi bos yere CPU/ag harciyordu.
+        if self.isVisible():
+            self.update()
+
+    def imu_guncelle(self, roll, pitch):
+        self.roll = roll
+        self.pitch = pitch
+        if self.isVisible():
+            self.update()
+
+    def lidar_guncelle(self, noktalar):
+        self.lidar_noktalari = noktalar
+        if self.isVisible():
+            self.update()
 
     @staticmethod
     def _mesafe_m(p1, p2):
@@ -181,6 +204,26 @@ class UyduHaritaWidget(QWidget):
                     merkez_y_px + (ty - merkez_tile_y) * TILE_BOYUTU))
             ressam.drawPolyline(poly)
 
+        # --- LiDAR nokta bulutu (gercek metre olcegiyle, araç govde
+        # cercevesinden (ileri,sol) uydu goruntusu uzerine bindiriliyor).
+        # Ayni donusum arac okunun kullandigi self.yon_derece'yi kullanir ki
+        # ikisi gorsel olarak TUTARLI kalsin (bkz. asagidaki ok cizimi).
+        if self.lidar_noktalari:
+            metre_basina_piksel = (2 ** self.zoom) / (156543.03392 * math.cos(math.radians(self.enlem)))
+            theta = math.radians(self.yon_derece)
+            cos_t, sin_t = math.cos(theta), math.sin(theta)
+            ressam.setBrush(QColor(255, 0, 51, 180))
+            ressam.setPen(Qt.NoPen)
+            for ileri_m, sol_m in self.lidar_noktalari:
+                # Once govde-cercevesi yerel piksel ofseti (TaktikRadarEkrani
+                # ile AYNI esleme: ileri=-y, sol=-x), sonra yon_derece kadar
+                # ekran uzerinde (kuzey-yukari referansla) donduruluyor.
+                yerel_dx = -sol_m * metre_basina_piksel
+                yerel_dy = -ileri_m * metre_basina_piksel
+                dx = yerel_dx * cos_t - yerel_dy * sin_t
+                dy = yerel_dx * sin_t + yerel_dy * cos_t
+                ressam.drawEllipse(QPointF(merkez_x_px + dx, merkez_y_px + dy), 3, 3)
+
         # --- Arac oku (merkezde, yon_derece'ye gore donuk) ---
         ressam.save()
         ressam.translate(merkez_x_px, merkez_y_px)
@@ -195,4 +238,5 @@ class UyduHaritaWidget(QWidget):
         ressam.setPen(QColor("#ffffff"))
         ressam.setFont(QFont("Arial", 9, QFont.Bold))
         ressam.drawText(10, 18, f"Zoom: {self.zoom}  |  Lat: {self.enlem:.6f}  Lon: {self.boylam:.6f}")
+        ressam.drawText(10, 34, f"IMU: Roll {self.roll:+.1f}°  Pitch {self.pitch:+.1f}°  |  Lidar: {len(self.lidar_noktalari)} nokta")
         ressam.drawText(10, yukseklik - 8, "Uydu goruntusu: Esri World Imagery")

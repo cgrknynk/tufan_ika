@@ -1,7 +1,6 @@
 import sys
 import math
 import time
-import threading # YENİ: ROS'u kilitlemeyen Action bağlantısı için
 # --- ÇEKİRDEK ROS2 / LİDAR / IMU (rota özelliklerinden BAĞIMSIZ) ---
 try:
     import rclpy
@@ -50,7 +49,7 @@ else:
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QPoint, QRectF, QPointF
 from PyQt5.QtGui import (QPainter, QColor, QPen, QFont, QPolygon, 
                          QLinearGradient, QBrush, QRadialGradient, QPolygonF)
-from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
+from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QLabel, QFrame, QTabWidget)
 from uydu_harita_widget import UyduHaritaWidget
 
@@ -444,6 +443,11 @@ class TaktikRadarEkrani(QFrame):
         self.robot_x = 0.0
         self.robot_y = 0.0
 
+        # GNSS - kullanicinin istegi uzerine taktik lidar ekraninda da
+        # gorunsun diye (bkz. guncelle_gnss / paintEvent). None = henuz fix yok.
+        self.gnss_enlem = None
+        self.gnss_boylam = None
+
         self.mouse_start_pos = None
         self.mouse_current_pos = None
         self.hedef_ok_ciziliyor = False
@@ -455,19 +459,35 @@ class TaktikRadarEkrani(QFrame):
         self.roll = roll
         self.pitch = pitch
         self.yaw = yaw
-        self.update()
-        
+        # PERFORMANS: veri her zaman guncel tutulur (sekme degisince hemen
+        # dogru goruntu cikar) ama pahali QPainter cizimi (self.update() ->
+        # paintEvent) SADECE bu widget gercekten ekranda gorunurken tetiklenir.
+        # Gorunmuyorken (baska bir ana sayfadayken) sürekli yeniden cizmek
+        # bos yere CPU harcayip diger ekranlarda "kasma" yaratiyordu.
+        if self.isVisible():
+            self.update()
+
     def guncelle_global_plan(self, poses):
         self.global_plan = poses
-        self.update()
-        
+        if self.isVisible():
+            self.update()
+
     def guncelle_local_plan(self, poses):
         self.local_plan = poses
-        self.update()
+        if self.isVisible():
+            self.update()
 
     def guncelle_costmap(self, noktalar):
         self.costmap_noktalari = noktalar
-        self.update()
+        if self.isVisible():
+            self.update()
+
+    def guncelle_gnss(self, enlem, boylam):
+        # Kullanicinin istegi: taktik lidar ekraninda da GNSS konumunu gor.
+        self.gnss_enlem = enlem
+        self.gnss_boylam = boylam
+        if self.isVisible():
+            self.update()
 
     def guncelle_konum(self, x, y):
         self.robot_x = x
@@ -678,6 +698,15 @@ class TaktikRadarEkrani(QFrame):
         ressam.drawText(20, 30, "TAKTİK LİDAR VE NAVİGASYON")
         ressam.drawText(20, 50, f"Menzil: {self.maksimum_menzil}m | Tespit: {len(self.noktalar)} Engel")
 
+        # GNSS (kullanicinin istegi: bu ekranda da GPS konumu gorunsun)
+        ressam.setFont(QFont("Arial", 9, QFont.Bold))
+        if self.gnss_enlem is not None and self.gnss_boylam is not None:
+            ressam.setPen(QPen(QColor("#00d4ff"), 1))
+            ressam.drawText(20, 68, f"GNSS: {self.gnss_enlem:.6f}, {self.gnss_boylam:.6f}")
+        else:
+            ressam.setPen(QPen(QColor("#556677"), 1))
+            ressam.drawText(20, 68, "GNSS: sinyal yok")
+
         ressam.setFont(QFont("Arial", 11, QFont.Bold))
         if self.pitch > 3.0:
             ressam.setPen(QPen(QColor("#00ff00"), 1))
@@ -796,6 +825,8 @@ class HaritaYoneticisi:
 
     def _gnss_guncelle(self, enlem, boylam):
         self.uydu_harita.konum_guncelle(enlem, boylam, self.taktik_radar.yaw)
+        # Kullanicinin istegi: GNSS konumu taktik lidar ekraninda da gorunsun.
+        self.taktik_radar.guncelle_gnss(enlem, boylam)
 
     def hedefi_ilet(self, x, y, q_z, q_w):
         self.ros_motoru.hedefe_git(x, y, q_z, q_w)
@@ -807,8 +838,11 @@ class HaritaYoneticisi:
 
     def lidar_guncelle(self, noktalar):
         self.lbl_lidar.setText(f"Lidar Engeller : {len(noktalar)} Nokta Alındı")
-        self.taktik_radar.guncelle_veri(noktalar, self.taktik_radar.roll, 
+        self.taktik_radar.guncelle_veri(noktalar, self.taktik_radar.roll,
                                         self.taktik_radar.pitch, self.taktik_radar.yaw)
+        # Kullanicinin istegi: LiDAR nokta bulutu uydu haritasi uzerinde de
+        # (gercek konuma/yone gore bindirilmis) gorunsun.
+        self.uydu_harita.lidar_guncelle(noktalar)
 
     def imu_guncelle(self, roll, pitch, yaw):
         if self.sifirla_istendi:
@@ -841,6 +875,8 @@ class HaritaYoneticisi:
 
         self.suni_ufuk.guncelle_veri(net_roll, net_pitch)
         self.taktik_radar.guncelle_veri(self.taktik_radar.noktalar, net_roll, net_pitch, net_yaw)
+        # Kullanicinin istegi: IMU (roll/pitch) uydu haritasi uzerinde de gorunsun.
+        self.uydu_harita.imu_guncelle(net_roll, net_pitch)
 
     def kapat(self):
         if hasattr(self, 'ros_motoru') and self.ros_motoru:

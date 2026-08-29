@@ -14,6 +14,7 @@ yapar (tek yayin kaynagi orada kalsin diye).
 
 import glob
 import time
+from collections import deque
 
 try:
     import serial
@@ -23,10 +24,37 @@ except ImportError:
 from PyQt5.QtCore import QThread, pyqtSignal
 
 BAUDRATE = 115200
-ADC_OLU_BOLGE = 40      # merkez etrafinda titremeyi yok say
+# 300kg'lik araç icin temkinli/hosgorulu merkez bolgesi - kucuk el
+# titremesi/dokunma aracin ani hareket etmesine sebep olmasin.
+ADC_OLU_BOLGE = 60      # merkez etrafinda titremeyi yok say
 TERS_X = False          # joystick fiziksel yonu ters gelirse True yapin
 TERS_Y = False
 KALIBRASYON_ORNEK_SAYISI = 25  # ~0.5sn @ 50Hz
+
+# SUREKLI OTO-MERKEZLEME: yayli/kendiliginden ortalanan joystick'lerde
+# birakildiginda mekanik durak yuzunden okuma neredeyse hic kipirdamaz -
+# elle tutarken (aktif surus) ise insan eli hep hafifce titrer. Bu farktan
+# yararlanip, okuma yeterince UZUN SURE yeterince SABIT kalirsa bunu
+# "gercekten birakildi" kabul edip merkezi CANLI olarak duzeltiyoruz - tek
+# seferlik ilk kalibrasyon yanlis/kaymis olsa bile, joystick birakilir
+# birakilmaz kendini duzeltiyor, elle yeniden baglanmaya gerek kalmiyor.
+# GUVENLIK SINIRI: joystick TAM ILERI/GERI/YANA itilip MEKANIK DAYANAGA
+# sabit tutulursa o konum da "kipirdamiyor" gibi gorunur - bu ASLA yeni
+# merkez sanilmamali (300kg araç: surucu eli gevsetince ters yonde ani
+# komut olusabilir). Bu yuzden sadece MEVCUT merkeze bu kadar YAKIN
+# duzeltmeler kabul edilir; uzak (gercek tam itilme) asla kabul edilmez.
+#
+# ONEMLI: bu, ADC_OLU_BOLGE'den (60) BELIRGIN SEKILDE BUYUK olmali. Ikisi
+# esit olursa (eski hata), duzeltilmesi GEREKEN her kayma (>60, aksi halde
+# zaten sorun olusturmaz) otomatik olarak duzeltme siniri disina da dusuyor
+# ve HICBIR ZAMAN duzeltilemiyor - "joystick hareketsizken aracin durmamasi"
+# canli bildirilen hatanin gercek kok nedeni buydu. 150, gercekci elektriksel/
+# mekanik kaymayi (birkac on birim) rahatca kapsarken, gercek TAM ITILME
+# (merkezden ~400-500 birim uzakta) ile karistirilmasi icin hala bol bol
+# pay birakiyor.
+MAKS_MERKEZ_KAYMASI = 150
+STABILITE_PENCERE = 15      # ~0.3sn @ 50Hz
+STABILITE_TOLERANSI = 3     # bu pencere icindeki max-min fark bundan kucukse "sabit" say
 
 
 def _port_bul():
@@ -99,6 +127,8 @@ class SurusJoystickThread(QThread):
                     time.sleep(2.0)  # Arduino reset/kendine gelme suresi
                     merkez_x, merkez_y = self._kalibre_et(ser)
                     self._baglanti_durumunu_guncelle(True)
+                    pencere_x = deque(maxlen=STABILITE_PENCERE)
+                    pencere_y = deque(maxlen=STABILITE_PENCERE)
                     while self._calisiyor:
                         satir = ser.readline().decode("utf-8", errors="ignore").strip()
                         if not satir:
@@ -110,6 +140,35 @@ class SurusJoystickThread(QThread):
                             x_ham, y_ham = int(parcalar[0]), int(parcalar[1])
                         except ValueError:
                             continue
+
+                        pencere_x.append(x_ham)
+                        pencere_y.append(y_ham)
+                        if len(pencere_x) == STABILITE_PENCERE:
+                            # GUVENLIK: sadece MEVCUT merkeze YAKIN (kucuk
+                            # kayma/ilk kalibrasyon hatasi) duzeltmeleri
+                            # kabul et. Joystick tam ileri/geri/yana itilip
+                            # MEKANIK DAYANAGA sabit tutulursa o konum da
+                            # "sabit" gorunur - bunu asla yeni merkez SANMA,
+                            # yoksa surucu eli gevsetince ters yonde ani
+                            # komut olusur (300kg aracta tehlikeli).
+                            #
+                            # X ve Y EKSENLERI BAGIMSIZ kontrol edilir (eskiden
+                            # ikisi birden sabit olmadikca hicbiri duzelmiyordu -
+                            # surus sirasindaki titresim bir eksende surekli
+                            # kucuk gurultu yaratirsa, digeri gercekten kaymis
+                            # olsa bile HICBIR ZAMAN duzelemiyordu; "joystick
+                            # hareketsizken aracin durmamasi" seklinde canli
+                            # gozlenen bir guvenlik hatasiydi, cunku watchdog
+                            # bunu yakalayamaz - joystick veri gondermeye DEVAM
+                            # ediyor, sadece merkezi yanlis).
+                            if max(pencere_x) - min(pencere_x) < STABILITE_TOLERANSI:
+                                aday_x = sum(pencere_x) // len(pencere_x)
+                                if abs(aday_x - merkez_x) <= MAKS_MERKEZ_KAYMASI:
+                                    merkez_x = aday_x
+                            if max(pencere_y) - min(pencere_y) < STABILITE_TOLERANSI:
+                                aday_y = sum(pencere_y) // len(pencere_y)
+                                if abs(aday_y - merkez_y) <= MAKS_MERKEZ_KAYMASI:
+                                    merkez_y = aday_y
 
                         x = self._normalize(x_ham, merkez_x, TERS_X)
                         y = self._normalize(y_ham, merkez_y, TERS_Y)

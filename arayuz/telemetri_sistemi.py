@@ -1,14 +1,21 @@
 import time
 import subprocess
+import threading
 try:
     import rclpy
     from rclpy.node import Node
+    from rclpy.executors import SingleThreadedExecutor
+    from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
     from std_msgs.msg import String, Float32, Bool, Int32, Float32MultiArray
     from nav_msgs.msg import Odometry
     from sensor_msgs.msg import LaserScan, Imu
 except Exception as e:
     rclpy = None
     Node = None
+    SingleThreadedExecutor = None
+    QoSProfile = None
+    QoSReliabilityPolicy = None
+    QoSHistoryPolicy = None
     String = None
     Float32 = None
     Bool = None
@@ -22,7 +29,15 @@ else:
     ROS2_IMPORT_ERROR = None
 from PyQt5.QtCore import QThread, pyqtSignal
 
-class TelemetriThread(QThread): 
+# Yarista aracla arayuz arasindaki kablosuz linki Ubiquiti nokta-nokta
+# kopru sagliyor (WiFi degil). Radyonun kendi yonetim IP'si (192.168.1.21)
+# ICMP ping'i engelliyor (canli test edildi) - bu yuzden dogrudan ARAC
+# Jetson'a ping atip UCTAN UCA baglanti kalitesini olcuyoruz; operatoru
+# asil ilgilendiren de zaten "araca gercekten ulasabiliyor muyum" sorusu.
+# IP degisirse burasi guncellenmeli.
+UBIQUITI_LINK_HEDEF_IP = "192.168.1.22"
+
+class TelemetriThread(QThread):
     # --- PyQt5 SİNYALLERİ ---
     hiz_sinyali = pyqtSignal(str)
     batarya_sinyali = pyqtSignal(str)
@@ -46,6 +61,7 @@ class TelemetriThread(QThread):
     def __init__(self):
         super().__init__()
         self.node = None
+        self.surus_node = None
         self.cmd_pub = None
         self.mod_pub = None
         self.palet_pub = None
@@ -57,12 +73,37 @@ class TelemetriThread(QThread):
 
         if not rclpy.ok():
             rclpy.init()
+
+        # --- GUVENLIK KRITIK: surus komutlari (cmd/mod/palet) icin AYRI,
+        # MINIMAL bir node + kendi izole thread'i/executor'u. Asagidaki
+        # self.node'da (9 telemetri aboneligiyle) AYNI node'da tutulunca,
+        # DDS kesif/eslesme mekanizmasi periyodik olarak (~3sn'de bir,
+        # gercek donanimla canli olculdu) tikaniyor ve /palet_hizlari
+        # yayini kesintiye ugruyordu - "geliyor gidiyor" sikayeti buradan
+        # kaynaklaniyordu (WiFi/ag DEGIL - izole testlerle elendi). 300kg'lik
+        # aracin sürüş komutu ASLA baska hicbir seye bagimli/gecikmeli
+        # olmamali, bu yuzden kendi kucucuk node'unda tamamen izole.
+        self.surus_node = Node('tufan_yer_istasyonu_surus')
+        self.cmd_pub = self.surus_node.create_publisher(String, '/arac_komut', 10)
+        self.mod_pub = self.surus_node.create_publisher(String, '/surus_modu', 10)
+        # BEST_EFFORT: /palet_hizlari surekli (10Hz) tekrar yayinlanan bir
+        # kontrol sinyali - kaybolan tek bir ornegin onemi yok, 0.1sn sonra
+        # yenisi geliyor zaten. Varsayilan RELIABLE QoS'un yeniden
+        # gonderim/onay (ack/retransmit) mekanizmasi, bu aglar uzerinde
+        # periyodik birkac saniyelik tikanmalara sebep oluyordu (canli
+        # olculdu). BEST_EFFORT bu overhead'i tamamen ortadan kaldirir.
+        palet_qos = QoSProfile(
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
+        self.palet_pub = self.surus_node.create_publisher(Float32MultiArray, '/palet_hizlari', palet_qos)
+        self.surus_node.create_timer(0.1, self.surekli_yayin_dongusu)
+
+        # --- Genel telemetri/gosterge dugumu (SADECE abonelikler - gecikmesi
+        # sürüşü ASLA etkilemez, ayri node'da oldugu icin) ---
         self.node = Node('tufan_yer_istasyonu')
-        
-        self.cmd_pub = self.node.create_publisher(String, '/arac_komut', 10)
-        self.mod_pub = self.node.create_publisher(String, '/surus_modu', 10)
-        self.palet_pub = self.node.create_publisher(Float32MultiArray, '/palet_hizlari', 10)
-        
+
         # NOT: /arac_hiz, /arac_batarya, /lidar_durum topic'lerinin aractaki
         # gercek karsiligi yok (canli dogrulandi) -- hicbir zaman veri gelmiyordu,
         # panel hep varsayilan/son deger gosteriyordu. Hiz artik gercek /odom'dan
@@ -112,10 +153,22 @@ class TelemetriThread(QThread):
         self.son_telemetri_zamani = 0.0  # İlk açılışta çevrimdışı (PASİF) başlasın
         # ----------------------------------------------------
         
-        self.node.create_timer(0.1, self.surekli_yayin_dongusu)
-        # WIFI: bu makinenin (arayuz jetsonu) kendi gercek sinyal gucu --
-        # ROS'tan gelen bir sey degil, yerel NetworkManager'dan okunuyor.
-        self.node.create_timer(3.0, self._wifi_kontrol)
+        # UBIQUITI LINK KALITESI: ROS'tan gelen bir sey degil, arac Jetson'a
+        # periyodik ping atarak olculuyor (bkz. _wifi_kontrol). ONEMLI: bu
+        # ROS2 timer'i (create_timer) DEGIL, ayri bir thread - ping
+        # bloklayici olabilir, ROS2 executor'inin İÇİNDE calistirilirsa
+        # /palet_hizlari dahil TUM yayin/abonelik durabilir (daha once
+        # ayni sebeple nmcli icin canli olcumle dogrulanmis bir sorundu).
+        self._wifi_thread_calisiyor = True
+        threading.Thread(target=self._wifi_kontrol_dongusu, daemon=True).start()
+
+        # Surus spin thread'i EN SONDA baslatiliyor - yukaridaki TUM durum
+        # degiskenleri (arac_modu, surus_kaynagi, anlik_sol_pwm vb.) hazir
+        # olmadan surekli_yayin_dongusu (0.1sn'de bir tetiklenir) calisirsa
+        # AttributeError ile cokuyordu (yaris durumu, canli tespit edildi).
+        self._surus_thread_calisiyor = True
+        threading.Thread(target=self._surus_spin_dongusu, daemon=True).start()
+
         self.log_yaz("✅ Telemetri ve Bağımsız Palet Sistemi (Fiziksel Eşleşmeli) Başlatıldı.")
 
     def hiz_cb(self, msg):
@@ -163,20 +216,42 @@ class TelemetriThread(QThread):
     def hedef_mesafe_cb(self, msg):
         self.hedef_mesafe_sinyali.emit(float(msg.data))
 
+    def _surus_spin_dongusu(self):
+        # Surus (cmd/mod/palet) node'unun KENDI izole executor'i - genel
+        # telemetri node'undan (9 abonelik) tamamen ayri thread. Bkz.
+        # __init__ icindeki guvenlik notu.
+        executor = SingleThreadedExecutor()
+        executor.add_node(self.surus_node)
+        try:
+            while rclpy.ok() and self._surus_thread_calisiyor:
+                executor.spin_once(timeout_sec=0.02)
+        finally:
+            executor.remove_node(self.surus_node)
+
+    def _wifi_kontrol_dongusu(self):
+        # ROS2 executor'indan tamamen bagimsiz ayri thread (bkz. __init__
+        # icindeki not) - ping yavas/bloklayici olabilir, burada
+        # bekletmenin ROS2 yayinina hicbir etkisi yok.
+        while self._wifi_thread_calisiyor:
+            self._wifi_kontrol()
+            time.sleep(3.0)
+
     def _wifi_kontrol(self):
+        # Yarışta gerçek WiFi degil, Ubiquiti nokta-nokta kablosuz köprü
+        # kullanılıyor - gösterge artık o linkin kalitesini gösteriyor.
+        # 5 hizli ping gonderip basari oranini "%baglanti kalitesi" olarak
+        # yayinliyoruz (RSSI yerine gercek paket kaybi - PtP link icin
+        # daha anlamli). UBIQUITI_LINK_HEDEF_IP degisirse burasi guncellenmeli.
         try:
             cikti = subprocess.run(
-                ["nmcli", "-t", "-f", "active,signal", "dev", "wifi"],
-                capture_output=True, text=True, timeout=2.0
+                ["ping", "-c", "5", "-i", "0.2", "-W", "1", UBIQUITI_LINK_HEDEF_IP],
+                capture_output=True, text=True, timeout=4.0
             ).stdout
-            for satir in cikti.splitlines():
-                aktif, _, sinyal = satir.partition(":")
-                if aktif == "yes" and sinyal.strip().isdigit():
-                    self.wifi_durum_sinyali.emit(int(sinyal))
-                    return
-            self.wifi_durum_sinyali.emit(0)  # aktif wifi baglantisi yok
+            basarili = cikti.count(" bytes from ")
+            yuzde = int(round((basarili / 5.0) * 100))
+            self.wifi_durum_sinyali.emit(yuzde)
         except Exception:
-            pass  # nmcli yoksa/basarisiz olursa panel son bilinen degerde kalir
+            self.wifi_durum_sinyali.emit(0)
 
     def log_yaz(self, mesaj):
         print(mesaj)
@@ -376,4 +451,18 @@ class TelemetriThread(QThread):
     def run(self):
         if self.node is None:
             return
-        rclpy.spin(self.node)
+        # KENDI OZEL EXECUTOR: rclpy.spin(node) paylasilan GLOBAL executor'i
+        # kullanir. harita_sistemi.py (Ros2GcsMotoru) ve main.py (LidarThread)
+        # de ayni sekilde kendi izole SingleThreadedExecutor'larini kullaniyor
+        # (aksi halde "IndexError: wait set index too big" ile cokme riski
+        # vardi). Bu thread de ayni izolasyona sahip degildi - /palet_hizlari
+        # yayininin duzensiz/kesintili gelmesine (bazen 3sn'ye varan bosluklar)
+        # katkida bulunuyor olabilirdi. Digerleriyle TUTARLI hale getiriyoruz.
+        self.calisiyor = True
+        executor = SingleThreadedExecutor()
+        executor.add_node(self.node)
+        try:
+            while rclpy.ok() and self.calisiyor:
+                executor.spin_once(timeout_sec=0.05)
+        finally:
+            executor.remove_node(self.node)

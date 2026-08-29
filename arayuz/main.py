@@ -1,32 +1,15 @@
 import sys, re, math, time
-from PyQt5.QtWidgets import QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout, QMessageBox, QSizePolicy, QWidget, QFrame, QPushButton
-from PyQt5.QtCore import Qt, QRectF, QTimer, QThread, pyqtSignal
-from PyQt5.QtGui import QImage, QPixmap, QPainter, QPainterPath, QFont, QColor, QPen
+from PyQt5.QtWidgets import QApplication, QMainWindow, QLabel, QVBoxLayout, QMessageBox, QSizePolicy, QWidget, QFrame, QPushButton, QSpacerItem
+from PyQt5.QtCore import Qt, QRectF, QTimer, QThread, pyqtSignal, QSize
+from PyQt5.QtGui import QImage, QPixmap, QPainter, QPainterPath, QFont, QFontMetrics, QColor, QPen, QIcon
 from datetime import datetime
-
-# --- ROS 2 HUMBLE VE LIDAR KÜTÜPHANELERİ ---
-try:
-    import rclpy
-    from rclpy.node import Node
-    from rclpy.executors import SingleThreadedExecutor
-    from rclpy.qos import QoSProfile, QoSReliabilityPolicy
-    from sensor_msgs.msg import LaserScan
-except Exception as e:
-    rclpy = None
-    Node = None
-    SingleThreadedExecutor = None
-    QoSProfile = None
-    QoSReliabilityPolicy = None
-    LaserScan = None
-    ROS2_IMPORT_ERROR = str(e)
-else:
-    ROS2_IMPORT_ERROR = None
 
 # Yan odalardaki işçileri çağırıyoruz
 from kamera_sistemi import KameraThread
 from telemetri_sistemi import TelemetriThread
 from harita_sistemi import HaritaYoneticisi
 from surus_joystick_sistemi import SurusJoystickThread
+from ntrip_rtk_sistemi import NtripRtkThread
 from stiller import *
 from arayuz import Ui_MainWindow
 from diller import CEVIRILER
@@ -34,67 +17,15 @@ from terminal_widget import SshTerminalWidget
 
 
 # ==========================================
-# ROS 2 LIDAR DİNLEYİCİ THREAD (ARAYÜZÜ KORUR)
-# ==========================================
-class LidarThread(QThread):
-    scan_sinyali = pyqtSignal(list, list)  # (Açılar, Mesafeler) sinyali
-
-    def __init__(self):
-        super().__init__()
-        self.node = None
-        self.executor = None
-        self.calisiyor = True
-
-    def run(self):
-        if rclpy is None or Node is None or QoSProfile is None or QoSReliabilityPolicy is None or LaserScan is None:
-            print("[LIDAR] ROS2 kütüphanesi bulunamadığı için lidar dinleyicisi başlatılamadı.")
-            return
-
-        try:
-            if not rclpy.ok():
-                rclpy.init()
-            self.node = Node('gcs_lidar_subscriber')
-
-            qos_profile = QoSProfile(
-                reliability=QoSReliabilityPolicy.RELIABLE,
-                depth=10
-            )
-
-            self.sub = self.node.create_subscription(
-                LaserScan,
-                '/scan',
-                self.scan_callback,
-                qos_profile
-            )
-            # KENDİ ÖZEL EXECUTOR: harita_sistemi.py'deki Ros2GcsMotoru ile aynı anda
-            # rclpy'nin paylaşılan global executor'ına spin edilirse ("rclpy.spin(node)")
-            # iki thread aynı wait-set'e dokunup "IndexError: wait set index too big"
-            # ile çöküyor. Kendi executor'ımızla bu thread'i izole ediyoruz.
-            self.executor = SingleThreadedExecutor()
-            self.executor.add_node(self.node)
-            while rclpy.ok() and self.calisiyor:
-                self.executor.spin_once(timeout_sec=0.1)
-        except Exception as e:
-            print(f"Lidar ROS2 Thread Hatası: {e}")
-
-    def stop(self):
-        self.calisiyor = False
-        if self.executor:
-            self.executor.shutdown()
-        if self.node:
-            self.node.destroy_node()
-        self.quit()
-        self.wait()
-
-    def scan_callback(self, msg):
-        # Ham açı ve mesafe verilerini alıp GUI'ye sinyal atıyoruz
-        angles = [msg.angle_min + i * msg.angle_increment for i in range(len(msg.ranges))]
-        self.scan_sinyali.emit(angles, list(msg.ranges))
-
-
-# ==========================================
 # ANA YER KONTROL İSTASYONU SINIFI
 # ==========================================
+# NOT: Burada eskiden ikinci, tamamen bagimsiz bir "/scan" abonesi
+# (LidarThread) vardi - ciktisi (lidar_acilar/lidar_mesafeler) hicbir yerde
+# okunmuyordu (dekoratif ana menu radari BILEREK gercek lidar verisi
+# cizmiyor, bkz. radar_cizimi_Guncelle). harita_sistemi.py'deki
+# Ros2GcsMotoru zaten ayni topic'e abone ve gercekten kullaniliyor - bu
+# ikinci, gereksiz ROS2 node/executor/thread'i (ekstra CPU + agi
+# yorulmasi) kaldirildi.
 class TufanGCS(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -147,11 +78,6 @@ class TufanGCS(QMainWindow):
         self.klavye_aktif = False    
         self.sifreleme_acik = True  
 
-        # --- LİDAR HAFIZA DEĞİŞKENLERİ ---
-        self.lidar_acilar = []
-        self.lidar_mesafeler = []
-        self.lidar_max_mesafe = 10.0  # Radar kenarı kaç metreye denk gelsin (Örn: 10m)
-
         # Kameralar türkçe başlasın
         self.kamera_yazi_on = "ÖN"
         self.kamera_yazi_arka = "ARKA"
@@ -165,11 +91,12 @@ class TufanGCS(QMainWindow):
 
         self._telemetri_baglantilari_kur()
         self._buton_baglantilarini_kur()
+        self._pwm_izleme_butonu_ekle()
 
         self._radar_zamanlayici_baslat()
         self._kamera_ve_joystick_baslat()
-        self._lidar_motoru_baslat() # ROS 2 Lidar motorunu başlat
-        
+        self._ntrip_rtk_baslat()
+
         # --- DONANIM SİSTEMLERİNİ BAŞLAT ---
         self.harita_kurulumu()
         self._kamera_tuvallerini_kur()
@@ -189,8 +116,25 @@ class TufanGCS(QMainWindow):
     # ==========================================
 
     def log_yaz(self, mesaj):
+        # NOT: eskiden buradaki log, ana ekrandaki terminale yaziliyordu -
+        # ama terminal artik GERCEK bir SSH oturumu (ve otomatik PWM akisi),
+        # oraya yazi eklemenin bir anlami yok (sadece konsola dusen bos bir
+        # uyumluluk fonksiyonu var). Uygulamanin kendi ic olaylari (mod
+        # degisimi, kalibrasyon, PWM siniri vb.) artik Ayarlar sayfasindaki
+        # "CANLI SİSTEM LOGLARI" kutusuna yaziliyor - onceden hic kullanilmiyordu.
         su_an = datetime.now().strftime("%H:%M:%S")
-        self.ui.terminal_ekrani.append(f"[{su_an}] {mesaj}")
+        satir = f"[{su_an}] {mesaj}"
+        print(satir)
+        if hasattr(self.ui, 'textEdit_canliSistemLog'):
+            kutu = self.ui.textEdit_canliSistemLog
+            kutu.append(satir)
+            # Uzun yaris/test oturumlarinda (surus sirasinda her tus basimi
+            # log yazdirir) kutu sinirsiz buyumesin diye eski satirlari at.
+            if kutu.document().blockCount() > 500:
+                imlec = kutu.textCursor()
+                imlec.movePosition(imlec.Start)
+                imlec.movePosition(imlec.Down, imlec.KeepAnchor, 100)
+                imlec.removeSelectedText()
 
     def akilli_bildirim_gonder(self, baslik, mesaj, kritik_mi=False):
         self.log_yaz(f"{baslik}: {mesaj}")
@@ -269,6 +213,66 @@ class TufanGCS(QMainWindow):
         self.telemetri_motoru.log_sinyali.connect(self.log_yaz)
         
         self.telemetri_motoru.start()
+
+    def _pwm_izleme_ikonu_olustur(self):
+        # arayuz.py OTOMATIK URETILMIS (Qt Designer) oldugu ve elle
+        # duzenlenmiyor - bu yuzden yeni bir sidebar butonu icin ikon
+        # dosyasi eklemek yerine, mevcut buton ikonlarinin (SVG) rengiyle
+        # (#00E5FF) eslesen bir "canli sinyal" ikonu QPainter ile ciziyoruz.
+        boyut = 64
+        pix = QPixmap(boyut, boyut)
+        pix.fill(Qt.transparent)
+        ressam = QPainter(pix)
+        ressam.setRenderHint(QPainter.Antialiasing)
+        kalem = QPen(QColor("#00E5FF"))
+        kalem.setWidth(4)
+        kalem.setCapStyle(Qt.RoundCap)
+        kalem.setJoinStyle(Qt.RoundJoin)
+        ressam.setPen(kalem)
+        cerceve = QRectF(6, 14, boyut - 12, boyut - 28)
+        ressam.drawRoundedRect(cerceve, 8, 8)
+        y = cerceve.center().y()
+        nabiz = QPainterPath()
+        nabiz.moveTo(cerceve.left() + 6, y)
+        nabiz.lineTo(cerceve.left() + 15, y)
+        nabiz.lineTo(cerceve.left() + 21, y - 13)
+        nabiz.lineTo(cerceve.left() + 29, y + 15)
+        nabiz.lineTo(cerceve.left() + 37, y - 9)
+        nabiz.lineTo(cerceve.left() + 43, y)
+        nabiz.lineTo(cerceve.right() - 6, y)
+        ressam.drawPath(nabiz)
+        ressam.end()
+        return QIcon(pix)
+
+    def _pwm_izleme_butonu_ekle(self):
+        # Kullanici istegi: terminalde Ctrl+C ile canli PWM akisindan
+        # cikildiktan sonra, tek tikla akisa geri donecek bir buton -
+        # ana ekrana (terminalin oldugu sayfa) gecip pwm_akisina_don()'u
+        # cagirir.
+        buton = QPushButton(self.ui.sol_menu_frame)
+        buton.setMinimumSize(QSize(148, 64))
+        buton.setMaximumSize(QSize(148, 64))
+        buton.setStyleSheet(self.ui.ayarlar_button.styleSheet())
+        buton.setText("")
+        buton.setIcon(self._pwm_izleme_ikonu_olustur())
+        buton.setIconSize(QSize(64, 64))
+        buton.setToolTip("Canlı PWM akışını göster")
+        buton.setObjectName("pushButton_pwmIzle")
+        eklenecek_index = self.ui.verticalLayout_8.indexOf(self.ui.pushButton_acilKapat)
+        self.ui.verticalLayout_8.insertWidget(eklenecek_index, buton)
+        # ACİL DURDUR'a çok yakın durmasın diye araya boşluk. NOT: elle
+        # QSpacerItem() olusturup insertItem() ile eklemek PyQt5'te C++
+        # tarafinda sahiplik (ownership) sorunu cikarip SEGFAULT'a sebep
+        # oldu (canli test edilerek bulundu) - insertSpacing() Qt'nin kendi
+        # ic yonetimini kullandigi icin guvenli.
+        self.ui.verticalLayout_8.insertSpacing(eklenecek_index + 1, 40)
+        buton.clicked.connect(self._pwm_akisini_goster)
+        self.ui.pushButton_pwmIzle = buton
+
+    def _pwm_akisini_goster(self):
+        self.ui.stackedWidget.setCurrentIndex(0)
+        self.ui.terminal_ekrani.pwm_akisina_don()
+        self.ui.terminal_ekrani.setFocus()
 
     def _buton_baglantilarini_kur(self):
         self.ui.home_button.clicked.connect(lambda: self.ui.stackedWidget.setCurrentIndex(0))
@@ -373,24 +377,12 @@ class TufanGCS(QMainWindow):
         hazir_mi = (time.time() - self.son_kamera_frame_zamani) < 1.5
         self.kamera_arayuz_guncelle(hazir_mi)
 
-    # --- ROS 2 LİDAR THREAD BAŞLATICI ---
-    def _lidar_motoru_baslat(self):
-        try:
-            self.lidar_motoru = LidarThread()
-            self.lidar_motoru.scan_sinyali.connect(self.lidar_verisi_guncelle)
-            self.lidar_motoru.start()
-            self.log_yaz("Sistem: ROS 2 Lidar dinleyicisi (/scan - Reliable) başlatıldı.")
-        except Exception as e:
-            self.log_yaz(f"HATA: Lidar motoru başlatılamadı: {e}")
-
-    def lidar_verisi_guncelle(self, acilar, mesafeler):
-        self.lidar_acilar = acilar
-        self.lidar_mesafeler = mesafeler
-        # NOT: burada lidar_arayuz_guncelle(True) ARTIK ÇAĞRILMIYOR -- bu çağrı
-        # veri geldiğinde hep True yapıyordu ama veri KESİLİNCE hiçbir zaman
-        # False'a dönmüyordu (sahte "her zaman aktif" görüntüsü veriyordu).
-        # LİDAR durumu artık TEK kaynaktan: telemetri_motoru.lidar_durum_sinyali
-        # (gerçek /scan heartbeat, hem aktif HEM pasif durumu doğru yakalıyor).
+    def _ntrip_rtk_baslat(self):
+        # NTRIP (TUSAGA-Aktif) -> mavros /mavros/gps_rtk/send_rtcm
+        # koprusu (bkz. ntrip_rtk_sistemi.py).
+        self.ntrip_motoru = NtripRtkThread()
+        self.ntrip_motoru.log_sinyali.connect(self.log_yaz)
+        self.ntrip_motoru.start()
 
     def _tasarim_hafizasini_kaydet(self):
         self.orijinal_tasarim_hafizasi = {}
@@ -423,7 +415,9 @@ class TufanGCS(QMainWindow):
         self.ui.label_gpsYazi.setStyleSheet(f"color: {'#00ff00' if etkin_mi else 'red'}; font-weight: bold; font-size: 24px; border: none; background-color: transparent;")
     
     def wifi_arayuz_guncelle(self, yuzde):
-        self.ui.label_wifiYazi.setText(f"WIFI : %{yuzde}")
+        # Eskiden gercek WiFi sinyali - artik Ubiquiti nokta-nokta kablosuz
+        # linkinin baglanti kalitesi (bkz. telemetri_sistemi.py _wifi_kontrol).
+        self.ui.label_wifiYazi.setText(f"UBIQUITI : %{yuzde}")
         if yuzde > 60:
             self.ui.label_wifiYazi.setStyleSheet("color: #00ff00; font-weight: bold; font-size: 24px; border: none; background-color: transparent;") 
         elif yuzde > 30:
@@ -497,8 +491,25 @@ class TufanGCS(QMainWindow):
         else:
             durum, renk = ("PASSIVE" if dil == "English" else "PASİF"), "red"
 
-        self.ui.label_sistemYazi.setText(f"{baslik} : {durum}")
+        metin = f"{baslik} : {durum}"
+        self.ui.label_sistemYazi.setText(metin)
         self.ui.label_sistemYazi.setStyleSheet(f"color: {renk}; font-weight: bold;")
+        self._sistem_yazisini_sigdir(metin)
+
+    def _sistem_yazisini_sigdir(self, metin):
+        # "SİSTEM : OTONOM HAZIR" gibi uzun metinler sabit 32px fontla
+        # kutudan tasip iki uctan kirpiliyordu (kutu genisligi sabit,
+        # AlignCenter). Metin uzunlugu degistikce (dil, mod) font boyutunu
+        # kutuya sigacak sekilde otomatik kucultuyoruz.
+        font = self.ui.label_sistemYazi.font()
+        kutu_genisligi = self.ui.label_sistemYazi.width() - 12  # kenar payi
+        boyut = 32
+        while boyut > 14:
+            font.setPixelSize(boyut)
+            if QFontMetrics(font).horizontalAdvance(metin) <= kutu_genisligi:
+                break
+            boyut -= 1
+        self.ui.label_sistemYazi.setFont(font)
 
     def manuel_sec(self):
         self.ui.pushButton_manuel.setStyleSheet(MOD_AKTIF)
@@ -585,6 +596,12 @@ class TufanGCS(QMainWindow):
         self.harita_layout.setContentsMargins(0, 0, 0, 0)
         self.harita_yoneticisi = HaritaYoneticisi(self.harita_layout)
         self.log_yaz("Sistem: Harita başarıyla ana ekrana yüklendi.")
+
+        # NTRIP/RTK istemcisine gercek GNSS konumunu ilet (AUTO/VRS
+        # mountpoint dogru referans istasyonunu secebilsin diye).
+        if hasattr(self, 'ntrip_motoru'):
+            self.harita_yoneticisi.ros_motoru.gnss_sinyal.connect(
+                self.ntrip_motoru.guncel_konum_ayarla)
 
     def arac_batarya_renklendir(self, gelen_metin):
         sayilar = re.findall(r'\d+', str(gelen_metin))
@@ -785,7 +802,13 @@ class TufanGCS(QMainWindow):
         if not isinstance(goruntu_sozlugu, dict):
             return
         if goruntu_sozlugu.get(1) is not None:
-            self.son_kamera_frame_zamani = time.time()
+            self.son_kamera_frame_zamani = time.time()  # heartbeat - HER ZAMAN guncellenir
+        # PERFORMANS: kamera onizlemelerini yeniden cizmek (4x QPainter/
+        # resmi_yuvarla) her karede pahali. Kamera sayfasinda degilken
+        # (indeks 1) bu cizimi atlayip diger ekranlarda "kasma" yaratmasini
+        # onluyoruz - kalp atisi (yukarida) yine de guncel kaliyor.
+        if self.ui.stackedWidget.currentIndex() != 1:
+            return
         try:
             # kamera_sistemi.py gercek silah/turret karesini anahtar 1'e,
             # TABELA karesini anahtar 2'ye koyuyor. Tabela tespiti ON kameradan
@@ -824,6 +847,14 @@ class TufanGCS(QMainWindow):
         metin = kutu.text().strip()
         if not metin:
             return
+        # DÜZELTME: editingFinished odak KAYBINDA da tetikleniyor - kutuda
+        # onceden ONAYLANMIS bir deger dururken (basarili onay sonrasi kutu
+        # temizlenmiyor) baska bir yere (orn. kapatma butonuna) tiklamak
+        # odagi kacırıp AYNI degeri tekrar tekrar onaya sokuyordu - "kapatma
+        # butonuna basinca pwm onay ekrani her seferinde cikiyor" olarak
+        # canli bildirildi. Deger degismediyse tekrar sormaya gerek yok.
+        if metin == getattr(self, '_pwm_son_uygulanan_metin', None):
+            return
 
         try:
             deger = float(metin)
@@ -855,6 +886,7 @@ class TufanGCS(QMainWindow):
                     uygulanan = deger
                 kutu.setText(f"{uygulanan:.0f}")
                 kutu.setStyleSheet(PWM_LIMIT_AKTIF)
+                self._pwm_son_uygulanan_metin = kutu.text()
             else:
                 kutu.clear()
                 kutu.setStyleSheet(PWM_LIMIT_VARSAYILAN)
@@ -881,9 +913,13 @@ class TufanGCS(QMainWindow):
             self.ui.pushButton_klavye.setText(dil["btn_aktif"])
             self.log_yaz("Sistem: Klavye Kontrolü (W-A-S-D) AKTİFLEŞTİRİLDİ.")
         else:
-            self.ui.pushButton_klavye.setStyleSheet(AYAR_PASIF) 
+            self.ui.pushButton_klavye.setStyleSheet(AYAR_PASIF)
             self.ui.pushButton_klavye.setText(dil["btn_pasif"])
             self.log_yaz("Sistem: Klavye Kontrolü DEVRE DIŞI.")
+        # DÜZELTME: butona tıklayınca kalan odak (focus) ana pencereye
+        # geri çekilmezse keyPressEvent tuşları hiç almıyordu - klavyeyi
+        # aktif edip WASD'a basınca araç sürülemiyordu (canlı bildirildi).
+        self.setFocus()
 
     def ayar_joystick_tetikle(self):
         dil = CEVIRILER.get(self.aktif_dil, CEVIRILER["Türkçe"])
@@ -905,6 +941,14 @@ class TufanGCS(QMainWindow):
             if hasattr(self, 'telemetri_motoru'): self.telemetri_motoru.surus_kaynagi = "KLAVYE"
             if hasattr(self, 'surus_joystick_motoru'):
                 self.surus_joystick_motoru.durdur()
+            # DÜZELTME: joystick kapatılınca sürüş kaynağı KLAVYE'ye
+            # dönüyor ama klavye_aktif ayrıca açık DEĞİLSE keyPressEvent
+            # yine de tuşları yok sayıyordu - "joystick kapatıp klavye
+            # açtığımda süremiyorum" olarak canlı bildirildi. Kaynak
+            # KLAVYE'ye döndüğü an klavyeyi de otomatik aç.
+            if not getattr(self, 'klavye_aktif', False):
+                self.ayar_klavye_tetikle()
+        self.setFocus()
 
     def joystick_pwm_geldi(self, sol_pwm, sag_pwm):
         if hasattr(self, 'telemetri_motoru'):

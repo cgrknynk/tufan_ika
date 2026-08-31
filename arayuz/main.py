@@ -1,5 +1,5 @@
 import sys, re, math, time
-from PyQt5.QtWidgets import QApplication, QMainWindow, QLabel, QVBoxLayout, QMessageBox, QSizePolicy, QWidget, QFrame, QPushButton, QSpacerItem
+from PyQt5.QtWidgets import QApplication, QMainWindow, QLabel, QVBoxLayout, QMessageBox, QSizePolicy, QWidget, QFrame, QPushButton, QSpacerItem, QDialog, QSplitter
 from PyQt5.QtCore import Qt, QRectF, QTimer, QThread, pyqtSignal, QSize
 from PyQt5.QtGui import QImage, QPixmap, QPainter, QPainterPath, QFont, QFontMetrics, QColor, QPen, QIcon
 from datetime import datetime
@@ -92,6 +92,11 @@ class TufanGCS(QMainWindow):
         self._telemetri_baglantilari_kur()
         self._buton_baglantilarini_kur()
         self._pwm_izleme_butonu_ekle()
+        self._silah_joystick_hedefi_butonu_ekle()
+        self._silah_ates_butonu_ekle()
+        self._devam_butonu_ekle()
+        self._yon_pid_butonu_ekle()
+        self._yeni_terminal_butonu_ekle()
 
         self._radar_zamanlayici_baslat()
         self._kamera_ve_joystick_baslat()
@@ -189,7 +194,11 @@ class TufanGCS(QMainWindow):
         self.telemetri_motoru = TelemetriThread()
         self.telemetri_motoru.hiz_sinyali.connect(self.ui.label_hizYazi.setText)
         self.telemetri_motoru.batarya_sinyali.connect(self.arac_batarya_renklendir)
-        self.telemetri_motoru.etap_sinyali.connect(self.ui.label_etapNo.setText) 
+        self.telemetri_motoru.etap_sinyali.connect(self.ui.label_etapNo.setText)
+        # Designer'daki sabit "8" yazısı gerçek veri sanılmasın diye - ilk
+        # tabela tespiti gelene kadar "-" gösterilir (GPS/LİDAR gibi diğer
+        # göstergelerin "PASİF" ile aynı mantık: henüz veri yok = belli olsun).
+        self.ui.label_etapNo.setText("-")
         self.telemetri_motoru.yer_batarya_sinyali.connect(self.yer_batarya_renklendir)
         self.telemetri_motoru.imu_durum_sinyali.connect(self.imu_arayuz_guncelle)
         self.telemetri_motoru.guc_durum_sinyali.connect(self.guc_arayuz_guncelle)
@@ -244,6 +253,182 @@ class TufanGCS(QMainWindow):
         ressam.end()
         return QIcon(pix)
 
+    def _yon_pid_ikonu_olustur(self, aktif: bool):
+        # Pusula ikonu - AÇIK iken camgobegi (diger ikonlarla ayni renk),
+        # KAPALI iken soluk gri (kullaniciya durumu ayirt ettirmek icin).
+        boyut = 64
+        pix = QPixmap(boyut, boyut)
+        pix.fill(Qt.transparent)
+        ressam = QPainter(pix)
+        ressam.setRenderHint(QPainter.Antialiasing)
+        renk = QColor("#00E5FF") if aktif else QColor("#5A6672")
+        kalem = QPen(renk)
+        kalem.setWidth(4)
+        ressam.setPen(kalem)
+        merkez_x, merkez_y, r = boyut / 2, boyut / 2, 22
+        ressam.drawEllipse(QRectF(merkez_x - r, merkez_y - r, 2 * r, 2 * r))
+        ibre = QPainterPath()
+        ibre.moveTo(merkez_x, merkez_y - r + 6)
+        ibre.lineTo(merkez_x + 7, merkez_y + 6)
+        ibre.lineTo(merkez_x, merkez_y)
+        ibre.lineTo(merkez_x - 7, merkez_y + 6)
+        ibre.closeSubpath()
+        ressam.setBrush(renk)
+        ressam.drawPath(ibre)
+        ressam.end()
+        return QIcon(pix)
+
+    def _yon_pid_butonu_ekle(self):
+        # Kullanici istegi: manuel duz suruste (klavye VEYA joystick) IMU
+        # gyro'suna bakip sapmayi otomatik duzelten bir PID araca eklendi
+        # (bkz. arduino_motor_kontrol.py). Once canli veriyle dogrulandi;
+        # araç Jetson'inda gyro tam kalibre (mag/accel degil) oldugu icin
+        # SADECE gyro kullanilarak tasarlandi - detaylar DOKUMANTASYON.md'de.
+        # Varsayilan ACIK (kullanici tercihi) ama sahada beklenmedik
+        # davranis olursa tek tikla kapatilabilsin diye buton eklendi.
+        buton = QPushButton(self.ui.sol_menu_frame)
+        buton.setMinimumSize(QSize(148, 64))
+        buton.setMaximumSize(QSize(148, 64))
+        buton.setStyleSheet(self.ui.ayarlar_button.styleSheet())
+        buton.setText("")
+        buton.setCheckable(True)
+        buton.setChecked(True)
+        buton.setIcon(self._yon_pid_ikonu_olustur(True))
+        buton.setIconSize(QSize(64, 64))
+        buton.setToolTip("Yön düzeltme PID (AÇIK) - kapatmak için tıkla")
+        buton.setObjectName("pushButton_yonPid")
+        eklenecek_index = self.ui.verticalLayout_8.indexOf(self.ui.pushButton_pwmIzle)
+        self.ui.verticalLayout_8.insertWidget(eklenecek_index, buton)
+        buton.clicked.connect(self._yon_pid_degistir)
+        self.ui.pushButton_yonPid = buton
+        if hasattr(self, 'telemetri_motoru'):
+            self.telemetri_motoru.yon_pid_ayarla(True)
+
+    def _yon_pid_degistir(self):
+        aktif = self.ui.pushButton_yonPid.isChecked()
+        self.ui.pushButton_yonPid.setIcon(self._yon_pid_ikonu_olustur(aktif))
+        self.ui.pushButton_yonPid.setToolTip(f"Yön düzeltme PID ({'AÇIK' if aktif else 'KAPALI'}) - {'kapatmak' if aktif else 'açmak'} için tıkla")
+        if hasattr(self, 'telemetri_motoru'):
+            self.telemetri_motoru.yon_pid_ayarla(aktif)
+        self.log_yaz(f"🧭 Yön düzeltme PID: {'AÇIK' if aktif else 'KAPALI'}")
+
+    def _devam_ikonu_olustur(self):
+        # Acil durdurma kilidini acan "DEVAM ET" butonu icin yesil oynat/devam
+        # oku - diger butonlarla ayni QPainter yontemi (bkz. _pwm_izleme_ikonu_olustur).
+        boyut = 64
+        pix = QPixmap(boyut, boyut)
+        pix.fill(Qt.transparent)
+        ressam = QPainter(pix)
+        ressam.setRenderHint(QPainter.Antialiasing)
+        kalem = QPen(QColor("#00FF7B"))
+        kalem.setWidth(4)
+        kalem.setJoinStyle(Qt.RoundJoin)
+        ressam.setPen(kalem)
+        ressam.setBrush(QColor("#00FF7B"))
+        merkez_x, merkez_y, r = boyut / 2, boyut / 2, 20
+        ressam.drawEllipse(QRectF(merkez_x - r, merkez_y - r, 2 * r, 2 * r))
+        ok = QPainterPath()
+        ok.moveTo(merkez_x - 7, merkez_y - 11)
+        ok.lineTo(merkez_x - 7, merkez_y + 11)
+        ok.lineTo(merkez_x + 12, merkez_y)
+        ok.closeSubpath()
+        kalem2 = QPen(QColor("#0B0B0B"))
+        kalem2.setWidth(1)
+        ressam.setPen(kalem2)
+        ressam.setBrush(QColor("#0B0B0B"))
+        ressam.drawPath(ok)
+        ressam.end()
+        return QIcon(pix)
+
+    def _ates_ikonu_olustur(self):
+        # Nisangah/crosshair ikonu - diger butonlarin SVG'leriyle ayni
+        # cizim yontemi (QPainter, bkz. _pwm_izleme_ikonu_olustur), ama
+        # ACİL DURDUR'un duz kirmizisiyla karismasin diye canlı turuncu.
+        boyut = 64
+        pix = QPixmap(boyut, boyut)
+        pix.fill(Qt.transparent)
+        ressam = QPainter(pix)
+        ressam.setRenderHint(QPainter.Antialiasing)
+        kalem = QPen(QColor("#FF6A00"))
+        kalem.setWidth(4)
+        kalem.setCapStyle(Qt.RoundCap)
+        ressam.setPen(kalem)
+        merkez_x, merkez_y, r = boyut / 2, boyut / 2, 16
+        ressam.drawEllipse(QRectF(merkez_x - r, merkez_y - r, 2 * r, 2 * r))
+        for (x1, y1, x2, y2) in [
+            (merkez_x, merkez_y - r - 12, merkez_x, merkez_y - r + 4),
+            (merkez_x, merkez_y + r - 4, merkez_x, merkez_y + r + 12),
+            (merkez_x - r - 12, merkez_y, merkez_x - r + 4, merkez_y),
+            (merkez_x + r - 4, merkez_y, merkez_x + r + 12, merkez_y),
+        ]:
+            ressam.drawLine(int(x1), int(y1), int(x2), int(y2))
+        ressam.setBrush(QColor("#FF6A00"))
+        ressam.drawEllipse(QRectF(merkez_x - 3, merkez_y - 3, 6, 6))
+        ressam.end()
+        return QIcon(pix)
+
+    def _silah_ates_butonu_ekle(self):
+        # Kullanici istegi: sol barda PWM butonunun USTUNE, basili tutunca
+        # ates eden bir buton. Gercek "ates" (lazer) turret_node.py
+        # tarafinda /silah_ates_manuel (Bool) ile tetikleniyor ve KENDI
+        # heartbeat guvenligine sahip (0.5sn icinde tazelenmezse otomatik
+        # kapanir) - bu yuzden basili tutulurken surekli tekrar gonderiyoruz,
+        # tek seferlik tikla degil (bkz. telemetri_sistemi.py silah_ates_ayarla).
+        buton = QPushButton(self.ui.sol_menu_frame)
+        buton.setMinimumSize(QSize(148, 64))
+        buton.setMaximumSize(QSize(148, 64))
+        buton.setStyleSheet(self.ui.ayarlar_button.styleSheet())
+        buton.setText("")
+        buton.setIcon(self._ates_ikonu_olustur())
+        buton.setIconSize(QSize(64, 64))
+        buton.setToolTip("ATEŞ (basılı tutun)")
+        buton.setObjectName("pushButton_silahAtes")
+        eklenecek_index = self.ui.verticalLayout_8.indexOf(self.ui.pushButton_pwmIzle)
+        self.ui.verticalLayout_8.insertWidget(eklenecek_index, buton)
+        self._ates_zamanlayici = QTimer()
+        self._ates_zamanlayici.setInterval(50)  # vehicle-taraf 0.5sn zaman asimina bol pay
+        self._ates_zamanlayici.timeout.connect(lambda: self._telemetri_ates_gonder(True))
+        buton.pressed.connect(self._ates_baslat)
+        buton.released.connect(self._ates_durdur)
+        self.ui.pushButton_silahAtes = buton
+
+    def _ates_baslat(self):
+        self._telemetri_ates_gonder(True)
+        self._ates_zamanlayici.start()
+
+    def _ates_durdur(self):
+        self._ates_zamanlayici.stop()
+        self._telemetri_ates_gonder(False)
+
+    def _telemetri_ates_gonder(self, aktif):
+        if hasattr(self, 'telemetri_motoru'):
+            self.telemetri_motoru.silah_ates_ayarla(aktif)
+
+    def _silah_joystick_hedefi_butonu_ekle(self):
+        # GECICI: yarismadan once araç/silah icin ayri joystick olacak,
+        # simdilik TEK joystick ayarlar sayfasindaki bu dugmeyle arac/silah
+        # arasinda elle paylasiliyor (kullanici istegi).
+        buton = QPushButton(self.ui.page_ayarlar)
+        buton.setGeometry(QRectF(430, 550, 150, 40).toRect())
+        buton.setStyleSheet(self.ui.pushButton_joystick.styleSheet())
+        buton.setCheckable(True)
+        buton.setChecked(False)
+        buton.setText("HEDEF: ARAÇ")
+        buton.setToolTip("Fiziksel joystick şu an aracı mı silahı mı kontrol ediyor")
+        buton.setObjectName("pushButton_joystickHedefi")
+        buton.show()
+        buton.clicked.connect(self._joystick_hedefi_degistir)
+        self.ui.pushButton_joystickHedefi = buton
+
+    def _joystick_hedefi_degistir(self):
+        silah_mi = self.ui.pushButton_joystickHedefi.isChecked()
+        hedef = "SILAH" if silah_mi else "ARAC"
+        self.ui.pushButton_joystickHedefi.setText(f"HEDEF: {'SİLAH' if silah_mi else 'ARAÇ'}")
+        self.ui.pushButton_joystickHedefi.setStyleSheet(AYAR_AKTIF if silah_mi else self.ui.pushButton_joystick.styleSheet())
+        if hasattr(self, 'telemetri_motoru'):
+            self.telemetri_motoru.joystick_hedefini_ayarla(hedef)
+        self.log_yaz(f"🎮 Joystick hedefi: {hedef}")
+
     def _pwm_izleme_butonu_ekle(self):
         # Kullanici istegi: terminalde Ctrl+C ile canli PWM akisindan
         # cikildiktan sonra, tek tikla akisa geri donecek bir buton -
@@ -273,6 +458,133 @@ class TufanGCS(QMainWindow):
         self.ui.stackedWidget.setCurrentIndex(0)
         self.ui.terminal_ekrani.pwm_akisina_don()
         self.ui.terminal_ekrani.setFocus()
+
+    def _yeni_terminal_ikonu_olustur(self):
+        # "+" işaretli küçük bir terminal penceresi ikonu - diğerleriyle
+        # aynı QPainter yöntemi (bkz. _pwm_izleme_ikonu_olustur).
+        boyut = 64
+        pix = QPixmap(boyut, boyut)
+        pix.fill(Qt.transparent)
+        ressam = QPainter(pix)
+        ressam.setRenderHint(QPainter.Antialiasing)
+        kalem = QPen(QColor("#00E5FF"))
+        kalem.setWidth(4)
+        kalem.setJoinStyle(Qt.RoundJoin)
+        ressam.setPen(kalem)
+        cerceve = QRectF(8, 12, boyut - 16, boyut - 24)
+        ressam.drawRoundedRect(cerceve, 6, 6)
+        arti_x, arti_y, kol = cerceve.center().x(), cerceve.center().y() + 2, 8
+        ressam.drawLine(int(arti_x - kol), int(arti_y), int(arti_x + kol), int(arti_y))
+        ressam.drawLine(int(arti_x), int(arti_y - kol), int(arti_x), int(arti_y + kol))
+        ressam.end()
+        return QIcon(pix)
+
+    def _yeni_terminal_butonu_ekle(self):
+        # Kullanici istegi (2026-09-01): birden fazla terminal acabilmek,
+        # hepsi araca otomatik baglanacak. Her tiklamada AYRI, benzersiz
+        # isimli bir tmux oturumuna baglanan yeni bir yuzen pencere acilir
+        # (bkz. terminal_widget.py SshTerminalWidget tmux_oturum parametresi)
+        # - ana terminalden bagimsiz, birbirinden de bagimsiz calisirlar,
+        # hepsi araç kapatilmadan/interface kapatilsa BILE tmux sayesinde
+        # calismaya devam eder.
+        buton = QPushButton(self.ui.sol_menu_frame)
+        buton.setMinimumSize(QSize(148, 64))
+        buton.setMaximumSize(QSize(148, 64))
+        buton.setStyleSheet(self.ui.ayarlar_button.styleSheet())
+        buton.setText("")
+        buton.setIcon(self._yeni_terminal_ikonu_olustur())
+        buton.setIconSize(QSize(64, 64))
+        buton.setToolTip("Yeni terminal aç (araca otomatik bağlanır)")
+        buton.setObjectName("pushButton_yeniTerminal")
+        eklenecek_index = self.ui.verticalLayout_8.indexOf(self.ui.pushButton_pwmIzle)
+        self.ui.verticalLayout_8.insertWidget(eklenecek_index, buton)
+        buton.clicked.connect(self._yeni_terminal_ac)
+        self.ui.pushButton_yeniTerminal = buton
+        self._yeni_terminal_sayaci = 0
+        self._terminal_paneli = None
+        self._terminal_splitter = None
+
+    def _yeni_terminal_ac(self):
+        # Kullanici istegi (2026-09-01): "termix/tmux gibi ekranlar
+        # bölünmeli, hepsini aynı anda görebilmek için" - ayrı ayrı üst üste
+        # binen pencereler yerine TEK bir panelde, YAN YANA bölünmüş
+        # (QSplitter - sürüklenerek yeniden boyutlandırılabilir) terminaller.
+        # Panel kapatılırsa (X) bir dahaki "+" tıklamasında sıfırdan açılır;
+        # ama içindeki tmux oturumları (bkz. terminal_widget.py) araçta
+        # ÇALIŞMAYA DEVAM EDER, sadece görünümden kaldırılmış olurlar - "+"
+        # tekrar tıklanınca YENİ bir oturum açılır (eskisine dönmek için
+        # tmux oturum adını bilerek ayrıca bağlanmak gerekir, ileride bir
+        # "aç/oturumlar" listesi eklenebilir).
+        if self._terminal_paneli is None:
+            self._terminal_paneli = QDialog(self)
+            self._terminal_paneli.setWindowTitle("TUFAN Terminaller")
+            self._terminal_paneli.resize(1400, 600)
+            duzen = QVBoxLayout(self._terminal_paneli)
+            duzen.setContentsMargins(0, 0, 0, 0)
+            self._terminal_splitter = QSplitter(Qt.Horizontal, self._terminal_paneli)
+            duzen.addWidget(self._terminal_splitter)
+            self._terminal_paneli.setAttribute(Qt.WA_DeleteOnClose)
+            self._terminal_paneli.finished.connect(self._terminal_paneli_kapandi)
+
+        self._yeni_terminal_sayaci += 1
+        oturum_adi = f"tufan_terminal_{self._yeni_terminal_sayaci}"
+        yeni_terminal = SshTerminalWidget(self._terminal_splitter, tmux_oturum=oturum_adi)
+        self._terminal_splitter.addWidget(yeni_terminal)
+
+        self._terminal_paneli.show()
+        self._terminal_paneli.raise_()
+        self._terminal_paneli.activateWindow()
+        yeni_terminal.setFocus()
+
+    def _terminal_paneli_kapandi(self):
+        # WA_DeleteOnClose ile Qt nesnesi zaten siliniyor - referansi da
+        # temizleyip bir sonraki "+" tıklamasının SIFIRDAN yeni bir panel
+        # açmasını sağlıyoruz.
+        self._terminal_paneli = None
+        self._terminal_splitter = None
+
+    def _devam_butonu_ekle(self):
+        # Kullanici istegi: ACİL DURDUR'a basilinca araçtaki motor komutlari
+        # kesiliyor (bkz. arduino_motor_kontrol.py _kilitli), bunu geri acmak
+        # icin ayri, gorunur bir "DEVAM ET" kisayolu lazim - klavye kisayolu
+        # DEGIL, butonlar tercih ediliyor (bkz. pwmIzle butonu gerekcesi).
+        # Sadece kilit AKTIFKEN gorunur/tiklanabilir - normal calismada
+        # yanlislikla basilamasin ve kilidin o an acik oldugu net olsun.
+        buton = QPushButton(self.ui.sol_menu_frame)
+        buton.setMinimumSize(QSize(148, 64))
+        buton.setMaximumSize(QSize(148, 64))
+        buton.setStyleSheet(self.ui.ayarlar_button.styleSheet())
+        buton.setText("")
+        buton.setIcon(self._devam_ikonu_olustur())
+        buton.setIconSize(QSize(64, 64))
+        buton.setToolTip("DEVAM ET (acil durdurma kilidini aç)")
+        buton.setObjectName("pushButton_devamEt")
+        eklenecek_index = self.ui.verticalLayout_8.indexOf(self.ui.pushButton_acilKapat) + 1
+        self.ui.verticalLayout_8.insertWidget(eklenecek_index, buton)
+        buton.setVisible(False)
+        buton.clicked.connect(self._devam_et_tikla)
+        self.ui.pushButton_devamEt = buton
+        self._arac_kilitli_mi = False
+
+    def _devam_et_tikla(self):
+        onay = QMessageBox.question(
+            self, "Acil Durdurma Kilidini Aç",
+            "Araçtaki motor komutları ACİL DURDUR ile kesildi.\n"
+            "Şimdi tekrar sürülebilir hale getirmek istediğinize emin misiniz?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if onay != QMessageBox.Yes:
+            return
+        if hasattr(self, 'telemetri_motoru'):
+            self.telemetri_motoru.hareket_emri_gonder("DEVAM_CMD")
+        self._arac_kilitli_mi = False
+        self.ui.pushButton_devamEt.setVisible(False)
+        self.ui.terminal_ekrani.append(
+            "<br><span style='color: #00FF7B;'><b>✅ DEVAM ET: Acil durdurma kilidi açıldı, araç tekrar komut kabul ediyor.</b></span><br>"
+        )
+        self.akilli_bildirim_gonder(
+            "✅ Devam Ediliyor", "ARAÇTAKİ ACİL DURDURMA KİLİDİ AÇILDI.", kritik_mi=False
+        )
 
     def _buton_baglantilarini_kur(self):
         self.ui.home_button.clicked.connect(lambda: self.ui.stackedWidget.setCurrentIndex(0))
@@ -397,27 +709,29 @@ class TufanGCS(QMainWindow):
         # Eskiden "MOTORLAR" olan bu gosterge artik gercek /imu/data
         # heartbeat'ine gore IMU durumunu gosteriyor.
         dil = getattr(self, 'current_lang', 'Türkçe')
-        durum = "ACTIVE" if aktif_mi else ("PASSIVE" if dil == "English" else "PASİF")
+        durum = ("ACTIVE" if aktif_mi else "PASSIVE") if dil == "English" else ("AKTİF" if aktif_mi else "PASİF")
         self.ui.label_motorYazi.setText(f"IMU : {durum}")
         self.ui.label_motorYazi.setStyleSheet(f"color: {'#00ff00' if aktif_mi else 'red'}; font-weight: bold; font-size: 24px; border: none; background-color: transparent;")
 
     def guc_arayuz_guncelle(self, normal_mi):
         dil = getattr(self, 'current_lang', 'Türkçe')
         baslik = "POWER SYSTEM" if dil == "English" else "GÜÇ SİSTEMİ"
-        durum = "NORMAL" if normal_mi else ("CRITICAL" if dil == "English" else "KRİTİK")
+        durum = ("NORMAL" if normal_mi else "CRITICAL") if dil == "English" else ("NORMAL" if normal_mi else "KRİTİK")
         self.ui.label_GucYazi.setText(f"{baslik} : {durum}")
         self.ui.label_GucYazi.setStyleSheet(f"color: {'#00ff00' if normal_mi else 'red'}; font-weight: bold; font-size: 24px; border: none; background-color: transparent;")
 
     def gps_arayuz_guncelle(self, etkin_mi):
         dil = getattr(self, 'current_lang', 'Türkçe')
-        durum = "ACTIVE" if etkin_mi else ("PASSIVE" if dil == "English" else "PASİF")
+        durum = ("ACTIVE" if etkin_mi else "PASSIVE") if dil == "English" else ("ETKİN" if etkin_mi else "PASİF")
         self.ui.label_gpsYazi.setText(f"GPS : {durum}")
         self.ui.label_gpsYazi.setStyleSheet(f"color: {'#00ff00' if etkin_mi else 'red'}; font-weight: bold; font-size: 24px; border: none; background-color: transparent;")
     
-    def wifi_arayuz_guncelle(self, yuzde):
-        # Eskiden gercek WiFi sinyali - artik Ubiquiti nokta-nokta kablosuz
-        # linkinin baglanti kalitesi (bkz. telemetri_sistemi.py _wifi_kontrol).
-        self.ui.label_wifiYazi.setText(f"UBIQUITI : %{yuzde}")
+    def wifi_arayuz_guncelle(self, yuzde, kaynak="UBIQUITI"):
+        # Ubiquiti nokta-nokta linkinin baglanti kalitesi - Ubiquiti tamamen
+        # kopukken (%0) telemetri_sistemi.py otomatik olarak WiFi'yi dener
+        # ve kaynagi "WIFI" olarak bildirir, gösterge o zaman WIFI yazar
+        # (bkz. telemetri_sistemi.py _wifi_kontrol).
+        self.ui.label_wifiYazi.setText(f"{kaynak} : %{yuzde}")
         if yuzde > 60:
             self.ui.label_wifiYazi.setStyleSheet("color: #00ff00; font-weight: bold; font-size: 24px; border: none; background-color: transparent;") 
         elif yuzde > 30:
@@ -428,7 +742,7 @@ class TufanGCS(QMainWindow):
     def kamera_arayuz_guncelle(self, hazir_mi):
         dil = getattr(self, 'current_lang', 'Türkçe')
         baslik = "CAMERA" if dil == "English" else "KAMERA"
-        durum = "READY" if hazir_mi else ("ERROR" if dil == "English" else "BAĞLANTI KOPTU")
+        durum = ("READY" if hazir_mi else "ERROR") if dil == "English" else ("HAZIR" if hazir_mi else "BAĞLANTI KOPTU")
         self.ui.label_kameraYazi.setText(f"{baslik} : {durum}")
         self.ui.label_kameraYazi.setStyleSheet(f"color: {'#00ff00' if hazir_mi else 'red'}; font-weight: bold; font-size: 24px; border: none; background-color: transparent;")
 
@@ -481,11 +795,11 @@ class TufanGCS(QMainWindow):
 
         if self._otonom_hazir and self._manuel_hazir:
             if self._mod_cycle_goster_otonom:
-                durum, renk = otonom_metni, "#00AAFF"
+                durum, renk = otonom_metni, "#00ff00"
             else:
                 durum, renk = manuel_metni, "#00ff00"
         elif self._otonom_hazir:
-            durum, renk = otonom_metni, "#00AAFF"
+            durum, renk = otonom_metni, "#00ff00"
         elif self._manuel_hazir:
             durum, renk = manuel_metni, "#00ff00"
         else:
@@ -501,8 +815,14 @@ class TufanGCS(QMainWindow):
         # kutudan tasip iki uctan kirpiliyordu (kutu genisligi sabit,
         # AlignCenter). Metin uzunlugu degistikce (dil, mod) font boyutunu
         # kutuya sigacak sekilde otomatik kucultuyoruz.
+        # NOT: label_sistemYazi'nin kendi kutusu (371px) daireye (frame_halka,
+        # 400px çap) neredeyse tam sığacak şekilde yerleştirilmiş, ama
+        # metnin bulunduğu yükseklikte dairenin GERÇEK (yuvarlak sınırdan
+        # dolayı kutudan dar) genişliği kutunun kendisinden bile az farkla
+        # dar - eski 12px kenar payı yetersizdi, metin dairenin dışına az
+        # da olsa taşıyordu (canlı gözlemlendi). Daha güvenli pay veriyoruz.
         font = self.ui.label_sistemYazi.font()
-        kutu_genisligi = self.ui.label_sistemYazi.width() - 12  # kenar payi
+        kutu_genisligi = self.ui.label_sistemYazi.width() - 50  # kenar payi (daire sinirina gore guvenli)
         boyut = 32
         while boyut > 14:
             font.setPixelSize(boyut)
@@ -554,6 +874,9 @@ class TufanGCS(QMainWindow):
         )
         if hasattr(self, 'telemetri_motoru'):
             self.telemetri_motoru.hareket_emri_gonder("EMERGENCY_STOP_CMD")
+        self._arac_kilitli_mi = True
+        if hasattr(self.ui, 'pushButton_devamEt'):
+            self.ui.pushButton_devamEt.setVisible(True)
 
     def veri_kaydet_tetikle(self):
         dil = CEVIRILER.get(self.aktif_dil, CEVIRILER["Türkçe"])
@@ -920,6 +1243,14 @@ class TufanGCS(QMainWindow):
         # geri çekilmezse keyPressEvent tuşları hiç almıyordu - klavyeyi
         # aktif edip WASD'a basınca araç sürülemiyordu (canlı bildirildi).
         self.setFocus()
+        # YENİ DÜZELTME (2026-08-31): pushButton_klavye Ayarlar sayfasında
+        # (index 4) duruyor, ama keyPressEvent SADECE [0,1,2] sayfalarında
+        # tuş kabul ediyor (kasıtlı - ayar kutularına yazarken yanlışlıkla
+        # araç sürülmesin diye). Kullanıcı Ayarlar sayfasındayken klavyeyi
+        # aktif edip hemen WASD'a basınca "aktif ettim ama süremiyorum"
+        # oluyordu - klavye aktif olunca otomatik ana ekrana dön.
+        if self.klavye_aktif:
+            self.ui.stackedWidget.setCurrentIndex(0)
 
     def ayar_joystick_tetikle(self):
         dil = CEVIRILER.get(self.aktif_dil, CEVIRILER["Türkçe"])
@@ -932,7 +1263,9 @@ class TufanGCS(QMainWindow):
             if not hasattr(self, 'surus_joystick_motoru'):
                 self.surus_joystick_motoru = SurusJoystickThread()
                 self.surus_joystick_motoru.pwm_sinyali.connect(self.joystick_pwm_geldi)
+                self.surus_joystick_motoru.yon_sinyali.connect(self.joystick_yon_geldi)
                 self.surus_joystick_motoru.baglanti_sinyali.connect(self.joystick_baglanti_degisti)
+                self.surus_joystick_motoru.guvenlik_sinyali.connect(self.log_yaz)
             self.surus_joystick_motoru.start()
         else:
             self.ui.pushButton_joystick.setStyleSheet(AYAR_PASIF)
@@ -953,6 +1286,10 @@ class TufanGCS(QMainWindow):
     def joystick_pwm_geldi(self, sol_pwm, sag_pwm):
         if hasattr(self, 'telemetri_motoru'):
             self.telemetri_motoru.joystick_pwm_gonder(sol_pwm, sag_pwm)
+
+    def joystick_yon_geldi(self, x, y):
+        if hasattr(self, 'telemetri_motoru'):
+            self.telemetri_motoru.joystick_turret_gonder(x, y)
 
     def joystick_baglanti_degisti(self, bagli):
         self.log_yaz("🕹️ Joystick Arduino bağlandı." if bagli else "⚠️ Joystick Arduino bağlantısı yok/koptu.")
@@ -1005,6 +1342,12 @@ class TufanGCS(QMainWindow):
 
     # --- GÜNCELLEME 2: BAĞIMSIZ PALET KLAVYE KONTROLLERİ ---
     def keyPressEvent(self, event):
+        # ESC: rota/hedef oku çizerken (taktik radarda sürükleme) iptal eder
+        # - klavye_aktif/mod/sayfa şartlarından BAĞIMSIZ çalışır, çünkü bu
+        # sürüş komutu değil, harita etkileşimini iptal etme işlemi.
+        if event.key() == Qt.Key_Escape and hasattr(self, 'harita_yoneticisi'):
+            self.harita_yoneticisi.taktik_radar.hedef_cizimini_iptal_et()
+            return
         if not self.klavye_aktif: return
         if self.ui.stackedWidget.currentIndex() not in [0, 1, 2]: return
         if hasattr(self, 'telemetri_motoru') and self.telemetri_motoru.arac_modu != "MANUEL": return

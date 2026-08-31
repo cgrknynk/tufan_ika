@@ -56,6 +56,32 @@ MAKS_MERKEZ_KAYMASI = 150
 STABILITE_PENCERE = 15      # ~0.3sn @ 50Hz
 STABILITE_TOLERANSI = 3     # bu pencere icindeki max-min fark bundan kucukse "sabit" say
 
+# SON GUVENLIK AGI (2026-08-31, kaptan bildirimi uzerine): joystick FIZIKSEL
+# OLARAK hareketsizken aracin SUREKLI hareket etmeye devam ettigi, acil durdurma
+# + joystick'i biraz oynatmadan duzelmeyen bir durum canli bildirildi. Yukaridaki
+# merkez/olu-bolge hesabinda HENUZ TESPIT EDILEMEMIS bir hata (donanim
+# gurultusu/gevsek baglanti/baska bir yazilim kusuru) olsa BILE, bu kontrol
+# TAMAMEN BAGIMSIZ ve KALIBRASYONA (canli merkez_x/merkez_y) HIC GUVENMEZ:
+# ham ADC okumasi yeterince UZUN SURE (yaklasik 1 saniye) neredeyse hic
+# kipirdamadiysa VE bu sabit deger, guc-acilisindaki ILK (asla degismeyen)
+# kalibrasyon merkezine YAKINSA, o eksenin ciktisi HESAPLANAN DEGER NE
+# OLURSA OLSUN sifira zorlanir.
+#
+# ONEMLI GUVENLIK AYRINTISI: "ILK kalibrasyon merkezine YAKIN" sarti KASITLI
+# - sadece ham ADC'nin SABIT olup olmadigina bakilsaydi, suruculer joystick'i
+# TAM ILERI'de birkac saniyeden uzun süre BASILI TUTTUGUNDA (duz devam etmek
+# icin gayet normal bir kullanim) o konum da "sabit" gorunup YANLISLIKLA
+# sifirlanirdi - bu, dur-kalk yapan, guvenilmez bir surus deneyimi yaratirdi.
+# Ilk kalibrasyon merkezine yakinlik sarti, bu agin SADECE "merkeze yakin bir
+# yerde takili kalma" (tam da bildirilen hata) durumunu yakalamasini, gercek
+# TAM ITILME durumlarina hic dokunmamasini saglar.
+GUVENLIK_SABIT_PENCERE = 50           # ~1.0sn @ 50Hz
+GUVENLIK_SABIT_TOLERANSI = 5          # ADC birimi - STABILITE_TOLERANSI'ndan biraz gevsek (gurultu payi)
+GUVENLIK_SABIT_MAKS_UZAKLIK = 220     # ilk kalibrasyon merkezinden bu kadar uzagi "merkeze yakin" sayar -
+                                       # MAKS_MERKEZ_KAYMASI'ndan (150) biraz genis: canli merkez zaten o
+                                       # kadar kayabildigi icin, ilk merkeze gore payin da en az o kadar
+                                       # olmasi gerekir; gercek tam itilme (~400-500) ile hala net ayrisir.
+
 
 def _port_bul():
     adaylar = sorted(glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*"))
@@ -63,8 +89,10 @@ def _port_bul():
 
 
 class SurusJoystickThread(QThread):
-    pwm_sinyali = pyqtSignal(float, float)   # sol_oran, sag_oran [-1, 1] - PWM DEGIL
+    pwm_sinyali = pyqtSignal(float, float)   # sol_oran, sag_oran [-1, 1] - PWM DEGIL (surus/tank karisimi SONRASI)
+    yon_sinyali = pyqtSignal(float, float)   # ham x, y [-1, 1] - karisim ONCESI (silah pan/tilt icin)
     baglanti_sinyali = pyqtSignal(bool)
+    guvenlik_sinyali = pyqtSignal(str)       # son guvenlik agi devreye girdiginde log icin (bkz. run())
 
     def __init__(self, port=None):
         super().__init__()
@@ -126,9 +154,17 @@ class SurusJoystickThread(QThread):
                 with serial.Serial(port, BAUDRATE, timeout=1.0) as ser:
                     time.sleep(2.0)  # Arduino reset/kendine gelme suresi
                     merkez_x, merkez_y = self._kalibre_et(ser)
+                    # ILK kalibrasyon merkezi - guvenlik agi icin SABIT referans,
+                    # canli merkez_x/merkez_y gibi HICBIR ZAMAN degismez (bkz.
+                    # GUVENLIK_SABIT_MAKS_UZAKLIK notu).
+                    ilk_merkez_x, ilk_merkez_y = merkez_x, merkez_y
                     self._baglanti_durumunu_guncelle(True)
                     pencere_x = deque(maxlen=STABILITE_PENCERE)
                     pencere_y = deque(maxlen=STABILITE_PENCERE)
+                    guvenlik_pencere_x = deque(maxlen=GUVENLIK_SABIT_PENCERE)
+                    guvenlik_pencere_y = deque(maxlen=GUVENLIK_SABIT_PENCERE)
+                    son_guvenlik_uyari_x = False
+                    son_guvenlik_uyari_y = False
                     while self._calisiyor:
                         satir = ser.readline().decode("utf-8", errors="ignore").strip()
                         if not satir:
@@ -173,10 +209,52 @@ class SurusJoystickThread(QThread):
                         x = self._normalize(x_ham, merkez_x, TERS_X)
                         y = self._normalize(y_ham, merkez_y, TERS_Y)
 
+                        # SON GUVENLIK AGI: canli merkez_x/merkez_y'ye HIC
+                        # guvenmeden, ham ADC'nin (a) GERCEKTEN ~1sn kipirdamadigini
+                        # VE (b) bu sabit deger ILK (hic degismeyen) kalibrasyon
+                        # merkezine yakin oldugunu kontrol eder. Ikisi de doğruysa
+                        # x/y ne hesaplanmis olursa olsun sifira zorlanir. (b) sarti
+                        # olmadan, joystick'i TAM ILERI'de birkac saniye BASILI
+                        # TUTMAK (gayet normal bir kullanim) da "sabit" sayilip
+                        # yanlislikla sifirlanirdi - bkz. dosya basindaki not.
+                        guvenlik_pencere_x.append(x_ham)
+                        guvenlik_pencere_y.append(y_ham)
+                        if len(guvenlik_pencere_x) == GUVENLIK_SABIT_PENCERE:
+                            x_sabit = (max(guvenlik_pencere_x) - min(guvenlik_pencere_x)) < GUVENLIK_SABIT_TOLERANSI
+                            x_merkeze_yakin = abs(x_ham - ilk_merkez_x) <= GUVENLIK_SABIT_MAKS_UZAKLIK
+                            if x_sabit and x_merkeze_yakin and x != 0.0:
+                                if not son_guvenlik_uyari_x:
+                                    self.guvenlik_sinyali.emit(
+                                        f"⚠️ GÜVENLİK AĞI: X ekseni ~1sn hareketsiz (merkeze yakın) "
+                                        f"ama oran={x:.2f} hesaplanmıştı, ZORLA sıfırlandı "
+                                        f"(ham={x_ham}, canlı merkez={merkez_x}, ilk merkez={ilk_merkez_x})")
+                                    son_guvenlik_uyari_x = True
+                                x = 0.0
+                            else:
+                                son_guvenlik_uyari_x = False
+                        if len(guvenlik_pencere_y) == GUVENLIK_SABIT_PENCERE:
+                            y_sabit = (max(guvenlik_pencere_y) - min(guvenlik_pencere_y)) < GUVENLIK_SABIT_TOLERANSI
+                            y_merkeze_yakin = abs(y_ham - ilk_merkez_y) <= GUVENLIK_SABIT_MAKS_UZAKLIK
+                            if y_sabit and y_merkeze_yakin and y != 0.0:
+                                if not son_guvenlik_uyari_y:
+                                    self.guvenlik_sinyali.emit(
+                                        f"⚠️ GÜVENLİK AĞI: Y ekseni ~1sn hareketsiz (merkeze yakın) "
+                                        f"ama oran={y:.2f} hesaplanmıştı, ZORLA sıfırlandı "
+                                        f"(ham={y_ham}, canlı merkez={merkez_y}, ilk merkez={ilk_merkez_y})")
+                                    son_guvenlik_uyari_y = True
+                                y = 0.0
+                            else:
+                                son_guvenlik_uyari_y = False
+
                         sol_oran = max(min(y + x, 1.0), -1.0)
                         sag_oran = max(min(y - x, 1.0), -1.0)
 
                         self.pwm_sinyali.emit(sol_oran, sag_oran)
+                        # Ham x/y (tank karisimi ONCESI) - silah pan/tilt kontrolu
+                        # icin. Aracin surus kalibrasyonu (merkez, olu bolge,
+                        # oto-merkezleme, guvenlik siniri) burada zaten uygulanmis
+                        # oldugundan silah icin AYRICA kalibrasyon yapmaya gerek yok.
+                        self.yon_sinyali.emit(x, y)
             except (serial.SerialException, OSError):
                 self._baglanti_durumunu_guncelle(False)
                 time.sleep(2.0)

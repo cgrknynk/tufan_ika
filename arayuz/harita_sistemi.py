@@ -8,8 +8,9 @@ try:
     from rclpy.executors import SingleThreadedExecutor
     from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSDurabilityPolicy, QoSHistoryPolicy
     from sensor_msgs.msg import LaserScan, Imu, NavSatFix
-    from nav_msgs.msg import OccupancyGrid
+    from nav_msgs.msg import OccupancyGrid, Odometry
     from geometry_msgs.msg import PoseStamped
+    from std_msgs.msg import String
     from tf2_ros import Buffer, TransformListener
 except Exception as e:
     rclpy = None
@@ -23,7 +24,9 @@ except Exception as e:
     Imu = None
     NavSatFix = None
     OccupancyGrid = None
+    Odometry = None
     PoseStamped = None
+    String = None
     Buffer = None
     TransformListener = None
     ROS2_IMPORT_ERROR = str(e)
@@ -74,6 +77,14 @@ class Ros2GcsMotoru(QThread):
         self.calisiyor = True
         self.son_imu_gonderim = 0.0
         self.latest_yaw_rad = 0.0
+        # /odom'daki GERCEK (mutlak) arac konumu - rota cizgilerini (plan)
+        # arac-goreceli (ileri/sol) cevirmek icin sart, bkz. global/local
+        # _plan_callback. tf_buffer YERINE duz bir topic aboneligi (asagida) -
+        # tf_buffer C++ seviyesinde cökmeye sebep oldugu icin kalici olarak
+        # devre disi (bkz. run() icindeki not); bu basit abonelik o riske hic
+        # girmiyor.
+        self._odom_x = 0.0
+        self._odom_y = 0.0
         self.nav_to_pose_client = None
         self.goal_pose_pub = None
         self.tf_buffer = None
@@ -136,6 +147,10 @@ class Ros2GcsMotoru(QThread):
         # (canlı doğrulandı) - füzyonlu/kalibreli veri gerçekte '/imu/data'da.
         # Eski topic adında hiç publisher olmadığı için IMU hiçbir zaman veri almıyordu.
         self.imu_sub = self.node.create_subscription(Imu, '/imu/data', self.imu_callback, imu_qos)
+        # Rota (plan) cizgilerini arac-goreceli cevirmek icin gercek konum -
+        # bkz. global_plan_callback/local_plan_callback ve _dunya_to_arac.
+        if Odometry is not None:
+            self.odom_sub = self.node.create_subscription(Odometry, '/odom', self.odom_callback, 10)
 
         # costmap_callback artik tf_buffer KULLANMIYOR (bkz. asagidaki not) -
         # bu yuzden tf_buffer kapaliyken bile guvenle acilabilir.
@@ -159,6 +174,17 @@ class Ros2GcsMotoru(QThread):
             self.nav_to_pose_client = ActionClient(self.node, NavigateToPose, 'navigate_to_pose')
             self.global_plan_sub = self.node.create_subscription(Path, '/plan', self.global_plan_callback, nav2_qos)
             self.local_plan_sub = self.node.create_subscription(Path, '/local_plan', self.local_plan_callback, nav2_qos)
+            if String is not None:
+                # Kullanici istegi (2026-08-31): rota tamamlaninca (varsa
+                # basarisiz da olsa) mavi rota cizgisi ekranda SONSUZA KADAR
+                # kalmamali - Nav2 hedefe ulasinca /plan'a yeni mesaj
+                # YAYINLAMAYI KESIYOR (bos Path de gelmiyor), yani eski
+                # cizgi TEMIZLENMEDEN kaliyordu. goal_manager_node.py'nin
+                # zaten yayinladigi /ugv_goal_result (SUCCESS/FAILURE)
+                # sonucunu dinleyip rota bitince cizgiyi temizliyoruz.
+                self.goal_result_sub = self.node.create_subscription(
+                    String, '/ugv_goal_result', self.goal_result_callback, 10
+                )
             self.baglanti_sinyali.emit("🟢 ROS 2 Aktif: Lidar & IMU & Nav2 Rota")
         else:
             print(f"[HARITA] Nav2 mesaj paketleri (nav2_msgs) bulunamadı, rota özelliği devre dışı: {NAV2_IMPORT_ERROR}")
@@ -193,25 +219,16 @@ class Ros2GcsMotoru(QThread):
             return
         self.son_imu_gonderim = su_an
 
-        # costmap_callback icin: konum_birlestirici.py /odom TF'ini HAM (montaj
-        # duzeltmesi UYGULANMAMIS) /imu/data yonelimiyle yayinliyor (canli
-        # dogrulandi -> ayni anda duzeltilmis yaw 92 derece iken /odom'un
-        # yaw'i 2 derece). costmap bu HAM referansla insa edildigi icin, geri
-        # donusturme de AYNI ham yaw'i kullanmali -- duzeltilmis (goruntu icin
-        # kullanilan) yaw'i DEGIL.
-        self.latest_yaw_rad = math.atan2(
-            2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
-
         # --- IMU MONTAJ DÜZELTMESİ (fiziksel eksen <-> araç gövde ekseni) ---
-        # Bu araca monte edilmiş IMU'nun ham eksenleri REP-103 gövde eksenine
-        # (X=ileri, Y=sol, Z=yukarı) uymuyor: canlı doğrulandı -> IMU'nun
-        # X ekseni aracın SOLUNA, Y ekseni aracın ARKASINA, Z ekseni YUKARI
-        # bakıyor. Bu, Z ekseni etrafında sabit -90°'lik bir montaj farkı demek
-        # (gövde_X = -imu_Y, gövde_Y = imu_X, gövde_Z = imu_Z). Roll/Pitch/Yaw'ı
-        # ham quaterniondan doğrudan standart formülle çekmek (eskisi gibi)
-        # açıları birbirine karıştırıyordu; çünkü Euler açıları basit eksen
-        # takasıyla değil, quaternion çarpımıyla düzeltilmesi gerekiyor:
-        # q_govde = q_imu ⊗ q_montaj  (q_montaj = Z ekseninde -90° dönüş).
+        # BNO055 kartı aracın gerçek önüne değil, ~90° yanlış yöne monte
+        # edilmiş (kullanıcının ifadesiyle: kartın Y ekseni aracın ÖNÜNE,
+        # X ekseni SOLUNA bakıyor). 2026-08-30'da araç tarafında (bkz.
+        # konum_birlestirici.py _mount_fix) gerçek fiziksel PITCH testiyle
+        # (RViz'de doğrulandı: düzeltme kaldırılınca kaldırma hareketi
+        # pitch'e değil ROLL'e yansıyordu) kanıtlanan AYNI düzeltme burada
+        # da uygulanıyor: HAM /imu/data kuaterniyonuna, araç gövde
+        # çerçevesinde (ART-ÇARPIM/post-multiply) +90° Z-ekseni dönüşü:
+        # q_govde = q_imu ⊗ q_montaj  (q_montaj = Z ekseninde +90° dönüş).
         KOK2_2 = 0.7071067811865476  # cos(45°) = sin(45°)
         w1, x1, y1, z1 = q.w, q.x, q.y, q.z
         w = KOK2_2 * (w1 - z1)
@@ -234,28 +251,70 @@ class Ros2GcsMotoru(QThread):
 
         sin_z = 2.0 * (w * z + x * y)
         cos_z = 1.0 - 2.0 * (y * y + z * z)
-        yaw = math.degrees(math.atan2(sin_z, cos_z))
-        # NOT: self.latest_yaw_rad BURADA GUNCELLENMIYOR -- costmap icin
-        # kullanilan ham yaw yukarida (fonksiyon basinda) zaten ayarlandi.
+        yaw_rad = math.atan2(sin_z, cos_z)
+        yaw = math.degrees(yaw_rad)
+        # costmap_callback ve TaktikRadarEkrani (hedef tıklama, araç ikonu
+        # dönüşü) bunu kullanır - artık /odom ile AYNI (montaj düzeltmeli)
+        # referans, bkz. costmap_callback'teki 2026-08-30 notu.
+        self.latest_yaw_rad = yaw_rad
 
         self.imu_sinyal.emit(roll, pitch, yaw)
 
-        # Araç resminin üstünde canlı X/Y konumunu göstermek için (eski masaüstü
-        # koduna benzer şekilde) o anki odom->base_footprint konumunu da yayınla.
-        if self.tf_buffer is not None:
-            try:
-                tf = self.tf_buffer.lookup_transform('odom', 'base_footprint', rclpy.time.Time())
-                self.konum_sinyal.emit(tf.transform.translation.x, tf.transform.translation.y)
-            except Exception:
-                pass
+    def odom_callback(self, msg):
+        # GUNCELLEME: eski tf_buffer.lookup_transform('odom','base_footprint')
+        # yontemi C++ seviyesinde cökmeye sebep oldugu icin kalici olarak
+        # devre disiydi (self.tf_buffer hep None) - bu yuzden arac konumu
+        # HICBIR ZAMAN guncellenmiyordu ve rota (plan) cizgileri asagida
+        # aciklanan sebeple "boslukta" kaliyordu. Duz /odom aboneligi ayni
+        # bilgiyi TF'siz, cökme riski olmadan verir.
+        self._odom_x = msg.pose.pose.position.x
+        self._odom_y = msg.pose.pose.position.y
+        self.konum_sinyal.emit(self._odom_x, self._odom_y)
+
+    def _dunya_to_arac(self, world_x, world_y):
+        # costmap_callback'teki (bkz. asagisi) DUNYA -> ARAC GOVDESI donusumun
+        # birebir ayni formulu - /plan ve /local_plan HAM /odom (mutlak)
+        # koordinatlarinda gelir, ama TaktikRadarEkrani araci HER ZAMAN ekran
+        # MERKEZINDE sabit cizer (bkz. paintEvent). Bu donusum olmadan, arac
+        # odom sifirindan uzaklastikca rota cizgisi sabit-merkezdeki araç
+        # ikonuna gore "boslukta" kalir - canli bildirilen hata buydu.
+        dx = world_x - self._odom_x
+        dy = world_y - self._odom_y
+        yaw = self.latest_yaw_rad
+        cos_y = math.cos(yaw)
+        sin_y = math.sin(yaw)
+        ileri = dx * cos_y + dy * sin_y
+        sol = -dx * sin_y + dy * cos_y
+        return ileri, sol
 
     def global_plan_callback(self, msg):
-        poses = [(pose.pose.position.x, pose.pose.position.y) for pose in msg.poses]
+        # Kullanici istegi (2026-09-01): arac ilerledikce mavi rota GERIDEN
+        # eksilmeli, sadece hedefe varinca tumden silinmemeli. Nav2 zaten
+        # 10Hz'de (expected_planner_frequency, nav2_params.yaml) yeniden
+        # planlama yapiyor - her yeni /plan mesaji genelde aracin O ANKI
+        # konumundan baslar, ama garanti degil (bazi planlayicilar/durumlar
+        # eski bir rotayi oldugu gibi tekrar yayinlayabilir). Bu yuzden
+        # GECILMIS (ileri<0, yani aracin ARKASINDA kalmis) noktalari burada
+        # ACIKCA eliyoruz - 10Hz replan ile birlikte bu, "canli eksilen rota"
+        # gorunumunu garanti eder. Kucuk negatif tampon (-0.3m), aracin TAM
+        # uzerindeki bir nokta olculum gurultusuyle aninda kaybolup
+        # titremesin diye.
+        poses = [self._dunya_to_arac(p.pose.position.x, p.pose.position.y) for p in msg.poses]
+        poses = [(ileri, sol) for ileri, sol in poses if ileri >= -0.3]
         self.global_plan_sinyal.emit(poses)
-        
+
     def local_plan_callback(self, msg):
-        poses = [(pose.pose.position.x, pose.pose.position.y) for pose in msg.poses]
+        poses = [self._dunya_to_arac(p.pose.position.x, p.pose.position.y) for p in msg.poses]
+        poses = [(ileri, sol) for ileri, sol in poses if ileri >= -0.3]
         self.local_plan_sinyal.emit(poses)
+
+    def goal_result_callback(self, msg):
+        # SUCCESS veya FAILURE farketmez - o rota denemesi bitti, ekrandaki
+        # mavi cizgi artik gecerli/guncel degil, temizlenir (bos liste
+        # gonderilince TaktikRadarEkrani.paintEvent'teki "if self.global_plan:"
+        # kontrolu zaten cizmeyi kendiliginden birakiyor).
+        self.global_plan_sinyal.emit([])
+        self.local_plan_sinyal.emit([])
 
     def gnss_callback(self, msg):
         # status.status < 0 (STATUS_NO_FIX) ise konum gecersiz, gonderme.
@@ -271,13 +330,16 @@ class Ros2GcsMotoru(QThread):
         # tf_buffer kullaniyordu ama tf_buffer/TransformListener kararsizliga
         # (art arda cökme) sebep oldugu icin kalici olarak devre disi (bkz.
         # run() icindeki not); bu yontem o riske hic girmiyor.
-        # Yon icin TF yerine self.latest_yaw_rad kullaniliyor -- bu, montaj
-        # duzeltmesi UYGULANMAMIS HAM /imu/data yaw'i (bkz. imu_callback basi).
-        # ONEMLI: konum_birlestirici.py (aractaki /odom TF yayincisi) da
-        # base_footprint donusu icin AYNI ham /imu/data yonelimini dogrudan
-        # kullaniyor (canli kaynak kodda dogrulandi) -- yani costmap da bu ham
-        # referansla insa ediliyor. Duzeltilmis (goruntu paneli icin kullanilan)
-        # yaw kullanilirsa costmap onlarca derece yanlis donuk gorunur.
+        # GUNCELLEME (2026-08-30): Yon icin artik self.latest_yaw_rad (BNO055
+        # MONTAJ DUZELTMESI UYGULANMIS yaw - bkz. imu_callback) kullaniliyor.
+        # ESKIDEN burada HAM (duzeltmesiz) yaw kullaniliyordu, cunku o zaman
+        # konum_birlestirici.py da /odom'u HAM yonelimle yayinliyordu - ikisi
+        # tutarliydi. Ama BNO055'in aracin gercek onune degil ~90 derece yanlis
+        # yone monte edildigi bulunup konum_birlestirici.py'de DUZELTILDIGINDEN
+        # (canli lift testiyle dogrulandi, ayni +90 derece Z-ekseni duzeltmesi),
+        # /odom ARTIK duzeltilmis yaw kullaniyor - costmap da aynisini kullanmali,
+        # yoksa hedef (goal) yerlesimi ve arac ikonu ile costmap/rota birbirine
+        # gore ~90 derece kaymis gorunur (canli bildirildi: "konum sola gidiyor").
         res = msg.info.resolution
         genislik0 = msg.info.width
         yukseklik0 = msg.info.height
@@ -505,6 +567,17 @@ class TaktikRadarEkrani(QFrame):
             self.mouse_current_pos = event.pos()
             self.update()
 
+    def hedef_cizimini_iptal_et(self):
+        # Kullanici istegi: rota/hedef oku cizerken ESC'ye basinca iptal
+        # olsun - hedef GONDERILMEDEN suruklemeyi durdurur, onizleme okunu
+        # temizler (bkz. main.py keyPressEvent, Qt.Key_Escape).
+        if not self.hedef_ok_ciziliyor:
+            return
+        self.hedef_ok_ciziliyor = False
+        self.mouse_start_pos = None
+        self.mouse_current_pos = None
+        self.update()
+
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton and self.hedef_ok_ciziliyor:
             self.hedef_ok_ciziliyor = False
@@ -582,27 +655,31 @@ class TaktikRadarEkrani(QFrame):
         ressam.drawLine(int(merkez_x), 0, int(merkez_x), y)
         ressam.drawLine(0, int(merkez_y), g, int(merkez_y))
 
-        if self.global_plan:
-            ressam.setPen(QPen(QColor(0, 150, 255, 200), 3, Qt.DashLine))
-            path_polygon = QPolygonF()
-            for rx, ry in self.global_plan:
-                p_x = merkez_x - (ry * olcek)
-                p_y = merkez_y - (rx * olcek)
-                path_polygon.append(QPointF(p_x, p_y))
-            ressam.drawPolyline(path_polygon)
-            
-        if self.local_plan:
-            ressam.setPen(QPen(QColor(255, 200, 0, 255), 4))
-            path_polygon = QPolygonF()
-            for rx, ry in self.local_plan:
-                p_x = merkez_x - (ry * olcek)
-                p_y = merkez_y - (rx * olcek)
-                path_polygon.append(QPointF(p_x, p_y))
-            ressam.drawPolyline(path_polygon)
-
         ressam.save()
         ressam.translate(merkez_x, merkez_y)
         ressam.rotate(-self.yaw)
+
+        # GUNCELLEME: rota (global/local plan) cizgileri artik ham/mutlak
+        # /odom koordinati DEGIL, Ros2GcsMotoru._dunya_to_arac() tarafindan
+        # ONCEDEN arac-goreceli (ileri,sol) haline getirilmis noktalar tasiyor
+        # (costmap_noktalari ile AYNI sozlesme) - bu yuzden costmap/lidar ile
+        # AYNI donmus baglamda, AYNI piksel formuluyle ciziliyor. ESKIDEN bu
+        # donusum hic YAPILMIYORDU: rota cizgisi araç odom sifirindan
+        # uzaklastikca, ekranda HER ZAMAN merkezde sabit duran arac ikonuna
+        # gore "boslukta" kaliyordu (canli bildirildi). Bkz. _dunya_to_arac.
+        if self.global_plan:
+            ressam.setPen(QPen(QColor(0, 150, 255, 200), 3, Qt.DashLine))
+            path_polygon = QPolygonF()
+            for ileri, sol in self.global_plan:
+                path_polygon.append(QPointF(-sol * olcek, -ileri * olcek))
+            ressam.drawPolyline(path_polygon)
+
+        if self.local_plan:
+            ressam.setPen(QPen(QColor(255, 200, 0, 255), 4))
+            path_polygon = QPolygonF()
+            for ileri, sol in self.local_plan:
+                path_polygon.append(QPointF(-sol * olcek, -ileri * olcek))
+            ressam.drawPolyline(path_polygon)
 
         # Costmap "engel izi" (RViz'deki gibi kalıcı/sönümlü iz) - canlı lidar
         # noktalarının ALTINDA, soluk turuncu olarak çiziliyor.
@@ -874,7 +951,14 @@ class HaritaYoneticisi:
         self.lbl_yaw.setText(f"Yaw   (Pusula)   : {net_yaw:.1f}°")
 
         self.suni_ufuk.guncelle_veri(net_roll, net_pitch)
-        self.taktik_radar.guncelle_veri(self.taktik_radar.noktalar, net_roll, net_pitch, net_yaw)
+        # ONEMLI: burada net_yaw (kullanicinin "SIFIRLA" ile ayarladigi
+        # kozmetik referans) DEGIL, HAM/duzeltilmis mutlak yaw gonderiliyor.
+        # TaktikRadarEkrani.yaw; costmap donusu, hedef tiklama donusumu ve
+        # arac ikonu donusu icin kullaniliyor - bunlarin hepsi /odom (Nav2)
+        # ile AYNI mutlak referansi paylasmali, yoksa "SIFIRLA"ya basmak
+        # hedef yerlesimini kaydirir (navigasyon matematigi kullanicinin
+        # kozmetik gösterge sifirlamasindan etkilenmemeli).
+        self.taktik_radar.guncelle_veri(self.taktik_radar.noktalar, net_roll, net_pitch, yaw)
         # Kullanicinin istegi: IMU (roll/pitch) uydu haritasi uzerinde de gorunsun.
         self.uydu_harita.imu_guncelle(net_roll, net_pitch)
 

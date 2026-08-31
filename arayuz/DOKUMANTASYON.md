@@ -467,10 +467,77 @@ diller.py                   Türkçe/İngilizce arayüz metinleri (i18n sözlü�
   ekranda yarı saydam katman olarak render edilir; robot her zaman grid
   merkezinde kabul edildiği için TF lookup'a ihtiyaç duyulmaz (önceden
   `tf_buffer` kullanımı kararsızlığa/çökmeye sebep olduğu için kaldırıldı).
-- Derotasyon (aracın anlık yönüne göre nokta bulutunu döndürme) IMU'nun
-  **ham** (düzeltilmemiş) quaternion'ından hesaplanan yaw ile yapılır —
-  `konum_birlestirici.py`'nin `/odom` TF yayınında kullandığı referansla
-  birebir eşleşmesi için.
+- Derotasyon (aracın anlık yönüne göre nokta bulutunu döndürme), hedef
+  tıklama dönüşümü (`mouseReleaseEvent`) ve araç ikonu dönüşü hepsi
+  `self.latest_yaw_rad`'ı kullanır — bu, **BNO055 montaj düzeltmesi
+  UYGULANMIŞ** yaw'dır (bkz. §5.2.1), `konum_birlestirici.py`'nin `/odom`
+  TF'inde kullandığı referansla **birebir aynı** (canlı ölçümle
+  doğrulandı: 362 örnekte ortalama/min/maks fark 0.00°). **2026-08-30
+  ÖNCESİ** burada kasıtlı olarak HAM (düzeltmesiz) yaw kullanılıyordu,
+  çünkü o tarihe kadar `/odom` da HAM yönelimle yayınlanıyordu — BNO055'in
+  fiziksel montaj hatası (~90°) araç tarafında düzeltilince bu artık
+  YANLIŞ oldu ve "hedef aracın soluna gidiyor" şeklinde canlı bildirildi.
+
+### 5.2.1 BNO055 Montaj Düzeltmesi (2026-08-30) — KRİTİK
+
+BNO055 kartı aracın gerçek önüne değil, **~90° yanlış yöne** monte
+edilmiş (kartın Y ekseni aracın önüne, X ekseni soluna bakıyor — REP-103
+gövde çerçevesinde X=ön, Y=sol olmalıydı). Araç tarafında
+(`konum_birlestirici.py` `_mount_fix()`) gerçek fiziksel PITCH testiyle
+kanıtlandı: düzeltme kaldırılınca RViz'de kaldırma hareketi PITCH'e değil
+ROLL'e yansıyordu (2 ayrı denemede tekrarlandı). **Düzeltme:** ham
+`/imu/data` kuaterniyonuna, araç gövde çerçevesinde (ART-ÇARPIM/
+post-multiply, ÖNCÜL-çarpım denendi ama roll hâlâ değişiyordu) **+90°
+Z-ekseni dönüşü** uygulanır: `q_govde = q_imu ⊗ q_montaj`.
+
+Bu düzeltme **hem araç tarafında (`konum_birlestirici.py`) hem arayüz
+tarafında (`harita_sistemi.py` `imu_callback`)** ayrı ayrı ama **aynı
+formülle** uygulanıyor — ikisi arasında tutarlılık canlı ölçümle
+doğrulandı (bkz. yukarısı). Etkilenen HER ŞEY: costmap dönüşü, hedef
+tıklama dönüşümü, araç ikonu dönüşü, uydu haritasındaki LiDAR/araç
+dönüşü (`uydu_harita_widget.py`, aynı `taktik_radar.yaw`'ı kullanır).
+
+**Kozmetik "SIFIRLA" offset'i BUNDAN AYRI tutulur:** Ayarlar/Navigasyon
+sayfasındaki "Sensör Konumunu Sıfırla" ve arayüz açılışında otomatik
+uygulanan sıfırlama (`HaritaYoneticisi.__init__`'te `sifirla_istendi =
+True` ile varsayılan) SADECE Suni Ufuk ve Roll/Pitch/Yaw metin
+etiketlerini etkiler (`net_roll/net_pitch/net_yaw`) — costmap/hedef/ikon
+dönüşü HER ZAMAN mutlak (offset'siz) `yaw`'ı kullanır. Bunun nedeni:
+Nav2'nin kendi `/odom` referansı kullanıcının arayüzden ne zaman
+"SIFIRLA"ya bastığından habersizdir; offset'i navigasyon matematiğine
+karıştırmak "SIFIRLA"ya basmayı hedef yerleşimini kaydıran bir işleme
+çevirirdi.
+
+### 5.2.2 Rota (plan) Çizgisi "Boşlukta Kalma" Düzeltmesi (2026-08-30) — KRİTİK
+
+**Belirti:** Araç fiziksel olarak hareket ettikçe, arayüzdeki araç ikonu
+(bilerek) ekran merkezinde sabit kalırken, çizilen rota (`/plan`,
+`/local_plan`) gitgide ikonla bağlantısız, "boşlukta" görünmeye başlıyordu
+— canlı bildirildi.
+
+**Kök neden:** `global_plan_callback`/`local_plan_callback`, Nav2'den gelen
+`/plan`'ı **hiçbir dönüşüm yapmadan**, ham/mutlak `/odom` koordinatlarıyla
+`TaktikRadarEkrani`'ye iletiyordu. Costmap noktaları (`costmap_callback`)
+zaten dünya→araç-gövdesi dönüşümü yapıyordu (araç grid merkezinde kabul
+edilerek), ama rota çizgileri için bu dönüşüm **hiç yoktu**. Araç odom
+sıfırındayken tesadüfen doğru görünüyordu; araç uzaklaştıkça mutlak
+koordinatlar büyürken, ekranda HER ZAMAN merkezde sabit duran araç
+ikonuna göre rota git gide "kayıyordu".
+
+**Düzeltme:** `Ros2GcsMotoru` artık `/odom`'a doğrudan abone (`odom_callback`,
+TF **DEĞİL** — tf_buffer çökme riski yüzünden kalıcı devre dışı, bkz. §5.2).
+Yeni `_dunya_to_arac(world_x, world_y)` yardımcı fonksiyonu, costmap'teki
+BİREBİR AYNI dünya→gövde rotasyon formülünü kullanarak her `/plan` noktasını
+göndermeden ÖNCE araç-göreceli (ileri, sol) çiftine çevirir. `paintEvent`
+artık rota çizgilerini de costmap/lidar ile AYNI döndürülmüş bağlamda,
+aynı piksel formülüyle çizer (eskiden rota, döndürme bloğundan ÖNCE, ham
+koordinatla çiziliyordu).
+
+**Simülasyonla doğrulandı** (fiziksel araç gerekmeden, gerçek
+`Ros2GcsMotoru` koduna sahte `/odom` + `/plan` mesajları vererek): araç
+odom(0,0)'dan odom(20,5)'e "sürdürülürken", rota HER ADIMDA araç-göreceli
+olarak aynı (0-3m ileri) aralıkta kaldı — eski koddaki gibi mutlak
+koordinatla büyüyüp ekran dışına taşmadı.
 
 ### 5.3 Suni Ufuk (IMU görselleştirme)
 - `SuniUfukEkrani`, `/imu/data` mesajından çıkarılan roll/pitch açılarını
@@ -525,7 +592,12 @@ diller.py                   Türkçe/İngilizce arayüz metinleri (i18n sözlü�
 | `/goal_pose` | `geometry_msgs/PoseStamped` | arayüz → araç | RViz benzeri tıkla-git hedef gönderimi |
 | `/surus_modu` | `std_msgs/String` (`"MANUEL"`/`"OTONOM"`) | arayüz → araç | Aracın hangi sürüş modunda olduğunu araca bildirir |
 | `/palet_hizlari` | `std_msgs/Float32MultiArray` `[sol, sağ]` | arayüz → araç | MANUEL modda ham PWM komutu (klavye veya joystick kaynaklı) |
-| `/arac_komut` | `std_msgs/String` | arayüz → araç | Ham klavye tuş kodu (teşhis/log amaçlı, PWM üretimi ayrı) |
+| `/arac_komut` | `std_msgs/String` | arayüz ↔ araç | Ham klavye tuş kodu VE literal `"EMERGENCY_STOP_CMD"`/`"DEVAM_CMD"` kilit komutları (bkz. §7) — `tabela_etap_yoneticisi.py` de Stop tabelasında buraya yayınlıyor |
+| `/yon_pid_aktif` | `std_msgs/Bool` | arayüz → araç | Yön düzeltme PID AÇ/KAPA anahtarı (bkz. §7) |
+| `/mavros/gpsstatus/gps1/raw` | `mavros_msgs/GPSRAW` | araç → arayüz | GPS/GNSS ETKİN göstergesi (`fix_type`, bkz. §8) |
+| `/tabela_tespit` | `std_msgs/String` (`"SinifAdi:güven"` / `"YOK"`) | araç içi (`tabela_node.py`→`tabela_etap_yoneticisi.py`) | Tabela algılama → etap/durdurma kararı (bkz. §7) |
+| `/guncel_etap` | `std_msgs/Int32` | araç → arayüz | Algılanan son etap numarası (1-11) → dashboard'daki ETAP göstergesi (`label_etapNo`) — Designer'da sabit "8" yazıyordu, `etap_sinyali` TANIMLIYDI ama hiç emit edilmiyordu (`gps_durum_sinyali` ile AYNI durumdaydı); artık gerçek veriyle besleniyor, canlı doğrulandı |
+| `/parkur_durumu`, `/otonom_dur_nedeni` | `std_msgs/String` | araç → arayüz (henüz arayüzde gösterilmiyor) | Parkur tamamlandı / otonom durdurma sebebi |
 
 ### 6.2 UDP Kanalları (ham soket, ROS2 dışı)
 
@@ -651,6 +723,25 @@ send_rtcm`'e başarıyla iletildi, GGA gerçek araç `/fix` konumunu (o an
   kayma (>60) otomatik olarak düzeltme sınırının da dışında kalıyordu —
   hiçbir zaman düzeltilemiyordu; artık 150'ye çıkarıldı (gerçekçi kaymayı
   kapsar, tam itilmeden — ~400+ birim — hâlâ açıkça ayrışır).
+- **SON GÜVENLİK AĞI (2026-08-31) — KRİTİK**: Kaptan tarafından canlı
+  bildirildi: joystick fiziksel olarak hareketsiz kalmasına rağmen araç
+  sürekli hareket etmeye devam ediyor, sadece acil durdurma + joystick'i
+  biraz oynatmak düzeltiyordu (300kg araç için ciddi risk). Kök neden tam
+  teşhis edilemese de (donanımsal gevşek bağlantı/kalibrasyon sırasında
+  kazara dokunma gibi ihtimaller var), canlı kalibrasyon mantığından
+  **tamamen bağımsız** ikinci bir güvenlik katmanı eklendi
+  (`surus_joystick_sistemi.py`): ham ADC okuması ~1 saniye (neredeyse) hiç
+  kıpırdamadıysa **VE** bu sabit değer **ilk (hiç değişmeyen) kalibrasyon
+  merkezine** yakınsa (`GUVENLIK_SABIT_MAKS_UZAKLIK=220`), o eksenin çıkışı
+  hesaplanan değer ne olursa olsun sıfıra zorlanır. "İlk merkeze yakınlık"
+  şartı kasıtlı — sadece ham durgunluğa bakılsaydı, joystick'i tam ileride
+  uzun süre BASILI TUTMAK (düz sürüş için normal) da yanlışlıkla
+  sıfırlanırdı. Üç senaryoyla izole test edildi (gerçek araca gerek
+  kalmadan): (1) hatalı kalibrasyon + gerçekten sabit joystick → doğru
+  şekilde sıfırlandı, (2) tam ileri + 5 saniye sabit tutma → hiç
+  etkilenmedi, (3) normal serbest bırakma → sorunsuz. Tetiklendiğinde
+  `guvenlik_sinyali` üzerinden arayüz logına (`log_yaz`) yazılır — bir
+  daha olursa adli/teşhis kaydı için.
 - **Klavye/joystick geçişinde odak (focus) kaybı**: `ayar_klavye_tetikle()`
   ve `ayar_joystick_tetikle()` butonlarına tıklamak Qt odağını o butonda
   bırakıyordu, `keyPressEvent` de odak ana pencerede değilse tuşları hiç
@@ -661,6 +752,126 @@ send_rtcm`'e başarıyla iletildi, GGA gerçek araç `/fix` konumunu (o an
 - **Mod bazlı erişim**: klavye/joystick komutları sadece `arac_modu ==
   "MANUEL"` iken etkilidir; OTONOM modda `surus_koprusu.py` (araç tarafı)
   Nav2 çıktısını `/palet_hizlari`'a çevirir, arayüz sessiz kalır.
+- **ACİL DURDUR KİLİDİ ve DEVAM ET (2026-08-31) — KRİTİK**: Bu, aracın
+  ARKA panelindeki fiziksel rotary switch acil stopundan (BLDC/silah
+  motorlarını doğrudan keser, Jetson'a hiç bağlı değil) TAMAMEN AYRI bir
+  yazılım katmanı — arayüzdeki ACİL DURDUR butonu artık araç tarafındaki
+  motor komutlarını gerçekten ve kalıcı olarak keser. Önceden ciddi bir
+  eksiklik vardı: `arduino_motor_kontrol.py` (araç) `/arac_komut` topic'ini
+  HİÇ DİNLEMİYORDU, bu yüzden ACİL DURDUR sadece o anki PWM'i BİR KEZ
+  sıfırlıyordu — hemen ardından gelen bir sonraki joystick/otonom
+  `/palet_hizlari` mesajı bunu anında eziyordu (gerçek bir kilit yoktu).
+  Ayrıca `telemetri_sistemi.py` içinde `hareket_emri_gonder("EMERGENCY_STOP_CMD")`
+  çağrısı, genel "DUR" dalına düşüp `/arac_komut`'a **literal "EMERGENCY_STOP_CMD"
+  yerine "X\n" gönderiyordu** — yani araç tarafının beklediği metinle hiç
+  eşleşmiyordu, kilit sistemi kodda var olsa bile asla tetiklenemezdi. İki
+  parça birden düzeltildi:
+  - `arduino_motor_kontrol.py` (araç): yeni `_kilitli` durumu, `/arac_komut`
+    (String) aboneliği eklendi. `"EMERGENCY_STOP_CMD"` gelince `_kilitli=True`
+    olur, Arduino'ya anında nötr sinyal (1500,1500) yazılır, ve `_kilitli`
+    açık kaldığı sürece `palet_callback` gelen HİÇBİR `/palet_hizlari`
+    mesajını işlemez (joystick/klavye/otonom fark etmez) — sadece
+    `"DEVAM_CMD"` mesajı kilidi açar. İzole testle doğrulandı (5/5 senaryo
+    PASS) hem sahte donanımla hem de gerçek araç Jetson'ında.
+  - `telemetri_sistemi.py` (arayüz): `hareket_emri_gonder()` artık
+    `"EMERGENCY_STOP_CMD"`/`"DEVAM_CMD"` için ayrı, en baştaki bir dal —
+    genel yön/harf komutlarından önce bu iki değeri **literal metin olarak**
+    (harf kodlamasına uğratmadan) `/arac_komut`'a yayınlar; mod/kaynak
+    kısıtlamalarını (MANUEL/KLAVYE şartı) her ikisi de atlar, tıpkı eski
+    "DUR (SPACE)" gibi — acil durdurma ve devam her zaman çalışmalı.
+  - `main.py`: `acil_durdurma()` artık kilitli durumu (`_arac_kilitli_mi`)
+    işaretliyor ve sol menüde yeni yeşil "DEVAM ET" butonunu (`pushButton_devamEt`)
+    görünür yapıyor (normalde gizli — yanlışlıkla basılmasın, kilidin o an
+    aktif olduğu görsel olarak da net olsun). Butona basınca onay kutusu
+    (`QMessageBox.question`, varsayılan "Hayır") çıkar, onaylanırsa
+    `"DEVAM_CMD"` gönderilip buton tekrar gizlenir.
+  - Kasıtlı olarak KAPSAM DIŞI: aracın donanım seviyesindeki rotary switch
+    acil stopu (BLDC + silah motorlarını fiziksel olarak keser) — bu
+    yazılıma hiç bağlı değil, kullanıcı tarafından net şekilde ayrı tutuldu.
+
+- **DÜZ GİDİŞTE YÖN DÜZELTME PID (2026-08-31)** — manuel sürüşte (klavye VEYA
+  joystick, ikisi de `/palet_hizlari`'a aynı şekilde yazıyor) düz gidişte
+  IMU'nun gyro'suna bakıp sapmayı otomatik düzeltiyor. Önce CANLI VERİ
+  DOĞRULAMASI yapıldı: `/imu/data` 99Hz'de gerçek/canlı, durgunken yaw
+  0.0000° std sapmayla kararlı — AMA aynı testte kalibrasyon durumu
+  `{sys:0, gyro:3, accel:0, mag:0}` bulundu, yani ivmeölçer/manyetometre
+  kalibre değil. `konum_birlestirici.py`'nin kendi dosya-başı notundaki
+  bilinen bulguyla BİREBİR aynı durum: motor akımı değişince BNO055'in
+  füze edilmiş (mutlak) yaw'i 2.14° sıçramıştı — yani PID'nin mutlak/füze
+  yaw'a güvenmesi TEHLİKELİ olurdu (kendi kendini besleyebilir). Bu yüzden
+  SADECE GYRO (`angular_velocity.z`, tam kalibre VE manyetik girişimden
+  etkilenmiyor) kullanılıyor; referans her "düz gidiş" segmentinin
+  BAŞLANGICINDA sıfırlanan bir gyro entegrali (ömür boyu değil, sadece o
+  segment).
+  - **Aktivasyon**: ham sol/sağ PWM AYNI İŞARETTE (ikisi ileri veya ikisi
+    geri) ve sıfırdan farklıysa devrede; farklı magnitude (elle Q/Z/E/C
+    trimi) sorun değil, sadece işaretler aynı olmalı. Tank dönüşü/durma
+    anında devre dışı kalır ve entegral sıfırlanır.
+  - **Yön**: standart diferansiyel-sürüş kinematiği `ω=k*(v_sağ-v_sol)`
+    ile türetildi, SOLA/SAĞA DÖN'ün zaten doğrulanmış tanımlarıyla tutarlı;
+    doğrusal olduğu için İLERİ'de de GERİ'de de AYNI düzeltme (sol'a
+    +trim, sağ'a -trim) doğru fiziksel etkiyi veriyor — ayrı bir yön
+    çarpanı gerekmiyor. `arduino_motor_kontrol.py`'de `_pid_yon_carpani`
+    tek satırlık bir anahtar — canlı testte ters çıkarsa `-1.0` yapılır.
+  - **Konum**: araç tarafında, `arduino_motor_kontrol.py`'de (network
+    gecikmesi olmasın diye) — `MAX_TRIM=45` PWM ile üst sınırlı (~%18).
+  - **Arayüz**: sol menüde pusula ikonlu, tıklanabilir AÇ/KAPA butonu
+    (`main.py` `_yon_pid_butonu_ekle`), varsayılan AÇIK, `/yon_pid_aktif`
+    (Bool) yayınlıyor.
+  - **Test**: 7 izole senaryo (durgun/tank dönüşü/ileri sola-sapma
+    düzeltmesi/geri sola-sapma düzeltmesi/farklı-magnitude-aynı-işaret/
+    kapatma/MAX_TRIM sınırı) — hepsi PASS, hem sahte hem GERÇEK araç
+    Jetson'ında (gerçek Arduino'ya bağlı, gerçek koddan) çalıştırıldı.
+  - **UYARI**: yön matematiği izole testle doğrulandı ama HENÜZ gerçek
+    hareket halindeki araçta test edilmedi — ilk canlı test düşük hızda,
+    acil durdurma elde hazır şekilde yapılmalı.
+
+- **TABELA → ETAP/DURDURMA KARAR DÜĞÜMÜ (2026-08-31)** — yeni dosya:
+  `tabela_etap_yoneticisi.py`. `tabela_node.py` YOLO ile tabela tespit edip
+  `/tabela_tespit`'e (`"SinifAdi:güven"` veya `"YOK"`) yayınlıyordu ama
+  KENDİ DOCSTRING'İNDE belirtildiği gibi hiçbir sürüş mantığına bağlı
+  değildi (canlı kontrolde `Subscription count: 0` bulundu). Model sınıfları
+  (`Tabela_ana.pt`, canlı sorgulandı): `One`..`Eleven` (etap numarası),
+  `EndOfEleven` (parkur bitişi), `Stop`.
+  - **Etap takibi** (risksiz, bilgi amaçlı): `One`..`Eleven` görülünce
+    `/guncel_etap` (Int32) yayınlanır (sadece değişince, güven eşiği 0.6).
+    `EndOfEleven` → `/parkur_durumu` (String) `"TAMAMLANDI"`.
+  - **Stop tabelası → gerçek durdurma** (güvenlik-kritik): SADECE OTONOM
+    modda (`/surus_modu`) ve ARDIŞIK 3 karede yeterli güvenle tespit
+    edilirse (tek bir gürültülü kare yanlışlıkla durdurmasın diye), MEVCUT
+    acil durdurma kilidini (`arduino_motor_kontrol.py` `_kilitli`) `/arac_komut`'a
+    `"EMERGENCY_STOP_CMD"` yayınlayarak tetikler — ayrı bir mekanizma İCAT
+    ETMEK yerine zaten test edilmiş kilit yeniden kullanılıyor. Kilit
+    KALICI kalır (varsayılan: `STOP_OTOMATIK_DEVAM_SN=None`), operatör
+    arayüzden "DEVAM ET" basmalı — yarış kuralı "N saniye dur, sonra devam
+    et" gerektiriyorsa bu tek satırlık ayar kolayca değiştirilebilir.
+    Operatörün NEDEN durduğunu anlaması için `/otonom_dur_nedeni` (String,
+    `"STOP TABELASI ALGILANDI"`) ayrıca yayınlanır.
+  - MANUEL modda Stop tabelası HİÇBİR ŞEY tetiklemez (operatörün kendi
+    kontrolüne müdahale edilmiyor).
+  - **ÇOKLU STOP TABELASI (kullanıcı tarafından doğrulanan gerçek senaryo,
+    2026-08-31)**: parkurda BİRDEN FAZLA Stop tabelası var — dik rampa
+    ÇIKIŞINDA bir tane (araç durur, düzlükte silah ateşlenir), rampa
+    İNİŞİNDE bir tane daha. İlk tasarımda `_stop_tetiklendi` mandalı
+    SADECE OTONOM'dan çıkılınca sıfırlanıyordu — yani OTONOM modda
+    KALINARAK "DEVAM ET" ile devam edilirse (bu senaryoda tam olarak
+    böyle) İKİNCİ Stop tabelası hiçbir zaman tekrar tetiklenemezdi. Bu
+    bulunup düzeltildi: node artık `/arac_komut`'u da dinliyor,
+    `"DEVAM_CMD"` gelince (operatör kilidi her açtığında) mandal/sayaç
+    sıfırlanıyor — aynı OTONOM koşusunda kaç tane Stop tabelası olursa
+    olsun her biri ayrı ayrı doğru tetikleniyor.
+  - `tufan_mppi.launch.py`'ye kalıcı olarak eklendi (bir sonraki tam
+    başlatmada otomatik gelir); bu oturumda ayrıca canlı olarak tek başına
+    çalıştırılıp `/tabela_tespit`'e abone olduğu doğrulandı.
+  - **Test**: 11 izole senaryo (etap değişimi/tekrar-yayınlamama/parkur
+    tamamlandı/MANUEL modda Stop güvenlik engeli/3-kare doğrulama eşiği/
+    tekrar-tetiklenmeme/ara tespitle sayaç sıfırlanması/**AYNI OTONOM
+    koşusunda DEVAM_CMD sonrası ikinci Stop tabelasının da tetiklenmesi**)
+    — hepsi PASS, gerçek araç Jetson'ında.
+  - **HENÜZ YAPILMADI**: gerçek kamera + gerçek Stop tabelası ile canlı
+    uçtan uca test (şu ana kadar hep sahte/simüle `/tabela_tespit` mesajı
+    ile test edildi — YOLO modelinin gerçek tabelayı doğru sınıflandırdığı
+    ayrıca doğrulanmalı).
 
 ## 8. Dashboard Gösterge Referansı
 
@@ -702,15 +913,17 @@ tetiklendiği ve **kodun neresinde** olduğu. Her satır: *sinyal kaynağı
 | **Arayüz çizimi** | `main.py:365` `lidar_arayuz_guncelle()` — aktifken mavi "TARANIYOR...", pasifken kırmızı "PASİF" |
 | **Not** | Ana menüdeki dekoratif dönen radar çemberi (`main.py` `radar_cizimi_Guncelle`) BİLEREK gerçek LiDAR verisi çizmez — gerçek nokta bulutu sadece Navigasyon → TAKTİK LİDAR sekmesinde |
 
-### UBIQUITI (eski "WIFI")
+### UBIQUITI / WIFI (otomatik yedekleme, 2026-08-31)
 
 | | |
 |---|---|
-| **Ne gösterir** | Artık gerçek WiFi değil — araçla arayüz arasındaki Ubiquiti nokta-nokta kablosuz köprünün bağlantı kalitesi |
-| **Ölçüm yöntemi** | Her 3 saniyede bir araç Jetson'a (`UBIQUITI_LINK_HEDEF_IP`, `telemetri_sistemi.py:38`) 5 hızlı ping gönderilir, başarı yüzdesi hesaplanır (radyonun kendi yönetim IP'si ICMP'yi engellediği için doğrudan araç hedef alınıyor) |
-| **Veri kaynağı** | `telemetri_sistemi.py:224-230` `_wifi_kontrol_dongusu()` (ROS2'den bağımsız ayrı thread) → `telemetri_sistemi.py:232-247` `_wifi_kontrol()` → `wifi_durum_sinyali` |
-| **Arayüz çizimi** | `main.py:347` `wifi_arayuz_guncelle()` — "UBIQUITI : %XX", >%60 yeşil, %30-60 turuncu, <%30 kırmızı |
+| **Ne gösterir** | Araçla arayüz arasındaki kablosuz linkin bağlantı kalitesi — önce Ubiquiti nokta-nokta köprü denenir, TAMAMEN kopuksa (%0) otomatik olarak WiFi'ye (araç Jetson'ın `terminal_widget.py`'nin SSH için kullandığı AYNI IP'si, `10.40.64.43`) düşülür |
+| **Ölçüm yöntemi** | Her 3 saniyede bir önce `UBIQUITI_LINK_HEDEF_IP`'ye (`telemetri_sistemi.py`, 192.168.1.22) 5 hızlı ping; %0 dönerse HEMEN AYNI ŞEKİLDE WiFi IP'sine 5 ping daha denenir (radyonun kendi yönetim IP'si ICMP'yi engellediği için doğrudan araç hedef alınıyor) |
+| **Veri kaynağı** | `telemetri_sistemi.py` `_wifi_kontrol_dongusu()` (ROS2'den bağımsız ayrı thread) → `_wifi_kontrol()` → `wifi_durum_sinyali(yuzde, kaynak)` — `kaynak` "UBIQUITI" veya "WIFI" |
+| **Arayüz çizimi** | `main.py` `wifi_arayuz_guncelle(yuzde, kaynak)` — "{UBIQUITI\|WIFI} : %XX", >%60 yeşil, %30-60 turuncu, <%30 kırmızı |
+| **Öncelik** | Ubiquiti çalışıyorsa WiFi'ye HİÇ ping atılmaz (gereksiz trafik/gecikme olmasın diye) — sadece Ubiquiti %0 dönünce WiFi denenir; ikisi de kopuksa gösterge "UBIQUITI : %0" olarak kalır (WiFi'yi asıl bağlantı gibi göstermemek için) |
 | **Neden ayrı thread** | Ping bloklayıcı olabilir; ROS2 executor'ı içinde çalıştırılırsa (eskiden `nmcli` için olduğu gibi) `/palet_hizlari` dahil tüm yayın periyodik olarak birkaç saniyeliğine durur — canlı ölçümle doğrulanmış bir sorun |
+| **İzole test** | 3 senaryo (ikisi de kopuk / Ubiquiti kopuk+WiFi çalışıyor / Ubiquiti çalışıyor→WiFi'ye hiç ping atılmıyor) — hepsi PASS |
 
 ### KAMERA
 
@@ -730,12 +943,16 @@ tetiklendiği ve **kodun neresinde** olduğu. Her satır: *sinyal kaynağı
 | **Mesafe verisi** | `/turret_hedef_mesafe` (Float32) → `telemetri_sistemi.py:216` `hedef_mesafe_cb()` → `main.py:377` `hedef_mesafe_guncelle()`; 1.0 saniyeden eskiyse (`main.py:736`) sadece "SİLAH" yazısına döner, mesafe göstermez |
 | **Sayfa bazlı optimizasyon** | `main.py:725-733` — Kamera sayfası (indeks 1) aktif değilken bu çizim tamamen atlanır, sadece kalp atışı zaman damgası güncellenir (performans, bkz. §Bilinen Sınırlamalar altındaki mimari notu) |
 
-### GÜÇ SİSTEMİ ve GPS (eski, statik göstergeler)
+### GPS/GNSS (artık gerçek veri, 2026-08-31)
 
 | | |
 |---|---|
-| **Durum** | `main.py:334` `guc_arayuz_guncelle()` ve `main.py:341` `gps_arayuz_guncelle()` fonksiyonları hazır, `telemetri_sistemi.py:47-48`'de `guc_durum_sinyali`/`gps_durum_sinyali` sinyalleri tanımlı — ama hiçbir yerde `.emit()` edilmiyor. Tasarım zamanındaki sabit metinde donuk kalıyor, gerçek veriyle beslenmiyor |
-| **Not** | Bu bilerek dokunulmamış alanlar (kullanıcı isteğiyle önceki oturumlarda kapsam dışı bırakıldı). Gerçek GNSS konumu bu göstergeyle KARIŞTIRILMASIN — asıl GNSS verisi Navigasyon ekranındaki UYDU HARİTASI ve (artık) TAKTİK LİDAR sekmelerinde gösteriliyor (bkz. §Görsel Gösterim Mekanizmaları) |
+| **Ne gösterir** | GNSS gerçekten aktif mi — önceden `gps_durum_sinyali` tanımlıydı ama HİÇBİR YERDE `.emit()` edilmiyordu (tasarım zamanındaki sabit metinde donuk kalıyordu); artık `konum_birlestirici.py`'nin de kullandığı AYNI kaynağa (`/mavros/gpsstatus/gps1/raw`, GPSRAW) bağlı |
+| **Eşik** | Heartbeat 3.0 saniye İÇİNDE veri gelmiş OLMALI **VE** `fix_type >= 3` (3D fix) olmalı — RTK şart değil (RTK'ya özel durum ayrı, NTRIP/RTK panelinde); sadece GNSS'in temelde çalıştığını göstermek için `konum_birlestirici.py`'nin kendi `gps_heading_min_fix_type` varsayılanıyla (3) TUTARLI bir eşik seçildi |
+| **Veri kaynağı** | `telemetri_sistemi.py` `gps_raw_cb()` → `surekli_yayin_dongusu()` içindeki heartbeat+eşik kontrolü → `gps_durum_sinyali` |
+| **Arayüz çizimi** | `main.py` `gps_arayuz_guncelle()` (değişmedi) — "GPS : ETKİN/ACTIVE" (yeşil) veya "GPS : PASİF/PASSIVE" (kırmızı) |
+| **Canlı doğrulama** | Araç Jetson'ında `ros2 topic echo /mavros/gpsstatus/gps1/raw --once` ile gerçek veri kontrol edildi: `fix_type: 3`, `satellites_visible: 22`, `h_acc: 9127` (mm) — RTK aktif değilken bile GNSS'in temelde çalıştığı doğrulandı |
+| **Not** | Gerçek GNSS konumu bu göstergeyle KARIŞTIRILMASIN — konum/harita verisi Navigasyon ekranındaki UYDU HARİTASI ve TAKTİK LİDAR sekmelerinde gösteriliyor; bu sadece "GNSS aktif mi" özet göstergesi (bkz. §Görsel Gösterim Mekanizmaları) |
 
 ### Hız / Batarya (araç, yer)
 
@@ -778,6 +995,71 @@ tetiklendiği ve **kodun neresinde** olduğu. Her satır: *sinyal kaynağı
 | **Ne yapar** | Sürüş kaynağını klavye ↔ fiziksel joystick arasında değiştirir (aynı anda sadece biri `/palet_hizlari`'a yazabilir) |
 | **Konum** | `main.py:835-857` `ayar_joystick_tetikle()` — `SurusJoystickThread` başlatma/durdurma, `telemetri_motoru.surus_kaynagi` ayarı |
 | **Kalibrasyon** | `surus_joystick_sistemi.py` — bağlantıda ilk 0.5sn ölçüm + sürekli oto-merkezleme (sadece mevcut merkeze yakın küçük kaymalar kabul edilir, tam itilmiş bir konum asla merkez sanılmaz — 300kg araç güvenliği için) |
+
+## 8.1 Canlı Test Sonrası Düzeltmeler (2026-09-01)
+
+Kullanıcının araç Jetson'u fiilen sürerken/test ederken bulduğu bir grup
+sorun, tek oturumda araştırılıp düzeltildi:
+
+- **Ubiquiti göstergesi YANLIŞ veri gösteriyordu** — eskiden sadece
+  `UBIQUITI_LINK_HEDEF_IP`'ye ping atılıp başarılıysa "UBIQUITI" deniyordu.
+  Canlı `ip route get` ile doğrulandı: bu IP'ye giden rota, Ubiquiti FİZİKSEL
+  OLARAK BAĞLI DEĞİLKEN BİLE WiFi'nin kendi ağ geçidi üzerinden gidiyordu
+  (arayüz Jetson'da Ubiquiti'ye özel ayrı bir arayüz/alt ağ yok) — yani
+  Ubiquiti kablosu hiç takılı değilken bile gösterge "UBIQUITI: %40/%100"
+  gösterebiliyordu (canlı bildirildi). **Düzeltme**: artık önce Ubiquiti
+  radyosunun bağlı olduğu kablolu Ethernet portunun (`enP8p1s0`) FİZİKSEL
+  link durumu (`/sys/class/net/enP8p1s0/carrier`) kontrol ediliyor - kablo/
+  radyo yoksa ping'e hiç bakılmadan direkt WiFi'ye düşülüyor. İzole testle
+  doğrulandı (fiziksel bağlantı yokken ping başarılı dönse bile artık
+  "UBIQUITI" etiketlenmiyor, gereksiz ping de atılmıyor).
+- **Klavye ile süremiyorum (Ayarlar sayfasından aktif edince)** —
+  `pushButton_klavye`/`pushButton_joystick` Ayarlar sayfasında (index 4)
+  duruyor, ama `keyPressEvent` SADECE [0,1,2] sayfalarında tuş kabul ediyor
+  (kasıtlı - ayar kutularına yazarken yanlışlıkla araç sürülmesin diye).
+  Kullanıcı Ayarlar sayfasındayken klavyeyi aktif edip hemen WASD'a basınca
+  hiçbir şey olmuyordu. **Düzeltme**: klavye aktif olunca otomatik olarak
+  ana ekrana (index 0) dönülüyor.
+- **ESC ile rota çizimini iptal etme** — Taktik Radar'da fare ile hedef oku
+  çizerken artık ESC'ye basınca (`TaktikRadarEkrani.hedef_cizimini_iptal_et`)
+  hedef GÖNDERİLMEDEN önizleme oku temizlenip iptal ediliyor. `main.py`
+  `keyPressEvent`'te en başta, klavye/mod şartlarından BAĞIMSIZ çalışır.
+- **Rota tamamlanınca mavi çizgi kaybolmuyordu** — Nav2 hedefe ulaşınca
+  `/plan`'a yeni mesaj yayınlamayı KESİYOR (boş Path de göndermiyor), yani
+  eski rota çizgisi ekranda sonsuza kadar kalıyordu. **Düzeltme**:
+  `goal_manager_node.py`'nin zaten yayınladığı `/ugv_goal_result`
+  (SUCCESS/FAILURE) dinlenip, sonuç gelince (`goal_result_callback`) hem
+  global hem local plan çizgisi temizleniyor (boş liste yayınlanıyor).
+- **Terminal kapatılınca/arayüz kapanınca araçtaki süreçler ölüyordu** —
+  eskiden çıplak `ssh -tt` oturumu açılıyordu; arayüz kapanınca yerel ssh
+  istemcisine SIGTERM gidip bağlantı düşüyor, bu da UZAK shell'e SIGHUP
+  göndererek o an ön planda çalışan HERHANGİ BİR ŞEYİ (ör. operatör elle
+  `ros2 launch` çalıştırmışsa) öldürüyordu. **Düzeltme**: artık
+  `tmux new-session -A -s <isim>` ile bağlanılıyor - oturum aracın kendi
+  tmux SUNUCUSUNDA yaşıyor, SSH bağlantısı kesilse bile tmux sadece DETACH
+  olur, içindeki hiçbir şey durmaz; bir dahaki bağlantıda (`-A`) aynı
+  oturuma, aynı çalışan komutlarla geri dönülür. 3 ayrı SSH bağlantısı
+  arasında ortam değişkeninin korunduğu canlı test edilerek doğrulandı.
+- **Birden fazla terminal** — sol menüye "+" ikonlu yeni bir buton eklendi
+  (`main.py` `_yeni_terminal_ac`) - her tıklamada, benzersiz isimli AYRI bir
+  tmux oturumuna bağlanan yüzen bir pencere açılır; ana terminalden ve
+  birbirlerinden bağımsız çalışırlar, hepsi yukarıdaki kalıcılık garantisine
+  sahiptir.
+- **Dil tutarsızlığı** — `imu_arayuz_guncelle`/`gps_arayuz_guncelle`/
+  `kamera_arayuz_guncelle` (ve zararsız ama aynı desende `guc_arayuz_guncelle`)
+  sadece PASİF/hata durumunda dile bakıyordu, AKTİF durumda her zaman
+  İngilizce yazıyordu (ör. sistem Türkçeyken "IMU : PASİF" ama "IMU : ACTIVE"
+  gibi) — hepsi düzeltildi, artık her iki durumda da dile bakıyor.
+- **SİSTEM yazısı (OTONOM/MANUEL HAZIR)** — artık ikisi de yeşil (`#00ff00`,
+  eskiden OTONOM mavi `#00AAFF` idi) ve daire sınırının biraz dışına
+  taşabiliyordu (`_sistem_yazisini_sigdir`'daki kenar payı 12px'ten 50px'e
+  çıkarıldı - dairenin o yükseklikteki gerçek/yuvarlak genişliği kutunun
+  kendisinden bile az farkla dar olduğu hesaplanarak bulundu).
+- **HENÜZ YAPILMADI / araştırma gerektiriyor**: "araç çizilen mavi rotanın
+  ÜZERİNDEN tam takip etmiyor" şikayeti - bu bir Nav2 kontrolcü ayarı/canlı
+  tünning konusu, kod incelemesiyle kesin bir hata bulunamadı; canlı testle
+  birlikte araştırılmalı. "araca bağlantı gitti" (Wi-Fi yetersizliği
+  şüphesi) de aynı şekilde canlı ağ testi gerektiriyor.
 
 ## 9. Bilinen Sınırlamalar / Gelecek İşler
 

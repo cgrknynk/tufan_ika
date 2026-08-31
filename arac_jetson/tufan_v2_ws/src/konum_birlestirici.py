@@ -91,7 +91,7 @@ from collections import deque
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import Quaternion, TransformStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu, NavSatFix
 from std_msgs.msg import Float64
@@ -113,6 +113,45 @@ _EARTH_R = 6378137.0
 
 def _yaw_of(q):
     return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+
+def _quat_mult(a, b):
+    """(w,x,y,z) format - a*b (a: soldaki/dis, b: sagdaki/ic donus)."""
+    aw, ax, ay, az = a
+    bw, bx, by, bz = b
+    return (
+        aw * bw - ax * bx - ay * by - az * bz,
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+    )
+
+
+# BNO055 MONTAJ DUZELTMESI (canli testte tespit edildi ve dogrulandi,
+# 2026-08-30): kart aracin gercek onune degil, ~90 derece yanlis yone monte
+# edilmis (kullanicinin kendi ifadesiyle: "kartin Y ekseni aracin on
+# tarafina, X ekseni sol tarafina bakiyor" - REP-103 standardinda X=on,
+# Y=sol olmasi gerekirdi). Belirti: onu kaldirinca (fiziksel PITCH) RViz'de
+# SADECE roll degisiyordu, pitch sabit kaliyordu (~4 derecelik lift roll'e
+# tam aktarilirken pitch <0.1 derece oynadi - 2 ayri kaldirma denemesinde
+# tekrarlandi). Duzeltme: HAM /imu/data kuaterniyonuna, ARAC govde
+# CERCEVESINDE (bu yuzden ART-CARPIM/post-multiply - onculle/pre-multiply
+# denendi, ISE YARAMADI, hala roll degisiyordu) +90 derece Z-ekseni donusu
+# uygulanir. Canli testte DOGRULANDI: bu duzeltmeyle roll +-0.1 derece
+# icinde SABIT kalirken pitch onceki roll kadar (0 ile -4.6 derece arasi,
+# tekrar tekrar) duzgunce degisti. Yaw'a etkisi sadece sabit +90 derece
+# kayma (mutlak referans zaten keyfi, sorun degil - heading_offset zaten
+# bunu telafi ediyor).
+_IMU_MOUNT_FIX_RAD = math.radians(90.0)
+_IMU_MOUNT_FIX_QUAT = (math.cos(_IMU_MOUNT_FIX_RAD / 2.0), 0.0, 0.0,
+                       math.sin(_IMU_MOUNT_FIX_RAD / 2.0))
+
+
+def _mount_fix(q):
+    w, x, y, z = _quat_mult((q.w, q.x, q.y, q.z), _IMU_MOUNT_FIX_QUAT)
+    out = Quaternion()
+    out.w, out.x, out.y, out.z = w, x, y, z
+    return out
 
 
 def _normalize_angle(a):
@@ -160,6 +199,18 @@ class KonumBirlestirici(Node):
         # DOGRUYDU - sadece hiz isareti ters. Tek noktadan duzeltiliyor.
         self.declare_parameter('vx_sign', -1.0)
         self._vx_sign = self.get_parameter('vx_sign').value
+        # CANLI TESTTE BULUNDU (2026-08-30): arac TAM DURGUNKEN bile /odom
+        # 17.7s'de 33.5cm net kaydi - GPS duzeltmesi henuz devrede degilken
+        # (heading_offset arac hareket etmeden olusmuyor, bkz. asagida)
+        # bunu telafi eden hicbir sey yoktu. Kok neden: rf2o'nun kendi ic
+        # yumusatmasina (4 orneklik ortalama) ragmen durgunken bile tam
+        # sifir olmayan kucuk gurultulu hiz degerleri uretmesi - dead-
+        # reckoning'de HICBIR sinirlama olmadan bu doğrudan entegre
+        # ediliyordu. Cozum: kucuk bir olu bolge (deadband) - bu esigin
+        # altindaki hizlar TAM SIFIR sayilir (gercek yavas surus 0.02 m/s
+        # cok altinda olmadigi icin normal hareketi etkilemez).
+        self.declare_parameter('vx_deadband_mps', 0.02)
+        self._vx_deadband = self.get_parameter('vx_deadband_mps').value
 
         # --- GPS parametreleri (bkz. dosya basi "4) GPS" notu) ---
         self.declare_parameter('gps_anchor_min_fix_type', 5)  # RTK Float+
@@ -237,11 +288,14 @@ class KonumBirlestirici(Node):
         )
 
     def _imu_cb(self, msg: Imu):
-        self._son_imu_orientation = msg.orientation
+        self._son_imu_orientation = _mount_fix(msg.orientation)
         self._son_imu_wz = msg.angular_velocity.z
 
     def _rf2o_cb(self, msg: Odometry):
-        self._son_vx = self._vx_sign * msg.twist.twist.linear.x
+        vx = self._vx_sign * msg.twist.twist.linear.x
+        if abs(vx) < self._vx_deadband:
+            vx = 0.0
+        self._son_vx = vx
 
     def _fix_cb(self, msg: NavSatFix):
         self._last_fix = msg

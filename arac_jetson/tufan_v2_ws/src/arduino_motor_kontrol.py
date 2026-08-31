@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
-from std_msgs.msg import Float32MultiArray, Bool
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, qos_profile_sensor_data
+from std_msgs.msg import Float32MultiArray, Bool, String
+from sensor_msgs.msg import Imu
 import serial
 import serial.tools.list_ports
 import time
@@ -53,10 +54,117 @@ class ArduinoMotorKontrol(Node):
         )
         self.get_logger().info("🔌 ARDUINO PPM KÖPRÜSÜ AKTİF: [-255, 255] verileri [1000, 2000] mikrosaniyeye dönüştürülüyor...")
 
+        # --- YENİ: ACİL DURDURMA KİLİDİ (2026-08-31) ---
+        # Arayüzdeki ACİL DURDUR butonu zaten /arac_komut'a "EMERGENCY_STOP_CMD"
+        # yayinliyordu AMA bu dugum o topic'i HIC DINLEMIYORDU - PWM sadece BIR
+        # KEZ sifirlaniyor, hemen sonraki /palet_hizlari mesaji (joystick/otonom)
+        # üzerine yazabiliyordu. Artik GERCEK bir KILIT var: EMERGENCY_STOP_CMD
+        # gelince palet_callback TAMAMEN devre disi kalir (gelen HICBIR PWM
+        # islenmez) - "DEVAM_CMD" gelene kadar. Kullanicinin kendi tarifiyle:
+        # "komutlari keserek araci durduracak" - tek seferlik sifirlama degil.
+        self._kilitli = False
+        self.create_subscription(String, '/arac_komut', self._komut_callback, 10)
+
         # --- YENİ: Arayüzdeki "MOTORLAR" göstergesi için gerçek bağlantı durumu ---
         # Sadece bu node'un durumunu bildirir (var olan hiçbir davranışı değiştirmez).
         self._baglanti_durum_pub = self.create_publisher(Bool, '/arduino_baglanti_durumu', 10)
         self.create_timer(0.5, self._baglanti_durumu_yayinla)
+
+        # --- YENİ: DÜZ GİDİŞTE OTOMATİK YÖN DÜZELTMESİ - PI KONTROLCÜ (2026-08-31) ---
+        # Kullanici istegi: manuel surusteki (klavye VEYA joystick, ikisi de
+        # /palet_hizlari'a ayni sekilde yaziyor) ileri/geri komutlarinda
+        # IMU'yu dinleyip sapma varsa duzelt. ONCE CANLI VERI DOGRULAMASI
+        # YAPILDI: /imu/data 99Hz'de gercek/canli, durgunken yaw 0.0000 derece
+        # std sapmayla kararli. AMA ayni testte kalibrasyon durumu
+        # {sys:0, gyro:3, accel:0, mag:0} bulundu - konum_birlestirici.py'nin
+        # kendi dosya-basi notundaki bilinen bulguyla BIREBIR ayni durum:
+        # ivmeolcer/manyetometre kalibre degilken, motor akimi degisince
+        # BNO055'in FUZE EDILMIS (mutlak) yaw'i 2.14 derece SICRAMISTI -
+        # yani PID'nin surekli mutlak/fuze yaw'a guvenmesi TEHLIKELI olurdu
+        # (motor akimini degistirdiginde olusan sahte bir "sapma"yi
+        # duzeltmeye calisip kendi kendini besleyebilir). Bu yuzden BUNUN
+        # YERINE SADECE GYRO (acisal hiz, angular_velocity.z) kullaniliyor -
+        # bu eksen zaten tam kalibre (gyro:3) VE manyetik girisimden
+        # ETKILENMIYOR (konum_birlestirici.py dosya basi notu). Referans,
+        # HER "duz gidis" segmentinin BASLANGICINDA sifirlanan bir gyro
+        # INTEGRALI (sadece o an suren duz surus boyunca biriken sapma,
+        # omur boyu/mutlak bir aci DEGIL) - boylece manyetometre kalibrasyon
+        # sorunundan tamamen bagimsiz VE sinirsiz surunme riski yok.
+        #
+        # AKTIVASYON: ham_sol_pwm ve ham_sag_pwm AYNI ISARETTE (ikisi de
+        # ileri VEYA ikisi de geri) VE ikisi de sifirdan farkliysa "duz
+        # gidis niyeti" var sayilir - PID devrede. Isaretler farkliysa
+        # (tank donusu) veya biri sifirsa (pivot) operatorun KASITLI bir
+        # donus yaptigi varsayilir, PID devre disi kalir ve bir sonraki duz
+        # segment icin entegral sifirlanir. NOT: sol/sag PWM DEGERLERI FARKLI
+        # OLABILIR (operator Q/Z/E/C ile elle trim yapmis olabilir) - bu
+        # PID'yi engellemez, sadece ISARETLERI ayni olmali.
+        #
+        # YON: standart diferansiyel-suruş kinematigi omega = k*(v_sag-v_sol)
+        # - SOLA DON (sol=-,sag=+) -> omega>0 (sol/CCW donus, REP-103'te
+        # +yaw=sol) ile TUTARLI, SAGA DON (sol=+,sag=-) -> omega<0 ile
+        # TUTARLI (surus_joystick_sistemi.py/telemetri_sistemi.py'deki halen
+        # DOGRULANMIS tanimlardan turetildi). Bu formul v_sol/v_sag isaretinde
+        # DOGRUSAL oldugu icin ayni duzeltme (sol'a +trim, sag'a -trim)
+        # ILERI'de de GERI'de de doğru yon etkisini verir - ayri bir
+        # ileri/geri isaret carpani GEREKMEZ.
+        self._pid_aktif = True  # varsayilan ACIK (kullanici tercihi) - /yon_pid_aktif ile kapatilabilir
+        self._pid_yon_carpani = 1.0  # CANLI TESTTE TERS CIKARSA -1.0 YAP (tek satirlik anahtar)
+        self._pid_Kp = 8.0     # PWM birimi / (rad/s) - anlik donus hizina tepki
+        self._pid_Ki = 40.0    # PWM birimi / rad - bu segmentte biriken sapmaya tepki
+        self._pid_MAX_TRIM = 45.0  # PWM biriminde ust sinir (~255'in %18'i) - PID surucuyu asla ezemez
+        self._pid_duz_gidis_aktif = False
+        self._pid_entegral_rad = 0.0
+        self._pid_son_gyro_z = 0.0
+        self._pid_son_imu_zaman = None
+        self.create_subscription(Bool, '/yon_pid_aktif', self._pid_aktif_cb, 10)
+        self.create_subscription(Imu, '/imu/data', self._imu_cb, qos_profile_sensor_data)
+
+    def _pid_aktif_cb(self, msg):
+        self._pid_aktif = bool(msg.data)
+        if not self._pid_aktif:
+            self._pid_duz_gidis_aktif = False
+            self._pid_entegral_rad = 0.0
+        self.get_logger().info(f"🧭 Yön düzeltme PID: {'AÇIK' if self._pid_aktif else 'KAPALI'}")
+
+    def _imu_cb(self, msg):
+        gyro_z = msg.angular_velocity.z
+        self._pid_son_gyro_z = gyro_z
+        simdi = time.monotonic()
+        if self._pid_duz_gidis_aktif and self._pid_son_imu_zaman is not None:
+            dt = simdi - self._pid_son_imu_zaman
+            # Ani/anormal dt (ör. IMU yayini kesintiye ugramis) entegrali bozmasin
+            if 0.0 < dt < 0.5:
+                self._pid_entegral_rad += gyro_z * dt
+        self._pid_son_imu_zaman = simdi
+
+    def _pid_trim_hesapla(self, ham_sol_pwm, ham_sag_pwm):
+        """Duz gidis niyeti varsa gyro-tabanli PI duzeltme trim'i doner,
+        yoksa 0.0 doner (ve durumu/entegrali sifirlar)."""
+        if not self._pid_aktif:
+            return 0.0
+
+        duz_gidis = (
+            ham_sol_pwm != 0.0 and ham_sag_pwm != 0.0
+            and (ham_sol_pwm > 0) == (ham_sag_pwm > 0)
+        )
+
+        if not duz_gidis:
+            if self._pid_duz_gidis_aktif:
+                self.get_logger().info("🧭 Yön düzeltme: dönüş/dur algılandı, PID sıfırlandı.")
+            self._pid_duz_gidis_aktif = False
+            self._pid_entegral_rad = 0.0
+            return 0.0
+
+        if not self._pid_duz_gidis_aktif:
+            # YENİ duz gidis segmenti basliyor - referans/entegral sifirlanir
+            self._pid_duz_gidis_aktif = True
+            self._pid_entegral_rad = 0.0
+
+        trim = self._pid_yon_carpani * (
+            self._pid_Kp * self._pid_son_gyro_z + self._pid_Ki * self._pid_entegral_rad
+        )
+        return max(min(trim, self._pid_MAX_TRIM), -self._pid_MAX_TRIM)
 
     def _baglanti_durumu_yayinla(self):
         msg = Bool()
@@ -122,7 +230,26 @@ class ArduinoMotorKontrol(Node):
         # Son güvenlik mandalı
         return max(min(ppm, self.ppm_max), self.ppm_min)
 
+    def _komut_callback(self, msg):
+        komut = msg.data.strip()
+        if komut == "EMERGENCY_STOP_CMD":
+            self._kilitli = True
+            self.get_logger().warn("🛑 ACİL DURDURMA KİLİTLENDİ - /palet_hizlari komutları 'DEVAM_CMD' gelene kadar YOK SAYILACAK")
+            if self.arduino and self.arduino.is_open:
+                try:
+                    dur_komutu = f"{self.ppm_merkez},{self.ppm_merkez}\n"
+                    self.arduino.write(dur_komutu.encode('utf-8'))
+                except Exception as e:
+                    self.get_logger().error(f"⚠️ Acil durdurma sirasinda seri port yazma hatasi: {e}")
+        elif komut == "DEVAM_CMD":
+            self._kilitli = False
+            self.get_logger().info("✅ Acil durdurma kilidi AÇILDI - normal /palet_hizlari işlenmeye devam ediyor")
+
     def palet_callback(self, msg):
+        if self._kilitli:
+            # KİLİTLİYKEN gelen HİÇBİR PWM komutu işlenmez - joystick/klavye/
+            # otonom fark etmeksizin. Sadece "DEVAM_CMD" bunu açabilir.
+            return
         if not self.arduino or not self.arduino.is_open:
             self.baglanti_kur()
             return
@@ -130,6 +257,15 @@ class ArduinoMotorKontrol(Node):
         try:
             ham_sol_pwm = msg.data[0]
             ham_sag_pwm = msg.data[1]
+
+            # YÖN DÜZELTME PID (bkz. __init__ yorumu): duz gidiste gyro
+            # tabanli trim - sol'a +trim, sag'a -trim (trim>0 = sola kayma
+            # duzeltmesi, yukaridaki "sag>sol -> sola kivrilir" notuyla
+            # TUTARLI: sag'i azaltip sol'u artirmak sola kivrilmayi azaltir).
+            trim = self._pid_trim_hesapla(ham_sol_pwm, ham_sag_pwm)
+            if trim != 0.0:
+                ham_sol_pwm = max(min(ham_sol_pwm + trim, 255.0), -255.0)
+                ham_sag_pwm = max(min(ham_sag_pwm - trim, 255.0), -255.0)
 
             # DÜZELTME: Eski kodunuzda W'ye basıldığında Sol Motor (1500 - Hız), Sağ Motor (1500 + Hız) yapılıyordu.
             # Yani motorlardan birinin fiziksel montaj yönü ters!

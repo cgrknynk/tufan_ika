@@ -71,10 +71,25 @@ def _renk(isim, varsayilan):
 
 
 class SshTerminalWidget(QTextEdit):
-    def __init__(self, parent=None, user=VARSAYILAN_KULLANICI, host=VARSAYILAN_HOST):
+    def __init__(self, parent=None, user=VARSAYILAN_KULLANICI, host=VARSAYILAN_HOST, tmux_oturum="tufan_ana_terminal"):
         super().__init__(parent)
         self.user = user
         self.host = host
+        # KRİTİK DÜZELTME (2026-08-31): eskiden çıplak bir "ssh -tt" oturumu
+        # açılıyordu - arayüz kapanınca (bkz. baglantiyi_kapat) yerel ssh
+        # istemcisine SIGTERM gidiyor, bu da SSH bağlantısını düşürüyor, bu
+        # da araç tarafındaki UZAK shell'e SIGHUP gönderip O SHELL'İN ÖN
+        # PLANDA çalıştırdığı HERHANGİ BİR ŞEYİ (ör. operatör bu terminalden
+        # elle `ros2 launch ...` çalıştırmışsa) öldürüyordu - "arayüz
+        # kapatılınca araçtaki süreçler durmasın" isteğiyle TAM ÇELİŞEN bir
+        # davranıştı. Artık `tmux new-session -A` ile bağlanılıyor: oturum
+        # araç Jetson'ının kendi tmux SUNUCUSUNDA yaşıyor, SSH bağlantısı
+        # kesilince (yerel istemci öldürülse bile) tmux sadece DETACH olur,
+        # içindeki hiçbir şey durmaz - bir dahaki bağlantıda (-A: attach-or-
+        # create) AYNI oturuma, aynı çalışan komutlarla geri dönülür. Farklı
+        # `tmux_oturum` adı vermek (bkz. main.py çoklu terminal butonu)
+        # birbirinden bağımsız, hepsi araca bağlı birden fazla terminal açar.
+        self.tmux_oturum = tmux_oturum
 
         self.setUndoRedoEnabled(False)
         self.setLineWrapMode(QTextEdit.NoWrap)
@@ -123,7 +138,17 @@ class SshTerminalWidget(QTextEdit):
         try:
             proc = subprocess.Popen(
                 ["ssh", "-tt", "-o", "StrictHostKeyChecking=accept-new",
-                 f"{self.user}@{self.host}"],
+                 f"{self.user}@{self.host}",
+                 # -A: oturum zaten varsa (ör. onceki baglantidan kalma)
+                 # ONA GERI DON (calisan hicbir seyi bozmadan), yoksa
+                 # YENISINI olustur. -c: SADECE yeni olusturmada baslangic
+                 # dizinini ayarlar - var olan oturuma baglanirken yok
+                 # sayilir (o an nerede oldugu bozulmaz). Klavye girdisi
+                 # HIC ENJEKTE EDILMIYOR artik - eskiden yapilan "cd && "
+                 # yontemi, oturum zaten mesguken (ör. operatorun elle
+                 # baslattigi bir surecin on planinda calistigi bir anda)
+                 # o sürece rastgele tus girdisi gonderme riski tasiyordu.
+                 f"tmux new-session -A -s {self.tmux_oturum} -c {BASLANGIC_DIZINI}"],
                 stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
                 preexec_fn=os.setsid, close_fds=True, env=env,
             )
@@ -141,33 +166,6 @@ class SshTerminalWidget(QTextEdit):
         os.set_blocking(master_fd, False)
         self._notifier = QSocketNotifier(master_fd, QSocketNotifier.Read, self)
         self._notifier.activated.connect(self._pty_okunabilir)
-
-        # Baglanti kurulur kurulmaz proje dizinine gec ve ekrani temizle.
-        # (Girdi pty tamponunda bekler, shell hazir olunca islenir -- MOTD
-        # tam basilmadan gonderilse bile sorun cikarmaz.)
-        QTimer.singleShot(600, self._proje_dizinine_gec)
-
-    def _proje_dizinine_gec(self):
-        if self._master_fd is None:
-            return
-        try:
-            # PROMPT_COMMAND='history -a': her komut CALISTIKTAN HEMEN SONRA
-            # ~/.bash_history dosyasina yazilir. Bu olmadan bash gecmisi
-            # SADECE duzgun bir "exit" ile kapanan oturumlarda diske yazar --
-            # arayuz kapanirken ssh baglantisini SIGTERM ile kestigimiz icin
-            # (bkz. baglantiyi_kapat) o oturumdaki komutlar kaybolurdu. Bu
-            # sayede yazilan komutlar bir sonraki baglantida (yukari ok /
-            # gecmis) hala goruntur.
-            # NOT: eskiden baglanir baglanmaz /palet_hizlari canli akmaya
-            # baslardi - kullanici isteği ile bu kaldirildi, artik sadece
-            # normal, bagli bir terminal prompt'u geliyor. Canli PWM akisi
-            # istege bagli: sol bardaki PWM butonuna basinca (main.py -
-            # _pwm_akisini_goster) tetiklenir (bkz. pwm_akisina_don()).
-            os.write(self._master_fd,
-                     f"export PROMPT_COMMAND='history -a'; cd {BASLANGIC_DIZINI} && clear && "
-                     f"source /opt/ros/humble/setup.bash\r".encode())
-        except OSError:
-            pass
 
     def yeniden_baglan(self):
         self.baglantiyi_kapat()

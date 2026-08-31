@@ -9,6 +9,7 @@ try:
     from std_msgs.msg import String, Float32, Bool, Int32, Float32MultiArray
     from nav_msgs.msg import Odometry
     from sensor_msgs.msg import LaserScan, Imu
+    from geometry_msgs.msg import Twist
 except Exception as e:
     rclpy = None
     Node = None
@@ -24,10 +25,21 @@ except Exception as e:
     Odometry = None
     LaserScan = None
     Imu = None
+    Twist = None
     ROS2_IMPORT_ERROR = str(e)
 else:
     ROS2_IMPORT_ERROR = None
+
+try:
+    from mavros_msgs.msg import GPSRAW
+except Exception:
+    # konum_birlestirici.py'deki AYNI durum: mavros_msgs kurulu degilse
+    # (ör. sadece ~/ros2_humble sourcelandi) GNSS gostergesi sessizce PASİF
+    # kalir, geri kalan telemetri etkilenmez.
+    GPSRAW = None
+
 from PyQt5.QtCore import QThread, pyqtSignal
+from terminal_widget import VARSAYILAN_HOST as WIFI_YEDEK_IP
 
 # Yarista aracla arayuz arasindaki kablosuz linki Ubiquiti nokta-nokta
 # kopru sagliyor (WiFi degil). Radyonun kendi yonetim IP'si (192.168.1.21)
@@ -36,6 +48,11 @@ from PyQt5.QtCore import QThread, pyqtSignal
 # asil ilgilendiren de zaten "araca gercekten ulasabiliyor muyum" sorusu.
 # IP degisirse burasi guncellenmeli.
 UBIQUITI_LINK_HEDEF_IP = "192.168.1.22"
+# YENİ: Ubiquiti tamamen kopukken (%0) gösterge sessizce "bağlantı yok"
+# göstermesin - araç WiFi üzerinden (terminal_widget.py'nin kullandığı AYNI
+# IP, bkz. import) hala erişilebilir olabilir (nitekim terminal zaten bu IP
+# ile SSH kuruyor). Ubiquiti kopukken WiFi'ye otomatik düşülür, gösterge
+# hangi linkin gerçekte kullanıldığını da bildirir (bkz. main.py wifi_arayuz_guncelle).
 
 class TelemetriThread(QThread):
     # --- PyQt5 SİNYALLERİ ---
@@ -52,7 +69,7 @@ class TelemetriThread(QThread):
     # (otonom_hazir, manuel_hazir) -- aractaki Jetson'da otonom yigin
     # (goal_manager) ve/veya manuel surus koprusu (arduino) calisiyor mu.
     mod_durum_sinyali = pyqtSignal(bool, bool)
-    wifi_durum_sinyali = pyqtSignal(int)
+    wifi_durum_sinyali = pyqtSignal(int, str)  # (yuzde, kaynak: "UBIQUITI" veya "WIFI")
     # Silah/turret TF02-Pro lidar'inin hedefe olan mesafesi (metre).
     hedef_mesafe_sinyali = pyqtSignal(float)
     
@@ -100,6 +117,21 @@ class TelemetriThread(QThread):
         self.palet_pub = self.surus_node.create_publisher(Float32MultiArray, '/palet_hizlari', palet_qos)
         self.surus_node.create_timer(0.1, self.surekli_yayin_dongusu)
 
+        # --- GECICI: yarismadan once araç ve silah icin AYRI joystick
+        # olacak; simdilik TEK joystick, "Joystick Hedefi" ile arac/silah
+        # arasinda elle secilerek paylasiliyor. Ayni sürus-kritik/dusuk
+        # gecikme geregi oldugundan ayni izole surus_node'da yayinlaniyor. ---
+        self.joystick_hedefi = "ARAC"  # "ARAC" veya "SILAH"
+        self.silah_modu_pub = self.surus_node.create_publisher(String, '/silah_modu', 10)
+        self.turret_cmd_pub = self.surus_node.create_publisher(Twist, '/turret_manuel_cmd', 10)
+        self.silah_ates_pub = self.surus_node.create_publisher(Bool, '/silah_ates_manuel', 10)
+
+        # --- YENİ: Düz gidişte otomatik yön düzeltme (araç tarafı gyro-PID)
+        # AÇ/KAPA anahtarı - araçtaki arduino_motor_kontrol.py varsayılan
+        # AÇIK başlıyor, kullanıcı sahada beklenmedik davranış görürse tek
+        # tıkla kapatabilsin diye (bkz. main.py _yon_pid_butonu_ekle). ---
+        self.yon_pid_pub = self.surus_node.create_publisher(Bool, '/yon_pid_aktif', 10)
+
         # --- Genel telemetri/gosterge dugumu (SADECE abonelikler - gecikmesi
         # sürüşü ASLA etkilemez, ayri node'da oldugu icin) ---
         self.node = Node('tufan_yer_istasyonu')
@@ -121,12 +153,31 @@ class TelemetriThread(QThread):
             self.node.create_subscription(Imu, '/imu/data', self.imu_heartbeat_cb, 10)
         if Int32 is not None:
             self.node.create_subscription(Int32, '/goal_manager_heartbeat', self.otonom_heartbeat_cb, 10)
+        if Int32 is not None:
+            # ETAP göstergesi (dashboard'da label_etapNo) - Designer'da
+            # sabit "8" yazıyordu, etap_sinyali TANIMLIYDI ama hiç emit
+            # edilmiyordu (gps_durum_sinyali ile AYNI durum). Artık
+            # tabela_etap_yoneticisi.py'nin (araç) yayınladığı gerçek
+            # tespit edilen etap numarasına bağlı.
+            self.node.create_subscription(Int32, '/guncel_etap', self.guncel_etap_cb, 10)
+        if GPSRAW is not None:
+            # GNSS gercekten aktif mi - konum_birlestirici.py'de zaten
+            # dogrulanmis AYNI kaynak (fix_type: 0=yok,1=fixsiz,2=2D,3=3D,
+            # 4=DGPS,5=RTK Float,6=RTK Fixed). "ETKİN" esigi olarak 3D fix
+            # (>=3) kullaniliyor - konum_birlestirici.py'nin kendi
+            # gps_heading_min_fix_type varsayilaniyla (3) TUTARLI, RTK'siz de
+            # (sadece 3D fix) GNSS'in temelde calistigini gostermek icin
+            # yeterli bir esik (RTK ozel durumu ayri, NTRIP/RTK panelinde).
+            self.node.create_subscription(GPSRAW, '/mavros/gpsstatus/gps1/raw', self.gps_raw_cb, 10)
         self.node.create_subscription(Float32, '/turret_hedef_mesafe', self.hedef_mesafe_cb, 10)
         self.son_lidar_zamani = 0.0
         self.anlik_lidar_durumu = None
         self.son_imu_zamani = 0.0
         self.anlik_imu_durumu = None
         self.son_otonom_zamani = 0.0
+        self.son_gps_zamani = 0.0
+        self.son_gps_fix_type = 0
+        self.anlik_gps_durumu = None
         self.manuel_hazir = False
         self.anlik_mod_durumu = None
         self.ros2_bagli = True
@@ -213,6 +264,17 @@ class TelemetriThread(QThread):
         self.son_telemetri_zamani = time.time()
         self.son_otonom_zamani = time.time()
 
+    def guncel_etap_cb(self, msg):
+        self.son_telemetri_zamani = time.time()
+        self.etap_sinyali.emit(str(msg.data))
+
+    def gps_raw_cb(self, msg):
+        # /mavros/gpsstatus/gps1/raw (GPSRAW) -- gercek GNSS fix kalitesi.
+        # konum_birlestirici.py'de zaten canli dogrulanmis AYNI alan.
+        self.son_telemetri_zamani = time.time()
+        self.son_gps_zamani = time.time()
+        self.son_gps_fix_type = msg.fix_type
+
     def hedef_mesafe_cb(self, msg):
         self.hedef_mesafe_sinyali.emit(float(msg.data))
 
@@ -236,22 +298,64 @@ class TelemetriThread(QThread):
             self._wifi_kontrol()
             time.sleep(3.0)
 
+    def _ubiquiti_fiziksel_bagli_mi(self):
+        # KRİTİK BULGU (2026-08-31): eskiden sadece UBIQUITI_LINK_HEDEF_IP'ye
+        # ping atılıp başarılı olursa "UBIQUITI" deniyordu - ama bu IP'ye
+        # giden rota Ubiquiti FİZİKSEL OLARAK BAĞLI DEĞİLKEN BİLE WiFi'nin
+        # kendi ağ geçidi üzerinden gidebiliyor (`ip route get` ile canlı
+        # doğrulandı: rota wlP1p1s0/WiFi üzerinden çıkıyor, Ubiquiti'ye özel
+        # ayrı bir arayüz/alt ağ YOK) - yani ping bazen başarılı dönüp
+        # yanlışlıkla "UBIQUITI: %40/%100" gösterebiliyordu, Ubiquiti kablosu
+        # hiç takılı değilken bile (canlı bildirildi). Gerçek kaynak: Ubiquiti
+        # radyosunun bağlı olduğu kablolu Ethernet portunun (enP8p1s0) FİZİKSEL
+        # link durumu (carrier) - kablo/radyo yoksa "0" yazar, IP/ping'e hiç
+        # bakmadan kesin olarak bilinir. Port adı değişirse burası güncellenmeli.
+        try:
+            with open('/sys/class/net/enP8p1s0/carrier') as f:
+                return f.read().strip() == '1'
+        except Exception:
+            return False  # arayuz bulunamadi/okunamadi - guvenli varsayim: bagli degil
+
     def _wifi_kontrol(self):
         # Yarışta gerçek WiFi degil, Ubiquiti nokta-nokta kablosuz köprü
         # kullanılıyor - gösterge artık o linkin kalitesini gösteriyor.
         # 5 hizli ping gonderip basari oranini "%baglanti kalitesi" olarak
         # yayinliyoruz (RSSI yerine gercek paket kaybi - PtP link icin
         # daha anlamli). UBIQUITI_LINK_HEDEF_IP degisirse burasi guncellenmeli.
+        if self._ubiquiti_fiziksel_bagli_mi():
+            try:
+                cikti = subprocess.run(
+                    ["ping", "-c", "5", "-i", "0.2", "-W", "1", UBIQUITI_LINK_HEDEF_IP],
+                    capture_output=True, text=True, timeout=4.0
+                ).stdout
+                basarili = cikti.count(" bytes from ")
+                yuzde = int(round((basarili / 5.0) * 100))
+                if yuzde > 0:
+                    self.wifi_durum_sinyali.emit(yuzde, "UBIQUITI")
+                    return
+            except Exception:
+                pass
+
+        # Ubiquiti fiziksel olarak bağlı değil (veya bağlı ama ping alamıyor) -
+        # WiFi uzerinden hala erisilebilir
+        # olabilir mi diye ayni sekilde dene (terminal_widget.py'nin SSH icin
+        # kullandigi ayni IP - araç zaten o agda).
         try:
             cikti = subprocess.run(
-                ["ping", "-c", "5", "-i", "0.2", "-W", "1", UBIQUITI_LINK_HEDEF_IP],
+                ["ping", "-c", "5", "-i", "0.2", "-W", "1", WIFI_YEDEK_IP],
                 capture_output=True, text=True, timeout=4.0
             ).stdout
             basarili = cikti.count(" bytes from ")
             yuzde = int(round((basarili / 5.0) * 100))
-            self.wifi_durum_sinyali.emit(yuzde)
+            if yuzde > 0:
+                self.wifi_durum_sinyali.emit(yuzde, "WIFI")
+            else:
+                # Ikisi de tamamen kopuk - "UBIQUITI" olarak %0 goster
+                # (WIFI:%0 gostermek, denenen-ama-basarisiz WiFi'yi asil
+                # baglanti gibi gostermis olurdu - yaniltici).
+                self.wifi_durum_sinyali.emit(0, "UBIQUITI")
         except Exception:
-            self.wifi_durum_sinyali.emit(0)
+            self.wifi_durum_sinyali.emit(0, "UBIQUITI")
 
     def log_yaz(self, mesaj):
         print(mesaj)
@@ -304,6 +408,17 @@ class TelemetriThread(QThread):
             self.imu_durum_sinyali.emit(imu_canli_mi)
         # ------------------------------------------------------------
 
+        # --- GNSS CANLILIK + FIX KALITESI KONTROLU (gercek GPSRAW) ---
+        # Hem veri GERCEKTEN akiyor mu (heartbeat, 3sn - gps_bringup.launch.py
+        # calismiyorsa mavros GPSRAW hic yayinlamaz) HEM DE fix_type yeterli
+        # mi (>=3, 3D fix - konum_birlestirici.py'nin esigiyle tutarli).
+        gps_canli_mi = (time.time() - self.son_gps_zamani) < 3.0
+        gps_etkin = gps_canli_mi and self.son_gps_fix_type >= 3
+        if gps_etkin != self.anlik_gps_durumu:
+            self.anlik_gps_durumu = gps_etkin
+            self.gps_durum_sinyali.emit(gps_etkin)
+        # ------------------------------------------------------------
+
         if self.arac_modu == "MANUEL":
             if (self.anlik_sol_pwm != 0.0 or self.anlik_sag_pwm != 0.0):
                 if (time.time() - self.son_komut_zamani) > self.guvenlik_zaman_asimi:
@@ -352,22 +467,79 @@ class TelemetriThread(QThread):
         # watchdog zaman damgasini guncelliyoruz.
         if self.arac_modu != "MANUEL" or self.surus_kaynagi != "JOYSTICK":
             return
+        # GECICI paylasimli joystick: hedef SILAH iken araca HICBIR komut
+        # gitmesin (fiziksel joystick su an silah nisanlamak icin kullaniliyor).
+        if self.joystick_hedefi != "ARAC":
+            return
         self.son_komut_zamani = time.time()
         self.anlik_sol_pwm = self._pwm_olcekle(float(sol_oran))
         self.anlik_sag_pwm = self._pwm_olcekle(float(sag_oran))
+
+    def joystick_hedefini_ayarla(self, hedef):
+        # hedef: "ARAC" veya "SILAH". Degisirken araci guvenli tarafta
+        # birak: SILAH'a gecerken araç PWM'i hemen sifirla (joystick artik
+        # ona komut gondermeyecek, eski deger PALET'te takili kalmasin).
+        if hedef == self.joystick_hedefi:
+            return
+        self.joystick_hedefi = hedef
+        if hedef == "SILAH":
+            self.anlik_sol_pwm = 0.0
+            self.anlik_sag_pwm = 0.0
+            if self.silah_modu_pub is not None:
+                self.silah_modu_pub.publish(String(data="MANUEL"))
+
+    def joystick_turret_gonder(self, x, y):
+        # surus_joystick_sistemi.py'den gelen HAM x/y (tank karisimi
+        # ONCESI) - aracin joystick kalibrasyonu (merkez/olu bolge/oto-
+        # merkezleme/guvenlik siniri) zaten uygulanmis durumda, silah icin
+        # ayrica kalibrasyona gerek yok. turret_node.py bunu Twist.linear.x
+        # (pan) / linear.y (tilt) olarak bekliyor (bkz. _manuel_cmd_cb).
+        if self.joystick_hedefi != "SILAH" or self.turret_cmd_pub is None:
+            return
+        msg = Twist()
+        msg.linear.x = float(x)
+        msg.linear.y = float(y)
+        self.turret_cmd_pub.publish(msg)
+
+    def silah_ates_ayarla(self, aktif: bool):
+        if self.silah_ates_pub is None:
+            return
+        self.silah_ates_pub.publish(Bool(data=bool(aktif)))
+
+    def yon_pid_ayarla(self, aktif: bool):
+        if self.yon_pid_pub is None:
+            return
+        self.yon_pid_pub.publish(Bool(data=bool(aktif)))
 
     def hareket_emri_gonder(self, yon):
         if self.cmd_pub is None:
             self.log_yaz("⚠️ ROS2 yayıncısı yok, hareket emri gönderilemedi.")
             return
-        if self.arac_modu != "MANUEL" and yon not in ["DUR (SPACE)", "EMERGENCY_STOP_CMD"]:
+        if self.arac_modu != "MANUEL" and yon not in ["DUR (SPACE)", "EMERGENCY_STOP_CMD", "DEVAM_CMD"]:
             return
-        if self.surus_kaynagi != "KLAVYE" and yon not in ["DUR (SPACE)", "EMERGENCY_STOP_CMD"]:
+        if self.surus_kaynagi != "KLAVYE" and yon not in ["DUR (SPACE)", "EMERGENCY_STOP_CMD", "DEVAM_CMD"]:
             return
 
         self.son_komut_zamani = time.time()
         msg = String()
-        
+
+        # --- 0. ACİL DURDURMA KİLİDİ (araçtaki arduino_motor_kontrol.py'nin
+        # /arac_komut üzerinde beklediği TAM OLARAK bu iki metni gönderiyoruz -
+        # aşağıdaki genel yön/harf komutlarından farklı olarak burada literal
+        # metin lazım, "X\n" gibi tek harfli bir komut DEĞİL). Bu iki komut
+        # PWM/palet durumuna dokunmaz - kilit araç tarafında yönetiliyor. ---
+        if yon in ("EMERGENCY_STOP_CMD", "DEVAM_CMD"):
+            msg.data = yon
+            self.cmd_pub.publish(msg)
+            if yon == "EMERGENCY_STOP_CMD":
+                self.anlik_sol_pwm = 0.0
+                self.anlik_sag_pwm = 0.0
+                self.log_yaz("🛑 ACİL DURDURMA KİLİDİ GÖNDERİLDİ: araçtaki motor komutları kesildi.")
+                self.anlik_palet_yayinla()
+            else:
+                self.log_yaz("✅ DEVAM KOMUTU GÖNDERİLDİ: araçtaki acil durdurma kilidi açılıyor.")
+            return
+
         # --- 1. YÖN VE HAREKET KOMUTLARI ---
         if "İLERİ" in yon: 
             msg.data = "W\n"

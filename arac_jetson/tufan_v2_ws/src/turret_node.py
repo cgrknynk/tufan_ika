@@ -97,7 +97,7 @@ from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import Twist
 from rcl_interfaces.msg import SetParametersResult
 from rclpy.node import Node
-from std_msgs.msg import String
+from std_msgs.msg import String, Bool, Int32
 from ultralytics import YOLO
 
 # Silahin turret Arduino'su (silah_ws/sketch_jul28b.ino) bir Arduino MEGA
@@ -112,7 +112,7 @@ ARDUINO_MEGA_VID_PID = {
 # Varsayilan model yolu: launch dosyasi olmadan (ör. "ros2 run tufan_v2_ws
 # turret_node.py") dogrudan calistirildiginda da model_path bos kalmasin diye.
 _VARSAYILAN_MODEL_YOLU = os.path.join(
-    get_package_share_directory('tufan_v2_ws'), 'models', 'hedefv1-seg.pt'
+    get_package_share_directory('tufan_v2_ws'), 'models', 'hedefv3-seg.pt'
 )
 
 # HASSAS TEK-ADIM modunda "sicrama bastirma" icin: bir adimin ekseni+yonu,
@@ -447,7 +447,31 @@ class TurretNode(Node):
         self._manuel_x = 0.0
         self._manuel_y = 0.0
         self._manuel_zaman = None
+        # Manuel (joystick) ates: /silah_ates_manuel - MANUEL modda lazer
+        # HICBIR ZAMAN otomatik yanmadigi icin (bkz. dosya basi notu) elle
+        # tetiklenmesi gerekiyor. Kendi heartbeat'i var (bkz. _manuel_heartbeat)
+        # - sinyal kesilirse (arayuz coktu/baglanti gitti) lazer otomatik
+        # kapanir, acik takili kalmaz.
+        self._ates_manuel_aktif = False
+        self._ates_manuel_zaman = None
+        self._ATES_MANUEL_TIMEOUT_S = 0.5
         self._tam_kilit_log = False
+        # MODEL AC/KAPA (2026-08-31, gorev sekansi): /turret_model_aktif ile
+        # kontrol edilir. VARSAYILAN KAPALI - launch aninda kamera acilir
+        # (asagida _ana_dongu, cap acma kismi) ama izleme/YOLO/lazer
+        # calismaz; gorev sekansi (tabela_etap_yoneticisi.py) Stop
+        # tabelasindan sonra bunu ACAR. tabela_node.py'deki ayni desenin
+        # (model kapali -> kamera acik, sadece UDP goruntu) esidir.
+        self._model_aktif = False
+        # HEDEF VURULDU SAYACI (2026-08-31, kullanici istegi): "1 kere
+        # kilitlenip 5sn beklemek DEGIL, 3 kere kilitlenip 5er sn
+        # bekledikten sonra devam etsin". Her TAMAMLANAN kilit+5sn-bekleme
+        # dongusunde (asagida _kilit_bitis_zamani ayarlanan noktada, bkz.
+        # "kilit YENİ bitti" yorumu) sayac 1 artar. 3'e ulasinca
+        # /silah_hedef_vuruldu yayinlanir VE sayac sifirlanir (bir sonraki
+        # hedef/gorev icin taze baslasin diye).
+        self._basarili_kilit_sayaci = 0
+        self._HEDEF_VURULDU_ESIGI = 3
         self._kilitli_mi = False  # histerezis durumu (bkz. kilit_kaybi_esigi_px)
         self._pozisyon_kilitli = False  # _ana_dongu icinde hesaplanir
         self._hassas_mod = False  # hareket modu histerezisi (bkz. ince_ayar_kayip_toleransi_px)
@@ -492,6 +516,12 @@ class TurretNode(Node):
 
         self.create_subscription(String, 'silah_modu', self._mod_cb, 10)
         self.create_subscription(Twist, 'turret_manuel_cmd', self._manuel_cmd_cb, 10)
+        self.create_subscription(Bool, 'silah_ates_manuel', self._ates_manuel_cb, 10)
+        self.create_subscription(Bool, '/turret_model_aktif', self._model_aktif_cb, 10)
+        # Bool DEGIL Int32: gorev sekansi sadece "vuruldu oldu" anini degil,
+        # o ana kadar KACINCI basarili kilit oldugunu da izleyebilsin diye
+        # (ör. ilerleme gostergesi/log) - 3'e ulasinca "vuruldu" sayilir.
+        self._hedef_vuruldu_pub = self.create_publisher(Int32, '/silah_hedef_vuruldu', 10)
 
         # MANUEL komut gonderimi kamera/YOLO dongusunden bagimsiz, sabit
         # hizli (20Hz) bir zamanlayici ile yapilir - boylece tus tepkisi
@@ -601,6 +631,26 @@ class TurretNode(Node):
         self._manuel_y = msg.linear.y
         self._manuel_zaman = time.time()
 
+    def _ates_manuel_cb(self, msg: Bool):
+        self._ates_manuel_aktif = bool(msg.data)
+        self._ates_manuel_zaman = time.time()
+
+    def _model_aktif_cb(self, msg: Bool):
+        yeni = bool(msg.data)
+        if yeni != self._model_aktif:
+            self.get_logger().info(
+                f'turret modeli {"AKTIF" if yeni else "DURDURULDU (kamera acik kalir)"}')
+        if not yeni:
+            # Model kapatilirken kilit/sayac durumu da temizlenir - bir
+            # sonraki acilista taze baslasin (yarim kalmis bir kilit/sayim
+            # tasinmasin).
+            self._kilitli_mi = False
+            self._kilit_baslangic_zamani = None
+            self._kilit_bitis_zamani = None
+            self._basarili_kilit_sayaci = 0
+            self._lazer_gonder('k')
+        self._model_aktif = yeni
+
     def _canli_mi(self, zaman, timeout=None):
         sinir = self._timeout if timeout is None else timeout
         return zaman is not None and (time.time() - zaman) < sinir
@@ -615,6 +665,14 @@ class TurretNode(Node):
         else:
             komut = 'x'
         self._komut_gonder(komut)
+        # Manuel ates: sadece sinyal TAZE iken (arayuzdeki buton basili
+        # tutulup surekli tekrarlanirken) lazer acik kalir - buton
+        # birakilinca VEYA baglanti kesilince (0.5sn icinde yeni sinyal
+        # gelmezse) otomatik kapanir, acik takili kalmaz.
+        if self._ates_manuel_aktif and self._canli_mi(self._ates_manuel_zaman, timeout=self._ATES_MANUEL_TIMEOUT_S):
+            self._lazer_gonder('l')
+        else:
+            self._lazer_gonder('k')
 
     def _arduino_yazici_thread(self):
         while self._calisiyor:
@@ -998,6 +1056,23 @@ class TurretNode(Node):
                     time.sleep(0.1)
                     continue
 
+                if not self._model_aktif:
+                    # Model KAPALI: kamera ACIK/canli kalsin diye ham kareyi
+                    # UDP'ye gonder, YOLO/izleme/lazer HIC calistirilmaz
+                    # (bkz. tabela_node.py'deki ayni desen).
+                    ret_enc, buffer = cv2.imencode(
+                        '.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+                    if ret_enc:
+                        data = buffer.tobytes()
+                        if len(data) < 65000:
+                            try:
+                                self._sock_video.sendto(
+                                    data, (self._video_target_ip, self._video_target_port))
+                            except Exception:
+                                pass
+                    time.sleep(0.05)
+                    continue
+
                 try:
                     su_an = time.time()
 
@@ -1211,6 +1286,23 @@ class TurretNode(Node):
                             # bastirarak olcumun/hedefin durulmasi icin pay
                             # birakiyoruz.
                             self._kilit_bitis_zamani = su_an
+
+                            # HEDEF VURULDU SAYACI (bkz. __init__ yorumu):
+                            # tam burasi TAM OLARAK "bir kilit+5sn-bekleme
+                            # dongusu TAMAMLANDI" ani - kullanicinin istegi
+                            # "1 kere degil 3 kere kilitlenip 5er sn
+                            # bekledikten sonra devam etsin" burada sayilir.
+                            self._basarili_kilit_sayaci += 1
+                            self.get_logger().info(
+                                f'🎯 Basarili kilit+bekleme dongusu: '
+                                f'{self._basarili_kilit_sayaci}/{self._HEDEF_VURULDU_ESIGI}')
+                            self._hedef_vuruldu_pub.publish(
+                                Int32(data=self._basarili_kilit_sayaci))
+                            if self._basarili_kilit_sayaci >= self._HEDEF_VURULDU_ESIGI:
+                                self.get_logger().warn(
+                                    f'✅ HEDEF VURULDU ({self._HEDEF_VURULDU_ESIGI} basarili '
+                                    'kilit+bekleme dongusu tamamlandi).')
+                                self._basarili_kilit_sayaci = 0
 
                         hareket_bastirilsin = self._kilitli_mi or (
                             self._kilit_bitis_zamani is not None

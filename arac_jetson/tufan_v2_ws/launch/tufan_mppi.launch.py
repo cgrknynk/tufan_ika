@@ -108,7 +108,13 @@ def generate_launch_description():
         package='tufan_v2_ws',
         executable='scan_front_filter.py',
         name='scan_front_filter',
-        parameters=[{'acik_esik_derece': 140.0, 'use_sim_time': use_sim_time}],
+        # 2026-09-01, kullanici istegi: acik koni 80 dereceden 220 dereceye
+        # genisletildi (esik = 180 - 220/2 = 70). UYARI: bu deger govdenin
+        # 3D baskisi kaynakli sahte yakin-mesafe yansimalarini (bkz. bu
+        # dosyanin/scan_front_filter.py'nin orijinal notu) engellemek icin
+        # ozenle 140'a ayarlanmisti - genisletmek o sorunu GERI GETIREBILIR,
+        # ilk canli testte costmap'te "iz" olusup olusmadigi kontrol edilmeli.
+        parameters=[{'acik_esik_derece': 70.0, 'use_sim_time': use_sim_time}],
     )
 
     # 4b2. Scan-matcher icin GENIS ACILI filtre (OTONOM ODOMETRI DUZELTMESI):
@@ -325,6 +331,48 @@ def generate_launch_description():
         }],
     )
 
+    # 12. GOREV SEKANSI KARAR DUGUMU (2026-08-31, kullanici istegi - TAM
+    #     akis): etap takibi + etap 8'de rampa cikisi + Stop tabelasinda
+    #     GECICI durdurma/silah-fazina gecis + hedef vurulunca inis+5m.
+    #     KALICI acil-durdurma kilidini (/arac_komut) ARTIK KULLANMAZ -
+    #     kullanici istegi geregi Stop sonrasi OTOMATIK devam eder (bkz.
+    #     tabela_etap_yoneticisi.py docstring).
+    tabela_etap_yoneticisi_node = Node(
+        package='tufan_v2_ws',
+        executable='tabela_etap_yoneticisi.py',
+        name='tabela_etap_yoneticisi',
+        output='screen',
+    )
+
+    # 13. Egim/rampa gecislerinde LIDAR'in zemini engel sanmasini onler -
+    #     pitch-tabanli, otomatik (bkz. egim_costmap_ayarlayici.py basi).
+    egim_costmap_ayarlayici_node = Node(
+        package='tufan_v2_ws',
+        executable='egim_costmap_ayarlayici.py',
+        name='egim_costmap_ayarlayici',
+        output='screen',
+    )
+
+    # 14. Arka kamera - SADECE acar/yayinlar, model YOK (bkz. dosyanin basi).
+    arka_kamera_node = Node(
+        package='tufan_v2_ws',
+        executable='arka_kamera_node.py',
+        name='arka_kamera_node',
+        output='screen',
+    )
+
+    # 15. Silah (turret) alt-sistemi - onceden AYRI/bagimsiz turret.launch.py
+    #     ile calistiriliyordu (elle, ayri terminal); gorev sekansinin Stop
+    #     tabelasindan sonra /turret_model_aktif + /silah_modu'nu kendi
+    #     yonetebilmesi icin artik ANA launch'a DAHIL edildi - kamera launch
+    #     aninda acilir (turret_node.py varsayilani: model KAPALI, bkz. o
+    #     dosyanin notu), model/izleme SADECE gorev sekansi komut verince baslar.
+    turret_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(pkg_share, 'launch', 'turret.launch.py')
+        ),
+    )
+
     return LaunchDescription([
         declare_lidar_serial_port_cmd,
         declare_tabela_camera_index_cmd,
@@ -346,4 +394,8 @@ def generate_launch_description():
         surus_koprusu_node,
         motor_driver_node,
         tabela_node,
+        tabela_etap_yoneticisi_node,
+        egim_costmap_ayarlayici_node,
+        arka_kamera_node,
+        turret_launch,
     ])

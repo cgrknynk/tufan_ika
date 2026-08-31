@@ -26,7 +26,7 @@ def generate_launch_description():
         description='Turret Arduino seri portu'
     )
     declare_video_target_ip_cmd = DeclareLaunchArgument(
-        'video_target_ip', default_value='192.168.1.20',
+        'video_target_ip', default_value='10.40.64.44',
         description='Islenmis turret goruntusunun UDP ile gonderilecegi IP'
     )
     declare_video_target_port_cmd = DeclareLaunchArgument(

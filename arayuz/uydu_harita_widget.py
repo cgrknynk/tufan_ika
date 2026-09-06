@@ -15,7 +15,7 @@ Kullanim:
 import math
 import os
 
-from PyQt5.QtCore import Qt, QPointF, QRectF, QUrl
+from PyQt5.QtCore import Qt, QPointF, QRectF, QUrl, QTimer
 from PyQt5.QtGui import QPainter, QPixmap, QColor, QPen, QPolygonF, QFont
 from PyQt5.QtWidgets import QWidget
 from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkRequest
@@ -48,6 +48,11 @@ class UyduHaritaWidget(QWidget):
         self.yon_derece = 0.0
         self.iz_noktalari = []   # [(lat, lon), ...] kat edilen yol
 
+        # RTK DURUMU (2026-09-01, kullanıcı isteği: "gpsin hatası ve fix mi
+        # float mı olduğu durumu yazsın") - GPSRAW'dan (fix_type, h_acc).
+        self.rtk_fix_type = None
+        self.rtk_h_acc_m = None
+
         # IMU ve LiDAR - kullanicinin istegi uzerine, taktik lidar ekranindaki
         # gibi bu ekranda da (uydu goruntusu uzerinde, gercek konuma gore
         # bindirilmis olarak) gorunsun diye eklendi.
@@ -64,6 +69,33 @@ class UyduHaritaWidget(QWidget):
 
         os.makedirs(ONBELLEK_DIZINI, exist_ok=True)
 
+        # RENDER İSTEĞİ COALESCING (2026-09-05) - harita_sistemi.py'deki
+        # TaktikRadarEkrani'nde AYNI kalıpla /odom'un 59Hz throttle'sız
+        # update()'inin GUI thread'i kilitlediği kanıtlandı (bkz. o
+        # dosyadaki 2026-09-05 notu). Bu widget da konum_guncelle (GNSS),
+        # rtk_durum_guncelle, imu_guncelle, lidar_guncelle sinyallerinde
+        # AYNI koşulsuz self.update() desenini kullanıyordu - önlem olarak
+        # (özellikle Navigasyon sayfasına GEÇİLDİĞİNDE, o ana kadar
+        # BİRİKMİŞ tüm bekleyen sinyallerin art arda tetiklediği paintEvent
+        # zincirinin GUI thread'i kilitlemesini önlemek için) buraya da
+        # uygulandı - veri her zaman anında güncellenir, self.update()
+        # çağrısı en fazla ~30fps'e (33ms) sınırlanır.
+        self._render_timer = QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.timeout.connect(self._render_zamanlayici_calisti)
+        self._render_istegi_beklemede = False
+
+    def _render_iste(self):
+        if not self.isVisible():
+            return
+        if not self._render_istegi_beklemede:
+            self._render_istegi_beklemede = True
+            self._render_timer.start(33)
+
+    def _render_zamanlayici_calisti(self):
+        self._render_istegi_beklemede = False
+        self.update()
+
     # ------------------------------------------------------------------ #
     # Disaridan konum guncellemesi (GNSS /fix geldikce cagrilir)
     # ------------------------------------------------------------------ #
@@ -79,20 +111,34 @@ class UyduHaritaWidget(QWidget):
         # PERFORMANS: veri her zaman guncel (sekme degisince hemen dogru
         # gorunur) ama pahali cizim/tile-yukleme SADECE bu widget gercekten
         # ekranda gorunurken tetiklenir - gorunmuyorken surekli ag istegi +
-        # QPainter cizimi bos yere CPU/ag harciyordu.
-        if self.isVisible():
-            self.update()
+        # QPainter cizimi bos yere CPU/ag harciyordu. DÜZELTME (2026-09-05):
+        # self.update() DOĞRUDAN değil, _render_iste() (coalescing) üzerinden.
+        self._render_iste()
+
+    # GPS_FIX_TYPE (MAVLink enum, GPSRAW.fix_type) -> okunabilir etiket.
+    _RTK_ETIKETLERI = {
+        0: ("GPS YOK", "#ff4444"),
+        1: ("FIX YOK", "#ff4444"),
+        2: ("2D FIX", "#ffb454"),
+        3: ("3D FIX", "#ffb454"),
+        4: ("DGPS", "#5eead4"),
+        5: ("RTK FLOAT", "#00d4ff"),
+        6: ("RTK FIXED", "#00ff88"),
+    }
+
+    def rtk_durum_guncelle(self, fix_type, h_acc_m):
+        self.rtk_fix_type = fix_type
+        self.rtk_h_acc_m = h_acc_m
+        self._render_iste()
 
     def imu_guncelle(self, roll, pitch):
         self.roll = roll
         self.pitch = pitch
-        if self.isVisible():
-            self.update()
+        self._render_iste()
 
     def lidar_guncelle(self, noktalar):
         self.lidar_noktalari = noktalar
-        if self.isVisible():
-            self.update()
+        self._render_iste()
 
     @staticmethod
     def _mesafe_m(p1, p2):
@@ -107,7 +153,18 @@ class UyduHaritaWidget(QWidget):
     def wheelEvent(self, event):
         delta = 1 if event.angleDelta().y() > 0 else -1
         self.zoom = max(self.min_zoom, min(self.max_zoom, self.zoom + delta))
-        self.tile_onbellek.clear()
+        # DÜZELTME (2026-09-02, kullanıcı isteği: "çok fazla yakınlaştıramıyorum") -
+        # eskiden HER yakınlaştırma adımında TÜM önbellek temizleniyordu -
+        # bu, aşağıdaki "üst zoom seviyesinden kırpılmış geçici görüntü"
+        # (bkz. paintEvent/_en_yakin_atalik_tile) mekanizmasını da imkansız
+        # kılıyordu, çünkü tam da lazım olduğu anda (yeni zoom'un GERÇEK
+        # karoları henüz inmemişken) bir önceki zoom'un karoları da SİLİNMİŞ
+        # oluyordu - ekran görüntüsüz/gri kalıyor, "daha fazla yakınlaşamıyorum"
+        # hissi buradan geliyordu (Esri'nin o bölge için üst zoom'da görüntüsü
+        # olmasa bile karo TALEBİ engellenmiyordu, sadece GÖSTERİLECEK hiçbir
+        # şey yoktu). Artık önbellek KORUNUYOR (farklı zoom'lar farklı
+        # anahtarlarda (z,x,y) tutulduğu için çakışma yok) - her zoom
+        # seviyesinin karoları bir kere iner, bir daha ağdan istenmez.
         self.update()
 
     # ------------------------------------------------------------------ #
@@ -125,6 +182,16 @@ class UyduHaritaWidget(QWidget):
         if os.path.exists(disk_yolu):
             pix = QPixmap(disk_yolu)
             if not pix.isNull():
+                if self._yer_tutucu_mu(pix):
+                    # Eskiden (bu düzeltmeden ÖNCE) diske YANLIŞLIKLA
+                    # kaydedilmiş bir yer tutucu olabilir - temizle ki bir
+                    # daha hiç yüklenmesin (bkz. _yer_tutucu_mu notu).
+                    try:
+                        os.remove(disk_yolu)
+                    except OSError:
+                        pass
+                    self.basarisiz.add(anahtar)
+                    return
                 self.tile_onbellek[anahtar] = pix
                 return
 
@@ -133,6 +200,31 @@ class UyduHaritaWidget(QWidget):
         istek = QNetworkRequest(QUrl(url))
         istek.setAttribute(QNetworkRequest.User, anahtar)
         self.net_yoneticisi.get(istek)
+
+    def _en_yakin_atalik_tile(self, z, x, y):
+        """DÜZELTME (2026-09-02, kullanıcı isteği: "çok fazla
+        yakınlaştıramıyorum") - hedef (z,x,y) karosu henüz inmemiş/hiç
+        yoksa (Esri'nin o bölgede o zoom seviyesinde görüntüsü olmayabilir -
+        uydu görüntü sağlayıcılarının HİÇBİRİ her yerde en yüksek zoom'da
+        veri sunmaz), standart "slippy map" davranışı (Google Maps/Leaflet
+        vb.) gibi bir ÜST (daha düşük zoom, daha önce zaten önbelleğe
+        alınmış) karonun İLGİLİ KÖŞESİNİ kırpıp büyüterek gösterir - boş
+        gri kare yerine BULANIK ama GERÇEK bir görüntü, kesintisiz/akıcı
+        yakınlaştırma hissi verir. min_zoom'a kadar yukarı doğru dener.
+        Döndürür: (pixmap, kaynak_QRectF) ya da hiçbiri onbellekte yoksa None.
+        """
+        for k in range(1, z - self.min_zoom + 1):
+            ust_z = z - k
+            olcek_2k = 2 ** k
+            ust_x, ust_y = x // olcek_2k, y // olcek_2k
+            ust_pix = self.tile_onbellek.get((ust_z, ust_x, ust_y))
+            if ust_pix is None:
+                continue
+            alt_boyut = TILE_BOYUTU / olcek_2k
+            kaynak_x = (x % olcek_2k) * alt_boyut
+            kaynak_y = (y % olcek_2k) * alt_boyut
+            return ust_pix, QRectF(kaynak_x, kaynak_y, alt_boyut, alt_boyut)
+        return None
 
     def _tile_indi(self, reply):
         anahtar = reply.request().attribute(QNetworkRequest.User)
@@ -145,6 +237,25 @@ class UyduHaritaWidget(QWidget):
         veri = reply.readAll()
         pix = QPixmap()
         if pix.loadFromData(veri) and not pix.isNull():
+            if self._yer_tutucu_mu(pix):
+                # DÜZELTME (2026-09-02, kullanıcı isteği: "yakınlaştırma
+                # yaptıkça map data not yet available diyor") - canlı
+                # doğrulandı: Esri, kapsama dışı zoom seviyelerinde HTTP
+                # HATASI DEĞİL, GEÇERLİ bir JPEG (200 OK) ile düz gri +
+                # "Map data not yet available" yazan bir YER TUTUCU
+                # döndürüyor - eskiden bu GERÇEK görüntüymüş gibi
+                # önbelleğe alınıp DİSKE de yazılıyordu (bir kez görülünce
+                # SONSUZA KADAR gösterilmeye devam ederdi). Gerçek uydu
+                # görüntüsü pratikte HİÇBİR ZAMAN böyle tekdüze değildir -
+                # örnek piksellerin çoğu (>%90) TEK bir renge yakınsa yer
+                # tutucu sayılır, `basarisiz` olarak işaretlenir - bu da
+                # `_en_yakin_atalik_tile` (üst zoom'dan bulanık ama GERÇEK
+                # görüntü) yedeklemesini otomatik devreye sokar. Gerçek
+                # örnek verilerle (bu konumda z=19 gerçek görüntü ~%50,
+                # z=20 yer tutucu ~%98 baskın-renk oranı) doğrulandı.
+                self.basarisiz.add(anahtar)
+                reply.deleteLater()
+                return
             self.tile_onbellek[anahtar] = pix
             z, x, y = anahtar
             dizin = os.path.join(ONBELLEK_DIZINI, str(z), str(x))
@@ -156,20 +267,65 @@ class UyduHaritaWidget(QWidget):
             self.basarisiz.add(anahtar)
         reply.deleteLater()
 
+    def _yer_tutucu_mu(self, pix):
+        """bkz. _tile_indi'deki not - Esri'nin 200 OK ile döndürdüğü sahte
+        'Map data not yet available' karosunu, GERÇEK bir uydu görüntüsü
+        pratikte hiçbir zaman olmayacak kadar TEKDÜZE (tek renge yakın)
+        olmasından tanır. 16px aralıklı bir örnekleme ızgarası alınır, en
+        baskın renge (±10 tolerans) YAKIN örneklerin oranı hesaplanır."""
+        img = pix.toImage()
+        genislik, yukseklik = img.width(), img.height()
+        if genislik < 16 or yukseklik < 16:
+            return False
+        adim = 16
+        ornekler = [
+            img.pixelColor(xx, yy).getRgb()[:3]
+            for yy in range(0, yukseklik, adim)
+            for xx in range(0, genislik, adim)
+        ]
+        if len(ornekler) < 4:
+            return False
+
+        def yakinlik_sayisi(baz, tol=10):
+            return sum(
+                1 for r, g, b in ornekler
+                if abs(r - baz[0]) <= tol and abs(g - baz[1]) <= tol and abs(b - baz[2]) <= tol
+            )
+
+        en_baskin_oran = max(yakinlik_sayisi(o) for o in ornekler) / len(ornekler)
+        return en_baskin_oran >= 0.90
+
     # ------------------------------------------------------------------ #
     # Cizim
     # ------------------------------------------------------------------ #
     def paintEvent(self, event):
+        # DÜZELTME (2026-09-05, kullanıcı: "uygulama dondu"/segfault -
+        # faulthandler ile CANLI YAKALANDI: bu fonksiyonda HİÇ `ressam.
+        # end()` YOKTU - erken `return` (GNSS henüz yokken) VEYA aşağıdaki
+        # tile/renk analizi kodlarından biri hata fırlatırsa (ör. bozuk
+        # bir JPEG dosyası) QPainter'ın kendisi HİÇ KAPATILMADAN
+        # fonksiyondan çıkılıyordu - "QBackingStore::endPaint() called
+        # with active painter" uyarısı defalarca CANLI görüldü, bunun
+        # hemen ardından GERÇEK bir segfault oluştu (crash_log.txt'de tam
+        # yığın izi var). Artık try/finally ile HANGİ YOLDAN çıkılırsa
+        # çıkılsın (erken return, normal bitiş, ya da bir istisna) ressam.
+        # end() GARANTİ ediliyor.
         ressam = QPainter(self)
-        ressam.setRenderHint(QPainter.Antialiasing)
-        ressam.fillRect(self.rect(), QColor("#0d1117"))
+        try:
+            ressam.setRenderHint(QPainter.Antialiasing)
+            ressam.fillRect(self.rect(), QColor("#0d1117"))
 
-        if self.enlem is None or self.boylam is None:
-            ressam.setPen(QColor("#8b98a5"))
-            ressam.setFont(QFont("Arial", 13, QFont.Bold))
-            ressam.drawText(self.rect(), Qt.AlignCenter,
-                             "GNSS konumu bekleniyor...\n(Here4 baglanip /fix yayinlamaya baslayinca harita gorunecek)")
-            return
+            if self.enlem is None or self.boylam is None:
+                ressam.setPen(QColor("#8b98a5"))
+                ressam.setFont(QFont("Arial", 13, QFont.Bold))
+                ressam.drawText(self.rect(), Qt.AlignCenter,
+                                 "GNSS konumu bekleniyor...\n(Here4 baglanip /fix yayinlamaya baslayinca harita gorunecek)")
+                return
+            self._paintEvent_govde(ressam)
+        finally:
+            ressam.end()
+
+    def _paintEvent_govde(self, ressam):
 
         genislik, yukseklik = self.width(), self.height()
         merkez_x_px, merkez_y_px = genislik / 2.0, yukseklik / 2.0
@@ -187,10 +343,19 @@ class UyduHaritaWidget(QWidget):
                 py = merkez_y_px + (ty - merkez_tile_y) * TILE_BOYUTU
                 anahtar = (self.zoom, tx, ty)
                 pix = self.tile_onbellek.get(anahtar)
+                hedef_dikdortgen = QRectF(px, py, TILE_BOYUTU, TILE_BOYUTU)
                 if pix is not None:
                     ressam.drawPixmap(QPointF(px, py), pix)
                 else:
-                    ressam.fillRect(QRectF(px, py, TILE_BOYUTU, TILE_BOYUTU), QColor("#1a2029"))
+                    # Gerçek karo henüz inmedi/yok - bkz. _en_yakin_atalik_tile
+                    # notu: bulanık ama GERÇEK bir görüntü (üst zoom'dan
+                    # kırpılmış) boş gri kareden HER ZAMAN daha iyi.
+                    yedek = self._en_yakin_atalik_tile(self.zoom, tx, ty)
+                    if yedek is not None:
+                        ust_pix, kaynak = yedek
+                        ressam.drawPixmap(hedef_dikdortgen, ust_pix, kaynak)
+                    else:
+                        ressam.fillRect(hedef_dikdortgen, QColor("#1a2029"))
                     self._tile_iste(*anahtar)
 
         # --- Kat edilen yol (iz) ---
@@ -239,4 +404,16 @@ class UyduHaritaWidget(QWidget):
         ressam.setFont(QFont("Arial", 9, QFont.Bold))
         ressam.drawText(10, 18, f"Zoom: {self.zoom}  |  Lat: {self.enlem:.6f}  Lon: {self.boylam:.6f}")
         ressam.drawText(10, 34, f"IMU: Roll {self.roll:+.1f}°  Pitch {self.pitch:+.1f}°  |  Lidar: {len(self.lidar_noktalari)} nokta")
+
+        # RTK DURUMU (2026-09-01, kullanıcı isteği): "fix mi float mı" + hata.
+        if self.rtk_fix_type is not None:
+            etiket, renk = self._RTK_ETIKETLERI.get(self.rtk_fix_type, (f"BİLİNMEYEN({self.rtk_fix_type})", "#ff4444"))
+            hata_str = f"±{self.rtk_h_acc_m:.2f}m" if (self.rtk_h_acc_m is not None and self.rtk_h_acc_m >= 0) else "hata: bilinmiyor"
+            ressam.setPen(QColor(renk))
+            ressam.drawText(10, 50, f"GPS: {etiket}  |  {hata_str}")
+        else:
+            ressam.setPen(QColor("#8b98a5"))
+            ressam.drawText(10, 50, "GPS: veri yok")
+
+        ressam.setPen(QColor("#ffffff"))
         ressam.drawText(10, yukseklik - 8, "Uydu goruntusu: Esri World Imagery")

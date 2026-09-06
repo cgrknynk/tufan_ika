@@ -17,20 +17,52 @@ import fcntl
 import termios
 import struct
 import signal
+import select
 import subprocess
+import threading
 
-from PyQt5.QtCore import Qt, QSocketNotifier, QTimer
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont, QFontMetrics, QTextCursor, QColor, QTextCharFormat
 from PyQt5.QtWidgets import QTextEdit
 
 import pyte
 
 VARSAYILAN_KULLANICI = "arf203"
-# Ubiquiti su an port ayarlari yapildigi icin bagli degil - araclar WiFi
-# uzerinden baglilar, o yuzden WiFi IP'si kullaniliyor. Ubiquiti tekrar
-# aktif olunca 192.168.1.22'ye geri donulebilir.
-VARSAYILAN_HOST = "10.40.64.43"
+# YEDEKLI HEDEF SECIMI (2026-09-01, kullanici bildirimi: "ssh ile karşının
+# portu yanlış doğrusu 192.168.1.22" - Ubiquiti baglantidayken WiFi IP'si
+# ARTIK ULAŞILAMAZ olabiliyor, ör. arac o an sadece Ubiquiti agina bagli).
+# telemetri_sistemi.py'nin WIFI/UBIQUITI gostergesindeki AYNI mantik:
+# once Ubiquiti hedefi denenir (nokta-nokta kopru - kasitli birincil link),
+# ulasilamazsa WiFi IP'sine dusulur. NOT: telemetri_sistemi.py bu dosyadan
+# VARSAYILAN_HOST'u import ediyor (WIFI_YEDEK_IP olarak) - tersi bir import
+# (buradan telemetri_sistemi'ni import etmek) DAIRESEL IMPORT'A yol acar,
+# bu yuzden Ubiquiti IP'si burada AYRICA sabit olarak tanimli.
+UBIQUITI_HEDEF_IP = "192.168.1.22"
+VARSAYILAN_HOST = "10.40.64.43"  # WiFi IP - Ubiquiti ulasilamazsa yedek
 BASLANGIC_DIZINI = "~/Desktop/tufan_v2_ws"
+# DÜZELTME (2026-09-05, kullanıcı: "kamerada hala gecikmeler var") - bu
+# panel GUI thread'inde kamera görüntüsüyle AYNI event loop'u paylaşıyor;
+# eskiden 16ms (~60Hz) debounce, terminale gelen HER veri patlamasında
+# kamerayı da geciktiriyordu. Terminal metni video değil - 100ms (10Hz)
+# okumak için zaten fazlasıyla akıcı, kameraya daha az sıklıkta "araya
+# giriyor".
+GECIKMELI_RENDER_MS = 100
+
+
+def _hedef_host_belirle():
+    """Once Ubiquiti (nokta-nokta, kasitli birincil link) hedefini dener -
+    tek hizli ping ile (0.5sn timeout, terminal acilisini gozle gorulur
+    sekilde geciktirmesin diye) - ulasilirsa onu, yoksa WiFi IP'sini doner."""
+    try:
+        sonuc = subprocess.run(
+            ["ping", "-c", "1", "-W", "1", UBIQUITI_HEDEF_IP],
+            capture_output=True, text=True, timeout=2.0
+        )
+        if sonuc.returncode == 0:
+            return UBIQUITI_HEDEF_IP
+    except Exception:
+        pass
+    return VARSAYILAN_HOST
 
 # pyte'in standart 8 renk ismi (bkz. pyte.graphics.FG_ANSI/BG_ANSI) -> hex.
 # NOT: pyte tarihsel nedenlerle sari icin 'brown' ismini kullanir.
@@ -71,9 +103,22 @@ def _renk(isim, varsayilan):
 
 
 class SshTerminalWidget(QTextEdit):
-    def __init__(self, parent=None, user=VARSAYILAN_KULLANICI, host=VARSAYILAN_HOST, tmux_oturum="tufan_ana_terminal"):
+    # DÜZELTME (2026-09-05, kullanıcı: "hala çok kasma var yaklaşık 1.5sn
+    # civarı" - GUI takılma izleyicisiyle KANITLANDI, bkz. _pty_okuma_dongusu
+    # notu): okuma+ayrıştırma artık AYRI bir thread'de - GUI thread'e SADECE
+    # bu sinyallerle "render'a ihtiyacın var" / "bağlantı koptu" haberi
+    # veriliyor, thread'ler arası GÜVENLİ (Qt otomatik olarak kuyruklu
+    # bağlantı kullanır).
+    _render_istegi = pyqtSignal()
+    _baglanti_koptu_sinyali = pyqtSignal()
+
+    def __init__(self, parent=None, user=VARSAYILAN_KULLANICI, host=None, tmux_oturum="tufan_ana_terminal"):
         super().__init__(parent)
         self.user = user
+        # host=None (varsayılan): her (yeniden) bağlanışta _hedef_host_belirle()
+        # ile TAZE karar verilir (Ubiquiti/WiFi hangisi o an ulaşılabilirse).
+        # Belirli bir host zorlanmak istenirse (ileride gerekirse) burada
+        # açıkça verilebilir - o zaman otomatik seçim atlanır.
         self.host = host
         # KRİTİK DÜZELTME (2026-08-31): eskiden çıplak bir "ssh -tt" oturumu
         # açılıyordu - arayüz kapanınca (bkz. baglantiyi_kapat) yerel ssh
@@ -108,15 +153,25 @@ class SshTerminalWidget(QTextEdit):
 
         self._master_fd = None
         self._child_pid = None
-        self._notifier = None
         self._screen = None
         self._stream = None
         self._cols = 80
         self._rows = 24
 
+        # bkz. sınıf başındaki not - pyte state'i (self._screen/_stream)
+        # okuma thread'i (feed ile YAZAR) ile GUI thread'i (_ekrani_guncelle
+        # ve resizeEvent ile OKUR/resize eder) arasında PAYLAŞILIYOR, yırtık
+        # okuma/çakışan yazma olmasın diye kilitle korunuyor.
+        self._ekran_kilit = threading.Lock()
+        self._okuma_thread = None
+        self._okuma_calisiyor = False
+        self._render_istegi_beklemede = False  # bkz. _pty_okuma_dongusu'ndaki 2026-09-05 notu
+
         self._render_timer = QTimer(self)
         self._render_timer.setSingleShot(True)
         self._render_timer.timeout.connect(self._ekrani_guncelle)
+        self._render_istegi.connect(self._render_istegi_isle)
+        self._baglanti_koptu_sinyali.connect(self._baglanti_koptu_isle)
 
         self._baslat()
 
@@ -124,6 +179,11 @@ class SshTerminalWidget(QTextEdit):
     # Baglanti kurma / kapama
     # ------------------------------------------------------------------ #
     def _baslat(self):
+        # Her (yeniden) baglantida TAZE karar - agin o anki durumu onceki
+        # baglantidan farkli olabilir (bkz. UBIQUITI_HEDEF_IP yorumu).
+        aktif_host = self.host if self.host is not None else _hedef_host_belirle()
+        self._son_kullanilan_host = aktif_host
+
         self._cols, self._rows = self._widget_boyutundan_hucre_sayisi()
         self._screen = pyte.HistoryScreen(self._cols, self._rows, history=2000)
         self._stream = pyte.Stream(self._screen)
@@ -138,7 +198,7 @@ class SshTerminalWidget(QTextEdit):
         try:
             proc = subprocess.Popen(
                 ["ssh", "-tt", "-o", "StrictHostKeyChecking=accept-new",
-                 f"{self.user}@{self.host}",
+                 f"{self.user}@{aktif_host}",
                  # -A: oturum zaten varsa (ör. onceki baglantidan kalma)
                  # ONA GERI DON (calisan hicbir seyi bozmadan), yoksa
                  # YENISINI olustur. -c: SADECE yeni olusturmada baslangic
@@ -148,7 +208,40 @@ class SshTerminalWidget(QTextEdit):
                  # yontemi, oturum zaten mesguken (ör. operatorun elle
                  # baslattigi bir surecin on planinda calistigi bir anda)
                  # o sürece rastgele tus girdisi gonderme riski tasiyordu.
-                 f"tmux new-session -A -s {self.tmux_oturum} -c {BASLANGIC_DIZINI}"],
+                 # KRİTİK RENK DÜZELTMESİ (2026-09-01): tmux, İÇİNDEKİ
+                 # kabuğa/programlara varsayılan olarak KENDİ "default-
+                 # terminal" ayarını (genelde "screen" - SINIRLI renk) verir,
+                 # dışarıdan miras gelen TERM=xterm-256color'ı YOK SAYAR -
+                 # bu yüzden tmux'a geçince ls/git/prompt renkleri kayboldu
+                 # (canlı bildirildi). "tmux-256color" (araç Jetson'da mevcut,
+                 # infocmp ile doğrulandı) ayarlanınca tam 256 renk geri gelir.
+                 # TEK OTURUM GARANTİSİ (2026-09-01, canlı bulundu): önceki
+                 # yaklaşım (`tmux new-session -A`, üstteki 2026-08-31 notu)
+                 # arayüzü sert kapatınca (SIGKILL, çökme, veya bu terminal
+                 # widget'ının SIGTERM'i normal Qt closeEvent akışı DIŞINDA
+                 # alması - os.setsid ile ayrı process group'ta olduğu için
+                 # ana pencereye giden sinyali hiç almıyor) yerel `ssh -tt`
+                 # sürecini YETİM bırakıyordu - o da tmux'a "attached client"
+                 # olarak SONSUZA KADAR takılı kalıyordu. Her yeniden açılış
+                 # BİR yetim daha ekliyordu - canlı `who`/`tmux list-clients`
+                 # ile 11 birikmiş istemci bulundu. `new-session -A` sadece
+                 # "yoksa oluştur, varsa bağlan" yapar - varken bağlanmak
+                 # ESKİ istemcileri DETACH ETMEZ. Artık: oturum zaten varsa
+                 # `attach-session -d` (kendinden ÖNCEKİ TÜM istemcileri
+                 # detach eder) kullanılıyor - kaç tane yetim süreç olursa
+                 # olsun, HER ZAMAN sadece EN SON bağlanan aktif kalır.
+                 # NOT: `\;` (tmux'un KENDİ argüman-zincirleme sözdizimi,
+                 # üstteki eski yorumdaki gibi) burada KULLANILMIYOR artık -
+                 # aşağıdaki has-session/attach-session/new-session mantığı
+                 # bash `&&`/`||` operatörlerine ihtiyaç duyuyor, bunlar
+                 # tmux'un kendi `\;` zincirinin İÇİNDE anlamsız/bozuk
+                 # sözdizimine yol açardı (ilk denemede canlı doğrulandı -
+                 # ssh süreci anında sessizce çöktü). Düz `;` (bash komut
+                 # ayracı) ile İKİ AYRI komut çalıştırılıyor.
+                 f"tmux set-option -g default-terminal tmux-256color; "
+                 f"tmux has-session -t {self.tmux_oturum} 2>/dev/null && "
+                 f"tmux attach-session -d -t {self.tmux_oturum} || "
+                 f"tmux new-session -s {self.tmux_oturum} -c {BASLANGIC_DIZINI}"],
                 stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
                 preexec_fn=os.setsid, close_fds=True, env=env,
             )
@@ -164,17 +257,22 @@ class SshTerminalWidget(QTextEdit):
         self._proc = proc
 
         os.set_blocking(master_fd, False)
-        self._notifier = QSocketNotifier(master_fd, QSocketNotifier.Read, self)
-        self._notifier.activated.connect(self._pty_okunabilir)
+        # bkz. sınıf başındaki not - okuma+pyte ayrıştırması artık GUI
+        # thread'i DEĞİL, bu ayrı arka plan thread'i yapıyor.
+        self._okuma_calisiyor = True
+        self._okuma_thread = threading.Thread(
+            target=self._pty_okuma_dongusu, args=(master_fd,), daemon=True)
+        self._okuma_thread.start()
 
     def yeniden_baglan(self):
         self.baglantiyi_kapat()
         self._baslat()
 
     def baglantiyi_kapat(self):
-        if self._notifier is not None:
-            self._notifier.setEnabled(False)
-            self._notifier = None
+        # okuma thread'i kendi select() timeout'unda (en fazla 0.2sn) bu
+        # bayrağı fark edip kendiliğinden çıkar - GUI thread'i burada
+        # join() ile DONDURULMUYOR.
+        self._okuma_calisiyor = False
         if self._child_pid is not None:
             try:
                 os.kill(self._child_pid, signal.SIGTERM)
@@ -195,23 +293,75 @@ class SshTerminalWidget(QTextEdit):
     # ------------------------------------------------------------------ #
     # PTY <-> pyte <-> ekran
     # ------------------------------------------------------------------ #
-    def _pty_okunabilir(self):
-        try:
-            veri = os.read(self._master_fd, 65536)
-        except (OSError, BlockingIOError):
-            return
-        if not veri:
-            self._notifier.setEnabled(False)
-            self._ekrana_sistem_mesaji("\n[SSH baglantisi kapandi. Yeniden baglanmak icin yeniden_baglan() cagirin.]")
-            return
-        self._stream.feed(veri.decode("utf-8", errors="replace"))
+    def _pty_okuma_dongusu(self, fd):
+        """AYRI THREAD'DE ÇALIŞIR (GUI thread DEĞİL) - bkz. sınıf başındaki
+        2026-09-05 notu. Kök neden GUI takılma izleyicisiyle CANLI
+        KANITLANDI: pyte'nin (saf Python VT100 emülatörü) karakter karakter
+        FSM ayrıştırması yavaş; eskiden bu QSocketNotifier ile GUI
+        thread'inde, SSH'tan her veri gelişinde SENKRON çalışıyordu - büyük
+        bir çıktı patlaması (ör. ROS log satırları) tüm arayüzü 150-540ms
+        boyunca donduruyordu (canlı ölçüldü). Artık okuma+ayrıştırma
+        (feed) burada, GUI thread'e SADECE 'render'a ihtiyacın var'
+        sinyali (_render_istegi, zaten var olan 16ms debounce'a düşer)
+        veya 'bağlantı koptu' sinyali gönderiliyor - ikisi de PyQt'nin
+        kendi thread-güvenli kuyruklu sinyal-slot mekanizmasıyla.
+        self._screen/_stream, GUI thread'inin de eriştiği (_ekrani_guncelle,
+        resizeEvent) paylaşılan durum olduğu için _ekran_kilit ile korunuyor."""
+        while self._okuma_calisiyor:
+            try:
+                hazir, _, _ = select.select([fd], [], [], 0.2)
+            except (OSError, ValueError):
+                break
+            if not hazir:
+                continue
+            try:
+                veri = os.read(fd, 65536)
+            except (OSError, BlockingIOError):
+                continue
+            if not veri:
+                self._baglanti_koptu_sinyali.emit()
+                break
+            with self._ekran_kilit:
+                self._stream.feed(veri.decode("utf-8", errors="replace"))
+            # DÜZELTME (2026-09-05, "zorlu testlerde geçir" stres testinde
+            # CANLI bulundu: bir log patlaması sırasında bu emit() saniyede
+            # BİNLERCE kez tetikleniyordu - her biri kendi başına ucuz olsa
+            # bile, GUI thread'in Qt olay kuyruğuna bu kadar çok kuyruklu
+            # çağrı birikince kuyruğu TEK TEK BOŞALTMANIN kendisi ~9
+            # SANİYE'ye kadar sürdü, ÖLÇÜLDÜ). Çözüm: KUYRUKTA HER ZAMAN
+            # EN FAZLA BİR BEKLEYEN emit olsun - GUI thread onu işleyip
+            # bayrağı temizleyene kadar yeni emit GÖNDERİLMEZ (okuma/feed
+            # hızı KESİLMİYOR, sadece "render'a ihtiyacın var" haberi
+            # coalesce ediliyor). En son veri kaybolmaz - _render_istegi_
+            # isle her çalıştığında EKRANDAKİ O ANKİ dirty durumunu (feed
+            # sırasında hep güncel tutulan self._screen) yakalar.
+            if not self._render_istegi_beklemede:
+                self._render_istegi_beklemede = True
+                self._render_istegi.emit()
+
+    def _render_istegi_isle(self):
         # PERFORMANS: her okumada TAM ekran yeniden cizmek (her tus vurusunda
         # butun grid'i baştan olusturmak) arayuzu kilitliyordu. Bunun yerine:
         # (1) sadece pyte'in "dirty" (degisen) satirlarini yeniden ciziyoruz,
-        # (2) hizli ardisik okumalari kisa bir sure (~16ms) biriktirip TEK
-        # render'da isliyoruz (debounce).
+        # (2) hizli ardisik okumalari biriktirip TEK render'da isliyoruz
+        # (debounce).
+        # DÜZELTME (2026-09-05, kullanıcı: "kamerada hala gecikmeler var,
+        # sshı threade ayır ya da kaldır") - okuma+pyte ayrıştırması ZATEN
+        # ayrı thread'de (bkz. _pty_okuma_dongusu) ama BU render adımı
+        # (QTextEdit'e gerçekten yazma) Qt'nin kuralı gereği GUI thread'İNDE
+        # KALMAK ZORUNDA - ve GUI thread'de geçirdiği HER milisaniye, o
+        # sırada kamera karesini gösterecek olan kodu da GECİKTİRİYOR
+        # (ikisi AYNI event loop'u paylaşıyor). Terminal (video aksine)
+        # 60Hz'e (eski 16ms) ihtiyaç duymaz - okunabilir metin için 8-10Hz
+        # zaten fazlasıyla akıcı. Eşiği yükseltmek bu render'ın kameranın
+        # ÖNÜNE GEÇME SIKLIĞINI doğrudan azaltıyor.
+        self._render_istegi_beklemede = False
         if not self._render_timer.isActive():
-            self._render_timer.start(16)
+            self._render_timer.start(GECIKMELI_RENDER_MS)
+
+    def _baglanti_koptu_isle(self):
+        self._okuma_calisiyor = False
+        self._ekrana_sistem_mesaji("\n[SSH baglantisi kapandi. Yeniden baglanmak icin yeniden_baglan() cagirin.]")
 
     def _init_bos_ekran(self):
         self.clear()
@@ -220,62 +370,76 @@ class SshTerminalWidget(QTextEdit):
             cur.insertBlock()
 
     def _ekrani_guncelle(self):
-        dirty = self._screen.dirty
-        doc = self.document()
-        # Belge blok sayisi ekran satir sayisiyla senkron degilse (resize
-        # sonrasi vb.) -- dirty bos olsa bile -- tamamini yeniden kur.
-        boyut_uyumsuz = doc.blockCount() != self._screen.lines
-        if not dirty and not boyut_uyumsuz:
+        # DÜZELTME (2026-09-05, kullanıcı: "arayüz sürekli çöküyor" - bu
+        # panel GUI thread'de bazen 1-6+ SANİYE tıkanıyordu, kullanıcıya
+        # "çökme" gibi hissettiriyordu) - panel gizliyken (bkz. terminali_
+        # gizle/goster) BU PAHALI QTextEdit yeniden çizimini TAMAMEN atla.
+        # pyte'ın "dirty" satır seti (self._screen.dirty) VERİ değil sadece
+        # satır İNDEKSİ tutuyor - sınırlı sayıda (ekran satır sayısı kadar),
+        # gizliyken atlansa bile büyümeye devam etmez; panel tekrar
+        # gösterilince (bkz. showEvent) tek seferde yakalar.
+        if not self.isVisible():
             return
-        self.setUpdatesEnabled(False)
+        # bkz. sınıf başındaki 2026-09-05 notu - self._screen okuma
+        # thread'inin de yazdığı paylaşılan durum, kilitle korunuyor
+        # (yırtık okuma/çakışan feed() önlenir).
+        with self._ekran_kilit:
+            dirty = self._screen.dirty
+            doc = self.document()
+            # Belge blok sayisi ekran satir sayisiyla senkron degilse (resize
+            # sonrasi vb.) -- dirty bos olsa bile -- tamamini yeniden kur.
+            boyut_uyumsuz = doc.blockCount() != self._screen.lines
+            if not dirty and not boyut_uyumsuz:
+                return
+            self.setUpdatesEnabled(False)
 
-        if boyut_uyumsuz:
-            self._init_bos_ekran()
-            satirlar = range(self._screen.lines)
-        else:
-            satirlar = sorted(r for r in dirty if 0 <= r < self._screen.lines)
+            if boyut_uyumsuz:
+                self._init_bos_ekran()
+                satirlar = range(self._screen.lines)
+            else:
+                satirlar = sorted(r for r in dirty if 0 <= r < self._screen.lines)
 
-        buf = self._screen.buffer
-        varsayilan_fmt = QTextCharFormat()
-        varsayilan_fmt.setForeground(VARSAYILAN_ON_RENK)
+            buf = self._screen.buffer
+            varsayilan_fmt = QTextCharFormat()
+            varsayilan_fmt.setForeground(VARSAYILAN_ON_RENK)
 
-        for row in satirlar:
-            blok = doc.findBlockByNumber(row)
-            cur = QTextCursor(blok)
-            cur.movePosition(QTextCursor.StartOfBlock)
-            cur.movePosition(QTextCursor.EndOfBlock, QTextCursor.KeepAnchor)
-            cur.removeSelectedText()
+            for row in satirlar:
+                blok = doc.findBlockByNumber(row)
+                cur = QTextCursor(blok)
+                cur.movePosition(QTextCursor.StartOfBlock)
+                cur.movePosition(QTextCursor.EndOfBlock, QTextCursor.KeepAnchor)
+                cur.removeSelectedText()
 
-            satir = buf[row]
-            son_fmt_anahtari = None
-            parca = ""
-            for col in range(self._screen.columns):
-                ch = satir[col]
-                fg = ch.reverse and ch.bg or ch.fg
-                bg = ch.reverse and ch.fg or ch.bg
-                anahtar = (fg, bg, ch.bold)
-                if anahtar != son_fmt_anahtari:
-                    if parca:
-                        self._parca_yaz(cur, parca, son_fmt_anahtari, varsayilan_fmt)
-                    parca = ch.data or " "
-                    son_fmt_anahtari = anahtar
-                else:
-                    parca += ch.data or " "
-            if parca:
-                self._parca_yaz(cur, parca, son_fmt_anahtari, varsayilan_fmt)
+                satir = buf[row]
+                son_fmt_anahtari = None
+                parca = ""
+                for col in range(self._screen.columns):
+                    ch = satir[col]
+                    fg = ch.reverse and ch.bg or ch.fg
+                    bg = ch.reverse and ch.fg or ch.bg
+                    anahtar = (fg, bg, ch.bold)
+                    if anahtar != son_fmt_anahtari:
+                        if parca:
+                            self._parca_yaz(cur, parca, son_fmt_anahtari, varsayilan_fmt)
+                        parca = ch.data or " "
+                        son_fmt_anahtari = anahtar
+                    else:
+                        parca += ch.data or " "
+                if parca:
+                    self._parca_yaz(cur, parca, son_fmt_anahtari, varsayilan_fmt)
 
-        dirty.clear()
-        self.setUpdatesEnabled(True)
+            dirty.clear()
+            self.setUpdatesEnabled(True)
 
-        # imleci pyte'in kendi imlec konumuna tasi
-        cur2 = self.textCursor()
-        cur2.movePosition(QTextCursor.Start)
-        cur2.movePosition(QTextCursor.Down, QTextCursor.MoveAnchor,
-                           min(self._screen.cursor.y, self._screen.lines - 1))
-        cur2.movePosition(QTextCursor.Right, QTextCursor.MoveAnchor,
-                           min(self._screen.cursor.x, self._screen.columns))
-        self.setTextCursor(cur2)
-        self.ensureCursorVisible()
+            # imleci pyte'in kendi imlec konumuna tasi
+            cur2 = self.textCursor()
+            cur2.movePosition(QTextCursor.Start)
+            cur2.movePosition(QTextCursor.Down, QTextCursor.MoveAnchor,
+                               min(self._screen.cursor.y, self._screen.lines - 1))
+            cur2.movePosition(QTextCursor.Right, QTextCursor.MoveAnchor,
+                               min(self._screen.cursor.x, self._screen.columns))
+            self.setTextCursor(cur2)
+            self.ensureCursorVisible()
 
     @staticmethod
     def _parca_yaz(cur, metin, anahtar, varsayilan_fmt):
@@ -360,6 +524,13 @@ class SshTerminalWidget(QTextEdit):
         self.setFocus()
         super().mousePressEvent(event)
 
+    def showEvent(self, event):
+        # bkz. _ekrani_guncelle'deki 2026-09-05 notu - gizliyken atlanan
+        # render'ları tek seferde yakala.
+        super().showEvent(event)
+        if not self._render_timer.isActive():
+            self._render_timer.start(GECIKMELI_RENDER_MS)
+
     # ------------------------------------------------------------------ #
     # Boyutlandirma
     # ------------------------------------------------------------------ #
@@ -386,7 +557,8 @@ class SshTerminalWidget(QTextEdit):
         if cols == self._cols and rows == self._rows:
             return
         self._cols, self._rows = cols, rows
-        self._screen.resize(rows, cols)
+        with self._ekran_kilit:  # bkz. sınıf başındaki 2026-09-05 notu
+            self._screen.resize(rows, cols)
         self._ayarla_pencere_boyutu(self._master_fd, rows, cols)
         if self._child_pid is not None:
             try:
@@ -394,7 +566,7 @@ class SshTerminalWidget(QTextEdit):
             except ProcessLookupError:
                 pass
         if not self._render_timer.isActive():
-            self._render_timer.start(16)
+            self._render_timer.start(GECIKMELI_RENDER_MS)
 
     # ------------------------------------------------------------------ #
     # Eski kod uyumlulugu: main.py bu paneli eskiden append() ile

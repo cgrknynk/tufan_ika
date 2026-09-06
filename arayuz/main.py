@@ -1,6 +1,77 @@
-import sys, re, math, time
-from PyQt5.QtWidgets import QApplication, QMainWindow, QLabel, QVBoxLayout, QMessageBox, QSizePolicy, QWidget, QFrame, QPushButton, QSpacerItem, QDialog, QSplitter
-from PyQt5.QtCore import Qt, QRectF, QTimer, QThread, pyqtSignal, QSize
+import sys, os, threading
+
+# --- KENDİ KENDİNİ ONARAN BAŞLATMA (2026-09-05) ---
+# Kullanıcı bildirimi: "sen çalıştırdığında imu lidar gözüküyor ben
+# çalıştırdığımda gözükmüyor". Canlı doğrulandı: calistir.sh ROS2'yi
+# source edip ROS_DOMAIN_ID ayarlıyor, ama kullanıcı main.py'yi DOĞRUDAN
+# (kendi terminal alışkanlığı, IDE'nin "Run" tuşu, vb.) başlatınca hiçbiri
+# uygulanmıyordu - fresh bir login shell'de "import rclpy" tamamen
+# BAŞARISIZ oluyor (canlı test edildi: ModuleNotFoundError), telemetri_
+# sistemi.py bunu SESSİZCE devre dışı bırakıyor (ros2_bagli=False) -
+# IMU/LIDAR/GPS/sürüş hep "pasif" kalıyor, hiçbir hata görünmüyor. Artık
+# main.py, BAŞKA HİÇBİR ŞEY import ETMEDEN ÖNCE rclpy'nin gerçekten
+# import edilebilir olup olmadığını kontrol ediyor - edilemiyorsa doğru
+# ortamı (calistir.sh ile AYNI) source edip KENDİSİNİ yeniden başlatıyor.
+# TUFAN_ENV_HAZIR bayrağı sonsuz döngüyü önlüyor (yeniden başlatma
+# SONRASINDA yine olmazsa - ör. ROS2 hiç kurulu değilse - ikinci denemede
+# pes edilip mevcut derecelendirilmiş moda düşülüyor, tıpkı eskisi gibi).
+if "TUFAN_ENV_HAZIR" not in os.environ:
+    try:
+        import rclpy  # noqa: F401 - sadece "sourced mi" testi, gerçek kullanım aşağıda
+    except ImportError:
+        os.environ["TUFAN_ENV_HAZIR"] = "1"
+        _bu_dosya = os.path.abspath(__file__)
+        _komut = (
+            "source /opt/ros/humble/setup.bash 2>/dev/null; "
+            "source /home/tufan-yer/ros2_humble/install/setup.bash 2>/dev/null; "
+            f"exec python3 {_bu_dosya}"
+        )
+        os.execvpe("bash", ["bash", "-c", _komut], os.environ)
+
+# --- KRİTİK AĞ DÜZELTMESİ (2026-09-01, v2) ---
+# Kullanıcı bildirimi: "ubiquiti bağlayınca arayüz açılmıyor". Canlı teşhis:
+# bu makinede WiFi + Ubiquiti + docker0/l4tbr0/usb0/usb1/can0 gibi ilgisiz
+# sanal arabirimler AYNI ANDA aktif oluyor. ROS2'nin varsayılan DDS'i
+# (Fast-DDS) discovery/gönderim için TÜM arabirimleri kullanmaya çalışıyor -
+# bu ANA GUI THREAD'İNİ KERNEL SEVİYESİNDE bloke ediyordu (/proc/PID/wchan:
+# sock_alloc_send_pskb'de kilitli kalıyordu - pencere hiç açılmıyor/donuyordu).
+# İLK DÜZELTME (v1) SADECE WiFi'yi beyaz listeye almıştı, ama bu YENİ bir
+# soruna yol açtı: araç SADECE Ubiquiti'den erişilebilir olduğunda ("WiFi
+# yolu Destination Host Unreachable) ROS2 verisi TAMAMEN kesildi ("veri
+# gelmiyor", canlı bildirildi) - çalışan tek gerçek yolu yanlışlıkla dışarıda
+# bırakmıştık. v2: fastdds_gercek_arabirimler.xml artık HER İKİ gerçek
+# arabirimi de (WiFi + Ubiquiti) beyaz listede tutuyor, SADECE ilgisiz
+# sanal arabirimleri dışarıda bırakıyor - hangisi çalışıyorsa ROS2 onu
+# kullanabilsin diye. Bu env değişkeni rclpy import edilmeden ÖNCE
+# (dosyanın en başında) ayarlanmalı - Fast-DDS bunu ilk yüklendiğinde okuyor.
+# NOT: WiFi/Ubiquiti IP'leri değişirse fastdds_gercek_arabirimler.xml'deki
+# adresler de güncellenmeli (DHCP rezervasyonu/statik IP bu sorunu kalıcı çözer).
+if "FASTRTPS_DEFAULT_PROFILES_FILE" not in os.environ:
+    _dds_profil_yolu = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fastdds_gercek_arabirimler.xml")
+    if os.path.isfile(_dds_profil_yolu):
+        os.environ["FASTRTPS_DEFAULT_PROFILES_FILE"] = _dds_profil_yolu
+
+# --- KRİTİK AĞ DÜZELTMESİ 2 (2026-09-05) ---
+# Kullanıcı bildirimi: "sen çalıştırdığında imu lidar gözüküyor ben
+# çalıştırdığımda gözükmüyor" - kök neden: ROS_DOMAIN_ID ayarı sadece
+# calistir.sh'de vardı (bkz. o dosyadaki 2026-09-05 notu - izole testle
+# KANITLANDI: varsayılan domain 0'da bu paylaşılan ağda saf bir rclpy
+# Node() oluşturmak 53 SANİYE sürüyordu, izole bir domainde 0.98 saniye).
+# Kullanıcı uygulamayı calistir.sh YERİNE doğrudan (python3 main.py,
+# IDE'nin "Run" tuşu, vb.) başlatınca bu ayar hiç uygulanmıyordu - araç
+# Jetson domain 77'deyken arayüz varsayılan domain 0'da kalıyor, ikisi
+# BİRBİRİNİ HİÇ GÖREMİYORDU (sadece yavaş değil, TAMAMEN kopuk - IMU/
+# LIDAR/GPS hep "pasif"). FASTRTPS_DEFAULT_PROFILES_FILE ile AYNI desen:
+# rclpy import edilmeden ÖNCE burada, KOD İÇİNDE ayarlanıyor - artık
+# başlatma yöntemi (script/IDE/doğrudan terminal) FARK ETMİYOR, HER ZAMAN
+# doğru domain kullanılıyor. Araç Jetson'daki tufan_mppi.launch.py de
+# AYNI domain'de (77) çalıştırılmalı, aksi halde YİNE görüşemezler.
+if "ROS_DOMAIN_ID" not in os.environ:
+    os.environ["ROS_DOMAIN_ID"] = "77"
+
+import re, math, time, subprocess, traceback
+from PyQt5.QtWidgets import QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout, QMessageBox, QSizePolicy, QWidget, QFrame, QPushButton, QSpacerItem, QSplitter, QDialog, QGraphicsOpacityEffect, QCheckBox, QGroupBox, QGridLayout
+from PyQt5.QtCore import Qt, QRectF, QTimer, QThread, pyqtSignal, QSize, QPropertyAnimation
 from PyQt5.QtGui import QImage, QPixmap, QPainter, QPainterPath, QFont, QFontMetrics, QColor, QPen, QIcon
 from datetime import datetime
 
@@ -8,7 +79,7 @@ from datetime import datetime
 from kamera_sistemi import KameraThread
 from telemetri_sistemi import TelemetriThread
 from harita_sistemi import HaritaYoneticisi
-from surus_joystick_sistemi import SurusJoystickThread
+from kontrol_paneli_sistemi import KontrolPaneliThread, ayarlari_yukle as _panel_ayarlarini_yukle, ayarlari_kaydet as _panel_ayarlarini_kaydet
 from ntrip_rtk_sistemi import NtripRtkThread
 from stiller import *
 from arayuz import Ui_MainWindow
@@ -32,6 +103,17 @@ class TufanGCS(QMainWindow):
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
 
+        # PERFORMANS (2026-09-05, kullanıcı: "lidar ekranında çok fazla
+        # komut verisi gecikiyor" - STALL izleyicisi log_yaz'ı da 570ms+
+        # takılı yakaladı) - eskiden log_yaz her çağrıda blockCount()>500
+        # kontrolü yapıp elle imleç/removeSelectedText ile 100 satır
+        # siliyordu (Python seviyesinde ekstra iş). Qt'nin kendi native
+        # setMaximumBlockCount() mekanizması AYNI sonucu (en eski satırlar
+        # otomatik atılır) C++ tarafında, Python'a hiç çıkmadan yapar -
+        # daha hızlı ve log_yaz'daki manuel silme kodunu gereksiz kılar.
+        if hasattr(self.ui, 'textEdit_canliSistemLog'):
+            self.ui.textEdit_canliSistemLog.document().setMaximumBlockCount(500)
+
         # --- LOG EKRANINI GERÇEK SSH TERMİNALİNE ÇEVİR ---
         # Araç Jetson'una hiçbir zaman monitör bağlanmayacağı için, eski
         # append-only log kutusu yerine buradan doğrudan komut çalıştırılabilen
@@ -42,13 +124,89 @@ class TufanGCS(QMainWindow):
         eski_terminal = self.ui.terminal_ekrani
         self.ui.gridLayout_4.removeWidget(eski_terminal)
         eski_terminal.deleteLater()
-        self.ui.terminal_ekrani = SshTerminalWidget(self.ui.log_ekran)
-        self.ui.gridLayout_4.addWidget(self.ui.terminal_ekrani, 0, 0, 1, 1)
+
+        # YENİ (2026-09-01, kullanıcı isteği): "termux gibi bölünmüş
+        # ekranlar, hepsini aynı anda görebilmek için" - artık ayrı bir
+        # yüzen pencere DEĞİL, doğrudan bu ekranda (Ana Ekran) yan yana
+        # bölünen bir QSplitter. "+" butonu da sol bardan KALDIRILDI,
+        # terminalin KENDİ küçük araç çubuğuna taşındı (kullanıcı: "artı
+        # butonu terminal içinde olsun").
+        terminal_konteyner = QWidget(self.ui.log_ekran)
+        konteyner_duzen = QVBoxLayout(terminal_konteyner)
+        konteyner_duzen.setContentsMargins(0, 0, 0, 0)
+        konteyner_duzen.setSpacing(2)
+
+        arac_cubugu = QWidget(terminal_konteyner)
+        arac_cubugu.setFixedHeight(28)
+        arac_cubugu.setStyleSheet("background-color: #0a0a0a;")
+        arac_cubugu_duzen = QHBoxLayout(arac_cubugu)
+        arac_cubugu_duzen.setContentsMargins(4, 2, 4, 2)
+        arac_cubugu_duzen.addStretch(1)
+        yeni_pane_butonu = QPushButton("+ Yeni Terminal", arac_cubugu)
+        yeni_pane_butonu.setStyleSheet(
+            "QPushButton { background-color: #1a1a1a; color: #00E5FF; border: 1px solid #00E5FF; "
+            "border-radius: 4px; padding: 2px 10px; font-weight: bold; }"
+            "QPushButton:hover { background-color: #00E5FF; color: #000; }"
+        )
+        yeni_pane_butonu.clicked.connect(self._yeni_terminal_ac)
+        arac_cubugu_duzen.addWidget(yeni_pane_butonu)
+        # DÜZELTME (2026-09-05, kullanıcı: "arayüz sürekli çöküyor" - kök
+        # neden GUI takılma izleyicisiyle tekrar tekrar bu panelin QTextEdit
+        # render'ında (bazen 1-6+ SANİYE) bulundu; Qt'nin kuralı gereği bu
+        # render GUI thread'İNDEN taşınamıyor). Kullanıcının kendi önerdiği
+        # "kaldır" seçeneği: panel gizliyken _ekrani_guncelle TAMAMEN
+        # atlanıyor (bkz. terminal_widget.py) - bu buton, kamera/sürüş gibi
+        # kritik anlarda paneli devre dışı bırakmayı SEÇENEK olarak sunuyor,
+        # ihtiyaç olunca tek tıkla geri getiriliyor (SSH oturumları ARKA
+        # PLANDA çalışmaya devam eder, sadece görüntüleme durur).
+        gizle_butonu = QPushButton("🔻 Terminali Gizle", arac_cubugu)
+        gizle_butonu.setStyleSheet(
+            "QPushButton { background-color:#1a1a1a; color:#ffaa00; border:1px solid #ffaa00; "
+            "border-radius:4px; padding:2px 10px; font-weight:bold; }"
+            "QPushButton:hover { background-color:#ffaa00; color:#000; }"
+        )
+        gizle_butonu.clicked.connect(lambda: self._terminal_goster_gizle(gizle_butonu))
+        arac_cubugu_duzen.addWidget(gizle_butonu)
+        konteyner_duzen.addWidget(arac_cubugu)
+
+        self._terminal_splitter = QSplitter(Qt.Horizontal, terminal_konteyner)
+        konteyner_duzen.addWidget(self._terminal_splitter, 1)
+
+        self.ui.terminal_ekrani = SshTerminalWidget(self._terminal_splitter)
+        self._terminal_splitter.addWidget(self.ui.terminal_ekrani)
+
+        self.ui.gridLayout_4.addWidget(terminal_konteyner, 0, 0, 1, 1)
 
         # Sayfa her değiştiğinde bu fonksiyonu otomatik çalıştır:
         self.ui.stackedWidget.currentChanged.connect(self.sayfa_odak_ayarla)
-        self.showFullScreen()
-        
+
+        # --- DOKUNMATİK EKRAN KLAVYESİ (onboard) İÇİN HAZIRLIK ---
+        # Arayüz normalde gerçek "fullscreen" (X11 _NET_WM_STATE_FULLSCREEN)
+        # açılıyordu; bu pencereyi pencere yöneticisinin EN ÜST katmanına
+        # koyar ve onboard "force-to-top" (dock) olsa BİLE klavyeyi arkada
+        # bırakır (canlı doğrulandı: fullscreen pencere her zaman dock'un
+        # üstünde diziliyor). Çözüm: pencereyi çerçevesiz + tam ekran
+        # BOYUTUNDA tut ama fullscreen DURUMUNA sokma - böylece onboard'ın
+        # dock katmanı arayüzün üstünde kalabiliyor. Klavye açıkken
+        # geçici olarak fullscreen'den çıkıyoruz (bkz. ekran_klavyesi_ac_kapat).
+        self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
+        self._klavye_gorunur = False
+        # DÜZELTME (2026-09-05, kullanıcı: "yine çöktü" - crash_rapor_son.txt
+        # ile CANLI YAKALANDI: exit kodu 137 = SIGKILL, kullanıcı/elle
+        # kill YOKTU - X11/masaüstü ortamının kendi "yanıt vermiyor"
+        # denetimi olduğu düşünülüyor). showFullScreen() eskiden BURADA,
+        # aşağıdaki YAVAŞ senkron kurulumlardan (özellikle
+        # _telemetri_baglantilari_kur() -> rclpy.init()/Node() - paylaşılan
+        # ağda ara sıra 30sn+ sürebiliyor, bkz. ROS_DOMAIN_ID notu) ÖNCE
+        # çağrılıyordu - pencere X sunucusuna MAPPED/görünür oluyordu ama
+        # Qt olay döngüsü (app.exec_()) HENÜZ BAŞLAMADIĞI için ping/expose
+        # gibi pencere yöneticisi protokol mesajlarına CEVAP VEREMİYORDU -
+        # tam da bu "yavaş kurulum" sırasında pencere yöneticisi onu
+        # "yanıt vermiyor" sayıp öldürmüş olabilir. Artık pencere ancak
+        # TÜM yavaş kurulum bittikten SONRA (bu fonksiyonun sonunda)
+        # gösteriliyor - o ana kadar hiçbir pencere X sunucusuna hiç
+        # MAPPED olmadığı için "yanıt vermiyor" denetimine hiç girmiyor.
+
         # SİSTEM YAZISI İÇİN BETON YÖNTEM
         sistem_font = self.ui.label_sistemYazi.font()
         sistem_font.setPixelSize(32)  
@@ -74,9 +232,10 @@ class TufanGCS(QMainWindow):
         self.kayit_yapiyor_mu = False
         self.yedekleme_yapiyor_mu = False
         self.bildirim_acik = False   
-        self.joystick_bagli = False  
-        self.klavye_aktif = False    
-        self.sifreleme_acik = True  
+        self.joystick_bagli = True   # kontrol paneli açılışta otomatik başlar (yazılımsal AÇIK)
+        self.klavye_aktif = False
+        self.farlar_acik = False
+        self.sifreleme_acik = True
 
         # Kameralar türkçe başlasın
         self.kamera_yazi_on = "ÖN"
@@ -90,16 +249,29 @@ class TufanGCS(QMainWindow):
         self.arayuz_esneklik_ayarlarini_uygula()
 
         self._telemetri_baglantilari_kur()
+
+        # bkz. yukarıdaki 2026-09-05 notu - TEK yavaş/senkron adım
+        # (rclpy.init()/Node() - paylaşılan ağda ara sıra 30sn+ sürebiliyor)
+        # burada bitti; pencere ARTIK gösterilebilir. Kasıtlı olarak
+        # BURADA (en sonda değil) - aşağıdaki geri kalan kurulum adımları
+        # rclpy KULLANMIYOR (kendi Node()'larını hep ayrı thread'lerin
+        # run()'ı İÇİNDE oluşturuyorlar, ana thread'i hiç bloklamıyorlar,
+        # bkz. DOKUMANTASYON.md) - pencereyi gereksiz yere daha da geç
+        # göstermeye gerek yok, sadece GERÇEK riskli adımın ÖNÜNE geçmek
+        # yeterli.
+        self.showFullScreen()
+
         self._buton_baglantilarini_kur()
         self._pwm_izleme_butonu_ekle()
-        self._silah_joystick_hedefi_butonu_ekle()
-        self._silah_ates_butonu_ekle()
+        self._panel_testi_butonu_ekle()
+        self._arac_baslat_butonu_ekle()
         self._devam_butonu_ekle()
         self._yon_pid_butonu_ekle()
-        self._yeni_terminal_butonu_ekle()
+        self._ekran_klavyesi_butonu_ekle()
 
         self._radar_zamanlayici_baslat()
         self._kamera_ve_joystick_baslat()
+        self._kontrol_paneli_baslat()
         self._ntrip_rtk_baslat()
 
         # --- DONANIM SİSTEMLERİNİ BAŞLAT ---
@@ -131,15 +303,11 @@ class TufanGCS(QMainWindow):
         satir = f"[{su_an}] {mesaj}"
         print(satir)
         if hasattr(self.ui, 'textEdit_canliSistemLog'):
-            kutu = self.ui.textEdit_canliSistemLog
-            kutu.append(satir)
-            # Uzun yaris/test oturumlarinda (surus sirasinda her tus basimi
-            # log yazdirir) kutu sinirsiz buyumesin diye eski satirlari at.
-            if kutu.document().blockCount() > 500:
-                imlec = kutu.textCursor()
-                imlec.movePosition(imlec.Start)
-                imlec.movePosition(imlec.Down, imlec.KeepAnchor, 100)
-                imlec.removeSelectedText()
+            # Uzun yarış/test oturumlarında kutunun sınırsız büyümesi
+            # artık __init__'te setMaximumBlockCount(500) ile Qt'nin
+            # kendi native mekanizmasınca engelleniyor (bkz. yukarısı) -
+            # manuel imleç/removeSelectedText kodu KALDIRILDI.
+            self.ui.textEdit_canliSistemLog.append(satir)
 
     def akilli_bildirim_gonder(self, baslik, mesaj, kritik_mi=False):
         self.log_yaz(f"{baslik}: {mesaj}")
@@ -199,7 +367,6 @@ class TufanGCS(QMainWindow):
         # tabela tespiti gelene kadar "-" gösterilir (GPS/LİDAR gibi diğer
         # göstergelerin "PASİF" ile aynı mantık: henüz veri yok = belli olsun).
         self.ui.label_etapNo.setText("-")
-        self.telemetri_motoru.yer_batarya_sinyali.connect(self.yer_batarya_renklendir)
         self.telemetri_motoru.imu_durum_sinyali.connect(self.imu_arayuz_guncelle)
         self.telemetri_motoru.guc_durum_sinyali.connect(self.guc_arayuz_guncelle)
         self.telemetri_motoru.gps_durum_sinyali.connect(self.gps_arayuz_guncelle)
@@ -220,8 +387,108 @@ class TufanGCS(QMainWindow):
         # --- GÜNCELLEME 1: TELEMETRİ LOGLARINI TERMINALE BAĞLA ---
         # Tuşlara basıldığında palet hız bildirimlerinin GUI terminaline düşmesi sağlandı!
         self.telemetri_motoru.log_sinyali.connect(self.log_yaz)
-        
+
         self.telemetri_motoru.start()
+
+        # BEKÇİ (2026-09-04, kullanıcı: "arayüzden veri bazen çok geç
+        # gidiyor, arayüzü kapat aç yapınca düzeliyor") - ntrip_rtk_
+        # sistemi.py'de daha önce bulunan "zombi thread" ile AYNI kök
+        # neden şüphesi: thread isRunning()=True kalırken DDS/rclpy
+        # bağlantısı sessizce bozulabiliyor, tek çare tüm uygulamayı
+        # kapatıp açmaktı. Artık NTRIP bekçisiyle AYNI desen: her 30sn'de
+        # bir gerçek çalışıp çalışmadığı (nabız + isRunning) kontrol
+        # edilip, bozulmuşsa SADECE bu thread (tüm uygulama DEĞİL) sessizce
+        # yeniden başlatılıyor.
+        if not hasattr(self, '_telemetri_bekci_zamanlayici'):
+            self._telemetri_bekci_zamanlayici = QTimer()
+            self._telemetri_bekci_zamanlayici.setInterval(30000)
+            self._telemetri_bekci_zamanlayici.timeout.connect(self._telemetri_bekci_kontrol)
+            self._telemetri_bekci_zamanlayici.start()
+
+        # PANEL SÜRECİ BEKÇİSİ (2026-09-06): kontrol paneli artık ayrı bir
+        # PROCESS (bkz. _kontrol_paneli_baslat). O süreç herhangi bir
+        # sebeple ölürse joystick TAMAMEN sessizce çalışmaz hale gelir -
+        # telemetri bekçisiyle AYNI desende, 30sn'de bir yaşayıp
+        # yaşamadığına bakılıp gerekirse yeniden başlatılıyor.
+        if not hasattr(self, '_panel_bekci_zamanlayici'):
+            self._panel_bekci_zamanlayici = QTimer()
+            self._panel_bekci_zamanlayici.setInterval(30000)
+            self._panel_bekci_zamanlayici.timeout.connect(self._panel_bekci_kontrol)
+            self._panel_bekci_zamanlayici.start()
+
+    def _panel_bekci_kontrol(self):
+        # Kullanıcı joystick'i BİLEREK kapattıysa (pushButton_joystick)
+        # yeniden başlatma - sadece beklenmedik ölümde toparla.
+        if not getattr(self, 'joystick_bagli', True):
+            return
+        sur = getattr(self, '_panel_node_süreci', None)
+        if sur is not None and sur.poll() is None:
+            return  # bizim başlattığımız süreç sağlıklı çalışıyor
+        # Bizim süreç ölmüş olabilir ama SİSTEMDE başka bir node (önceki
+        # arayüz oturumundan kalan orphan) hâlâ çalışıyor olabilir - o da
+        # joystick'i yayınlıyor, yenisini başlatmaya çalışmak boşuna
+        # (tekil-çalışma kilidi zaten engeller). Sadece GERÇEKTEN hiç node
+        # yoksa yeniden başlat.
+        try:
+            if subprocess.call(["pgrep", "-f", "kontrol_paneli_node.py"],
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL) == 0:
+                return  # başka bir örnek çalışıyor, sistem fonksiyonel
+        except Exception:
+            pass
+        self.log_yaz("⚠️ Kontrol paneli süreci durmuş - yeniden başlatılıyor.")
+        self._kontrol_paneli_baslat()
+
+    def _telemetri_bekci_kontrol(self):
+        if not hasattr(self, 'telemetri_motoru'):
+            return
+        olmus_mu = not self.telemetri_motoru.isRunning()
+        nabiz_zamani = getattr(self.telemetri_motoru, 'son_nabiz_zamani', 0.0)
+        zombi_mi = self.telemetri_motoru.isRunning() and (time.time() - nabiz_zamani) > 90.0
+        # DÜZELTME (2026-09-05, kullanıcı: "gps veri yok diyor bunu otomatik
+        # düzeltecek bir şey lazım") - yukarıdaki "nabız" kontrolü SADECE
+        # executor döngüsünün kendisinin (spin_once) hâlâ dönüp dönmediğini
+        # yakalıyor - araç tarafında GPS gerçekten sağlıklı yayınlanırken
+        # (canlı defalarca doğrulandı) SADECE bu ABONELİĞİN DDS eşleşmesi
+        # bozulup diğer her şey (kamera, telemetri thread'in kendisi) normal
+        # çalışmaya devam edebiliyor - "zombi thread" testinden GEÇER ama
+        # GPS yine de "veri yok" gösterir. Ayrıca, bağımsız olarak, GPS
+        # özelinde de bir tazelik kontrolü ekleniyor - 60sn'den uzun süredir
+        # hiç GPSRAW mesajı gelmemişse (araç GPS'siz de olabilir - bu durumda
+        # yeniden bağlanmak zararsız, düzelmez ama bozmaz da) bağlantı
+        # tazelenir; DDS eşleşmesi bozulmuşsa bu YENİDEN ABONE OLARAK
+        # sorunu gerçekten çözer.
+        gps_zamani = getattr(self.telemetri_motoru, 'son_gps_zamani', 0.0)
+        gps_kesik_mi = (not olmus_mu and not zombi_mi
+                        and self.telemetri_motoru.isRunning()
+                        and gps_zamani > 0.0
+                        and (time.time() - gps_zamani) > 60.0)
+        if olmus_mu or zombi_mi or gps_kesik_mi:
+            if olmus_mu:
+                sebep = "thread durmuş"
+            elif zombi_mi:
+                sebep = "nabız kesildi (zombi thread)"
+            else:
+                sebep = "GPS verisi kesildi (abonelik eşleşmesi bozulmuş olabilir)"
+            self.log_yaz(f"⚠️ Telemetri bağlantısı {sebep} bulundu - otomatik olarak yeniden başlatılıyor.")
+            if zombi_mi:
+                # Gerçekten sıkışmış olabilecek eski thread'i GUI'yi
+                # DONDURMADAN (wait() ÇAĞIRMADAN) durdurmaya işaretle -
+                # kendini kapatamasa bile yeni thread devraliyor (bkz.
+                # _ntrip_bekci_kontrol'deki AYNI desen).
+                try:
+                    self.telemetri_motoru.calisiyor = False
+                except Exception:
+                    pass
+            elif gps_kesik_mi:
+                # Zombi DEĞİL (executor sağlıklı dönüyor) - bu yüzden
+                # düzgünce durdurup (durdur() -> quit()+wait()) TEMİZ bir
+                # yeniden bağlantı yapılabilir, GUI donmaz (çağrı hızlı).
+                try:
+                    self.telemetri_motoru.durdur()
+                except Exception:
+                    pass
+            self._telemetri_baglantilari_kur()
 
     def _pwm_izleme_ikonu_olustur(self):
         # arayuz.py OTOMATIK URETILMIS (Qt Designer) oldugu ve elle
@@ -312,6 +579,112 @@ class TufanGCS(QMainWindow):
             self.telemetri_motoru.yon_pid_ayarla(aktif)
         self.log_yaz(f"🧭 Yön düzeltme PID: {'AÇIK' if aktif else 'KAPALI'}")
 
+    # =====================================================================
+    # DOKUNMATİK EKRAN KLAVYESİ (onboard)
+    # =====================================================================
+    # Kullanıcı isteği (2026-09-03): "direkt dokunmatik ekrana geçtik,
+    # masaüstündeki klavyeyi açınca arayüz tam ekran olduğu için klavye
+    # arkada kalıyor - arayüzün ÜSTÜNDE açılabilmesi lazım + arayüze uygun
+    # bir yere aç/kapat kısayolu."
+    #
+    # - Klavye programı: onboard (Ubuntu'da kurulu, gsettings'te zaten
+    #   force-to-top + alttan dock ayarlı). D-Bus arayüzü:
+    #   org.onboard.Onboard  /org/onboard/Onboard/Keyboard  Show/Hide.
+    # - Neden fullscreen'den çıkıyoruz: bkz. __init__'teki uzun not.
+    # - Buton: sağ ÜST köşede yüzen bir overlay. Sol menüye koymadık çünkü
+    #   klavye açıkken (fullscreen değilken) Ubuntu'nun sol dock'u sol menüyü
+    #   kısmen örtüyor - sağ üst köşe her iki durumda da erişilebilir.
+
+    def _ekran_klavyesi_ikonu_olustur(self, aktif=False):
+        boyut = 36
+        pix = QPixmap(boyut, boyut)
+        pix.fill(Qt.transparent)
+        ressam = QPainter(pix)
+        ressam.setRenderHint(QPainter.Antialiasing)
+        renk = QColor("#0B0B0B") if aktif else QColor("#E0E0E0")
+        kalem = QPen(renk)
+        kalem.setWidth(2)
+        kalem.setJoinStyle(Qt.RoundJoin)
+        ressam.setPen(kalem)
+        ressam.setBrush(Qt.NoBrush)
+        ressam.drawRoundedRect(QRectF(3, 9, boyut - 6, boyut - 18), 3, 3)
+        ressam.setBrush(renk)
+        # tuş noktaları (3 sıra)
+        for sy in (14, 20):
+            for sx in range(8, boyut - 6, 6):
+                ressam.drawRect(QRectF(sx, sy, 3, 3))
+        # space bar
+        ressam.drawRect(QRectF(12, 25, boyut - 24, 3))
+        ressam.end()
+        return QIcon(pix)
+
+    def _ekran_klavyesi_butonu_ekle(self):
+        buton = QPushButton(self.ui.centralwidget)
+        buton.setObjectName("pushButton_ekranKlavyesi")
+        buton.setCheckable(True)
+        buton.setCursor(Qt.PointingHandCursor)
+        buton.setFixedSize(56, 56)
+        buton.setIcon(self._ekran_klavyesi_ikonu_olustur(False))
+        buton.setIconSize(QSize(36, 36))
+        buton.setToolTip("Ekran klavyesini aç / kapat")
+        buton.setStyleSheet(
+            "QPushButton { background-color: rgba(20, 30, 40, 210); "
+            "border: 1px solid #444455; border-radius: 12px; }"
+            "QPushButton:hover { border: 1px solid #00E5FF; }"
+            "QPushButton:checked { background-color: #00E5FF; border: 1px solid #00E5FF; }"
+        )
+        ekran = QApplication.primaryScreen().geometry()
+        buton.move(ekran.width() - buton.width() - 18, 40)
+        buton.clicked.connect(self.ekran_klavyesi_ac_kapat)
+        buton.show()
+        buton.raise_()
+        self.ui.pushButton_ekranKlavyesi = buton
+
+    def _onboard_dbus(self, metod):
+        # metod: "Show" | "Hide" | "ToggleVisible". onboard çalışmıyorsa
+        # dbus-send hata döner -> False (çağıran taraf onboard'u başlatır).
+        try:
+            sonuc = subprocess.run(
+                ["dbus-send", "--type=method_call", "--dest=org.onboard.Onboard",
+                 "/org/onboard/Onboard/Keyboard",
+                 "org.onboard.Onboard.Keyboard." + metod],
+                timeout=2, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            return sonuc.returncode == 0
+        except Exception:
+            return False
+
+    def ekran_klavyesi_ac_kapat(self):
+        self._klavye_gorunur = not self._klavye_gorunur
+
+        if self._klavye_gorunur:
+            # 1) Fullscreen KATMANINDAN çık (çerçevesiz + tam ekran boyutunda
+            #    kal) ki onboard dock'u üste gelebilsin.
+            self.setWindowState(self.windowState() & ~Qt.WindowFullScreen)
+            self.setGeometry(QApplication.primaryScreen().geometry())
+            self.ui.pushButton_ekranKlavyesi.raise_()
+            # 2) Klavyeyi göster; onboard çalışmıyorsa başlat.
+            if not self._onboard_dbus("Show"):
+                try:
+                    subprocess.Popen(["onboard"])
+                except FileNotFoundError:
+                    self.log_yaz("⌨️ HATA: 'onboard' kurulu değil ->  sudo apt install onboard")
+                    self._klavye_gorunur = False
+                    self.showFullScreen()
+                    self.ui.pushButton_ekranKlavyesi.setChecked(False)
+                    return
+            self.log_yaz("⌨️ Ekran klavyesi açıldı (arayüz geçici olarak tam ekrandan çıktı).")
+        else:
+            self._onboard_dbus("Hide")
+            self.showFullScreen()
+            self.ui.pushButton_ekranKlavyesi.raise_()
+            self.log_yaz("⌨️ Ekran klavyesi kapatıldı, arayüz tekrar tam ekran.")
+
+        self.ui.pushButton_ekranKlavyesi.setChecked(self._klavye_gorunur)
+        self.ui.pushButton_ekranKlavyesi.setIcon(
+            self._ekran_klavyesi_ikonu_olustur(self._klavye_gorunur)
+        )
+
     def _devam_ikonu_olustur(self):
         # Acil durdurma kilidini acan "DEVAM ET" butonu icin yesil oynat/devam
         # oku - diger butonlarla ayni QPainter yontemi (bkz. _pwm_izleme_ikonu_olustur).
@@ -367,67 +740,324 @@ class TufanGCS(QMainWindow):
         ressam.end()
         return QIcon(pix)
 
-    def _silah_ates_butonu_ekle(self):
-        # Kullanici istegi: sol barda PWM butonunun USTUNE, basili tutunca
-        # ates eden bir buton. Gercek "ates" (lazer) turret_node.py
-        # tarafinda /silah_ates_manuel (Bool) ile tetikleniyor ve KENDI
-        # heartbeat guvenligine sahip (0.5sn icinde tazelenmezse otomatik
-        # kapanir) - bu yuzden basili tutulurken surekli tekrar gonderiyoruz,
-        # tek seferlik tikla degil (bkz. telemetri_sistemi.py silah_ates_ayarla).
+    # ATEŞ (LAZER) YOLU ARTIK BU DOSYADA DEĞİL (2026-09-06): fiziksel sağ
+    # toggle switch kontrol paneliyle birlikte AYRI PROCESS'e taşındı, bkz.
+    # kontrol_paneli_node.py::ates_degisti + tick(). Eskiden burada 50ms'lik
+    # bir _ates_zamanlayici vardı; araç tarafı (turret_node.py,
+    # _ATES_MANUEL_TIMEOUT_S = 0.5) tazelenmeyen ateş komutunu yarım saniyede
+    # kapattığı için bu tekrar ŞART. Taşıma sırasında zamanlayıcı burada ölü
+    # kalmıştı (panel sinyali artık main.py'ye hiç gelmiyor) ve sahada
+    # "lazer 1sn sonra sönüyor" olarak görüldü - bu yüzden ölü kod
+    # KALDIRILDI, heartbeat node'a taşındı.
+
+    def _arac_baslat_butonu_ekle(self):
+        # Kullanici istegi: sol barda PWM butonunun USTUNDE duran "ATEŞ"
+        # (lazer) butonu KALDIRILDI (fiziksel sağ toggle switch ile ateş
+        # etme AYNEN ÇALIŞMAYA DEVAM EDİYOR, bkz.
+        # kontrol_paneli_node.py::ates_degisti) -
+        # AYNI KONUMA, araç Jetson'a SSH ile bağlanıp tufan_mppi.launch.py'yi
+        # başlatan bir buton kondu (session boyunca elle yapılan "tmux
+        # oturumu aç + launch komutu gönder" işlemini tek tıkla yapıyor).
         buton = QPushButton(self.ui.sol_menu_frame)
         buton.setMinimumSize(QSize(148, 64))
         buton.setMaximumSize(QSize(148, 64))
         buton.setStyleSheet(self.ui.ayarlar_button.styleSheet())
+        # 2026-09-06 (kullanici istegi: "sol taraftaki aracı başlat butonunu
+        # daha güzel bir ikon ile değiştir"): emoji+metin ("🚀 ARACI BAŞLAT")
+        # yerine, YANINDAKI butonlarla AYNI yontemle (QPainter ile cizilmis
+        # 64x64 QIcon, metinsiz) bir guc/baslatma ikonu. Boylece sol bar
+        # gorsel olarak tutarli - digerleri de metinsiz ikon butonlari
+        # (bkz. _pwm_izleme_ikonu_olustur, _yon_pid_ikonu_olustur).
         buton.setText("")
-        buton.setIcon(self._ates_ikonu_olustur())
+        buton.setIcon(self._arac_baslat_ikonu_olustur())
         buton.setIconSize(QSize(64, 64))
-        buton.setToolTip("ATEŞ (basılı tutun)")
-        buton.setObjectName("pushButton_silahAtes")
+        buton.setToolTip("ARACI BAŞLAT — Araç Jetson'a (192.168.1.22) bağlanıp "
+                         "sürüş yazılımını (tufan_mppi.launch.py) başlatır")
+        buton.setObjectName("pushButton_aracBaslat")
         eklenecek_index = self.ui.verticalLayout_8.indexOf(self.ui.pushButton_pwmIzle)
         self.ui.verticalLayout_8.insertWidget(eklenecek_index, buton)
-        self._ates_zamanlayici = QTimer()
-        self._ates_zamanlayici.setInterval(50)  # vehicle-taraf 0.5sn zaman asimina bol pay
-        self._ates_zamanlayici.timeout.connect(lambda: self._telemetri_ates_gonder(True))
-        buton.pressed.connect(self._ates_baslat)
-        buton.released.connect(self._ates_durdur)
-        self.ui.pushButton_silahAtes = buton
+        buton.clicked.connect(self._arac_baslat_onayla)
+        self.ui.pushButton_aracBaslat = buton
 
-    def _ates_baslat(self):
-        self._telemetri_ates_gonder(True)
-        self._ates_zamanlayici.start()
+    def _arac_baslat_ikonu_olustur(self):
+        # Guc/baslatma simgesi: ustunde bosluk olan halka + dikey cubuk.
+        # Renk #00FF7B - bu projede "olumlu/devam" rengi (bkz. DEVAM
+        # mesajlari); yanindaki bilgi butonlarinin camgobegi (#00E5FF)
+        # tonundan ve ACİL DURDUR'un kirmizisindan KASITLI olarak ayri,
+        # cunku bu buton bir EYLEM baslatiyor. Cizim yontemi digerleriyle
+        # ayni (bkz. _pwm_izleme_ikonu_olustur) - arayuz.py Qt Designer
+        # tarafindan URETILDIGI icin dosya bazli ikon eklenmiyor.
+        boyut = 64
+        pix = QPixmap(boyut, boyut)
+        pix.fill(Qt.transparent)
+        ressam = QPainter(pix)
+        ressam.setRenderHint(QPainter.Antialiasing)
+        merkez = boyut / 2.0
+        r = 18.0
+        cerceve = QRectF(merkez - r, merkez - r, 2 * r, 2 * r)
+        cubuk_ust = int(merkez - r - 7)
+        cubuk_alt = int(merkez - 3)
+        # Halkadaki bosluk TAM USTTE olsun diye: 120 dereceden basla, 300
+        # derece tara -> geriye 60..120 arasi (tepe noktasi 90) bosluk kalir.
+        for kalem in (
+            # 1) yumusak dis parilti (yariseffaf, kalin) - "daha guzel"
+            #    gorunum icin; ikon 64px'te duz cizgiden daha canli duruyor.
+            QPen(QColor(0, 255, 123, 70), 11, Qt.SolidLine, Qt.RoundCap),
+            # 2) asil govde
+            QPen(QColor("#00FF7B"), 5, Qt.SolidLine, Qt.RoundCap),
+        ):
+            ressam.setPen(kalem)
+            ressam.drawArc(cerceve, 120 * 16, 300 * 16)
+            ressam.drawLine(int(merkez), cubuk_ust, int(merkez), cubuk_alt)
+        ressam.end()
+        return QIcon(pix)
 
-    def _ates_durdur(self):
-        self._ates_zamanlayici.stop()
-        self._telemetri_ates_gonder(False)
+    def _arac_baslat_onayla(self):
+        # Bu buton ARACIN TÜM sürüş/silah yazılım yığınını başlatıyor -
+        # yanlışlıkla dokunmaya karşı (özellikle dokunmatik ekranda, eskiden
+        # AYNI KONUMDA "ATEŞ" butonu vardı, refleksle dokunulabilir) basit
+        # bir onay isteniyor.
+        cevap = QMessageBox.question(
+            self, "Araç Jetson'u Başlat",
+            "Araç Jetson'a (192.168.1.22) bağlanıp sürüş yazılımı\n"
+            "(tufan_mppi.launch.py) başlatılsın mı?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if cevap == QMessageBox.Yes:
+            self._arac_baslat_tetikle()
 
-    def _telemetri_ates_gonder(self, aktif):
-        if hasattr(self, 'telemetri_motoru'):
-            self.telemetri_motoru.silah_ates_ayarla(aktif)
+    def _arac_baslat_tetikle(self):
+        # GUI thread'i BLOKE ETMEMEK icin subprocess.Popen (non-blocking) -
+        # .wait()/.communicate() KULLANILMIYOR, ssh baglanti/launch suresi
+        # (saniyeler) arayuzu asla dondurmuyor. Liste formatinda (shell=True
+        # DEGIL) cagriliyor - komut sabit (kullanici girdisi yok), shell
+        # injection riski yok. tufan_ana_terminal tmux oturumu YOKSA
+        # olusturuluyor, VARSA aynisi kullaniliyor (has-session kontrolü).
+        uzak_komut = (
+            "tmux has-session -t tufan_ana_terminal 2>/dev/null || "
+            "tmux new-session -d -s tufan_ana_terminal; "
+            "tmux send-keys -t tufan_ana_terminal "
+            "'export ROS_DOMAIN_ID=77 && cd ~/Desktop/tufan_v2_ws && "
+            "source /opt/ros/humble/setup.bash && source install/setup.bash && "
+            "ros2 launch tufan_v2_ws tufan_mppi.launch.py' Enter"
+        )
+        try:
+            subprocess.Popen(["ssh", "-o", "ConnectTimeout=5", "192.168.1.22", uzak_komut])
+            self.log_yaz("🚀 Araç Jetson'a bağlanılıyor, sürüş yazılımı başlatılıyor...")
+        except Exception as e:
+            self.log_yaz(f"⚠️ Araç Jetson'a bağlanılamadı: {e}")
 
-    def _silah_joystick_hedefi_butonu_ekle(self):
-        # GECICI: yarismadan once araç/silah icin ayri joystick olacak,
-        # simdilik TEK joystick ayarlar sayfasindaki bu dugmeyle arac/silah
-        # arasinda elle paylasiliyor (kullanici istegi).
+    def _panel_testi_butonu_ekle(self):
+        # Yer istasyonu fiziksel kontrol panelinin (kontrol_paneli_sistemi.py)
+        # HAM degerlerini canli gosteren teshis dialogu - joystick eksen
+        # yerlesimi/yonu (SOL_JOY_X_PIN, *_TERS_*) bilinmedigi icin bunlari
+        # ayarlarken kullanilir. (Eski "HEDEF: ARAÇ/SİLAH" butonunun yerinde -
+        # araç ve silah artik ayri joystick'lerde.)
         buton = QPushButton(self.ui.page_ayarlar)
         buton.setGeometry(QRectF(430, 550, 150, 40).toRect())
         buton.setStyleSheet(self.ui.pushButton_joystick.styleSheet())
-        buton.setCheckable(True)
-        buton.setChecked(False)
-        buton.setText("HEDEF: ARAÇ")
-        buton.setToolTip("Fiziksel joystick şu an aracı mı silahı mı kontrol ediyor")
-        buton.setObjectName("pushButton_joystickHedefi")
+        buton.setText("PANEL TESTİ")
+        buton.setToolTip("Fiziksel kontrol paneli ham değerlerini canlı göster (eksen/yön ayarı için)")
+        buton.setObjectName("pushButton_panelTesti")
         buton.show()
-        buton.clicked.connect(self._joystick_hedefi_degistir)
-        self.ui.pushButton_joystickHedefi = buton
+        buton.clicked.connect(self._panel_testi_ac)
+        self.ui.pushButton_panelTesti = buton
 
-    def _joystick_hedefi_degistir(self):
-        silah_mi = self.ui.pushButton_joystickHedefi.isChecked()
-        hedef = "SILAH" if silah_mi else "ARAC"
-        self.ui.pushButton_joystickHedefi.setText(f"HEDEF: {'SİLAH' if silah_mi else 'ARAÇ'}")
-        self.ui.pushButton_joystickHedefi.setStyleSheet(AYAR_AKTIF if silah_mi else self.ui.pushButton_joystick.styleSheet())
-        if hasattr(self, 'telemetri_motoru'):
-            self.telemetri_motoru.joystick_hedefini_ayarla(hedef)
-        self.log_yaz(f"🎮 Joystick hedefi: {hedef}")
+    def _panel_testi_ac(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Kontrol Paneli Testi")
+        dlg.setMinimumSize(460, 620)
+        dlg.setStyleSheet("QDialog { background-color: #12181f; }")
+        yerlesim = QVBoxLayout(dlg)
+        etiket = QLabel("Panel verisi bekleniyor...\n(Arduino bağlı mı? Ayarlar → Joystick AÇIK mı?)")
+        etiket.setStyleSheet("color:#E6F7FF; font-family: monospace; font-size: 14px;")
+        etiket.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        yerlesim.addWidget(etiket, 1)
+        ipucu = QLabel(
+            "Her ekseni tek tek oynat, hangi ham kanalın değiştiğini ve yönünü gözle. "
+            "Aşağıdaki kutulardan düzelt, KAYDET VE UYGULA'ya bas - anında etkili olur "
+            "(yeniden başlatmaya gerek yok). Doğru ayarda: sol joystick ileri → sol_oran "
+            "ve sağ_oran birlikte +; sağa çevir → sol_oran > sağ_oran."
+        )
+        ipucu.setWordWrap(True)
+        ipucu.setStyleSheet("color:#8AA8B8; font-size: 11px;")
+        yerlesim.addWidget(ipucu)
+
+        # KALİBRASYON AYARLARI (2026-09-04, kullanıcı isteği: "kalibrasyon
+        # ayarını arayüze ekleyebilir misin") - eskiden bu sabitler SADECE
+        # kontrol_paneli_sistemi.py düzenlenip arayüz yeniden başlatılarak
+        # değiştirilebiliyordu. Artık burada, canlı veriye BAKARKEN,
+        # kod düzenlemeden değiştirilip anında (yeniden bağlanarak)
+        # uygulanabiliyor - bkz. kontrol_paneli_sistemi.py::ayarlari_kaydet/
+        # KontrolPaneliThread.ayarlari_yeniden_yukle.
+        kalib_kutu = QGroupBox("KALİBRASYON AYARLARI")
+        kalib_kutu.setStyleSheet(
+            "QGroupBox { color:#00d4ff; font-weight:bold; border:1px solid #1e2836; "
+            "border-radius:8px; margin-top:8px; padding-top:6px; }"
+            "QGroupBox::title { subcontrol-origin: margin; left:10px; padding:0 4px; }"
+            "QCheckBox { color:#E6F7FF; font-size:11px; }"
+        )
+        kalib_izgara = QGridLayout(kalib_kutu)
+
+        mevcut_ayar = _panel_ayarlarini_yukle()
+
+        cb_sol_pin_degistir = QCheckBox("SOL: X/Y pinlerini değiştir")
+        cb_sol_pin_degistir.setChecked(mevcut_ayar["sol_x_pin"] != "A3")
+        cb_sol_ters_x = QCheckBox("SOL-X ters çevir")
+        cb_sol_ters_x.setChecked(mevcut_ayar["sol_ters_x"])
+        cb_sol_ters_y = QCheckBox("SOL-Y ters çevir")
+        cb_sol_ters_y.setChecked(mevcut_ayar["sol_ters_y"])
+        cb_sol_toggle_ters = QCheckBox("SOL toggle ters kablolu")
+        cb_sol_toggle_ters.setChecked(mevcut_ayar["sol_toggle_ters"])
+
+        cb_sag_pin_degistir = QCheckBox("SAĞ: X/Y pinlerini değiştir")
+        cb_sag_pin_degistir.setChecked(mevcut_ayar["sag_x_pin"] != "A0")
+        cb_sag_ters_x = QCheckBox("SAĞ-X ters çevir")
+        cb_sag_ters_x.setChecked(mevcut_ayar["sag_ters_x"])
+        cb_sag_ters_y = QCheckBox("SAĞ-Y ters çevir")
+        cb_sag_ters_y.setChecked(mevcut_ayar["sag_ters_y"])
+        cb_sag_toggle_ters = QCheckBox("SAĞ toggle ters kablolu")
+        cb_sag_toggle_ters.setChecked(mevcut_ayar["sag_toggle_ters"])
+
+        kalib_izgara.addWidget(cb_sol_pin_degistir, 0, 0)
+        kalib_izgara.addWidget(cb_sol_ters_x, 1, 0)
+        kalib_izgara.addWidget(cb_sol_ters_y, 2, 0)
+        kalib_izgara.addWidget(cb_sol_toggle_ters, 3, 0)
+        kalib_izgara.addWidget(cb_sag_pin_degistir, 0, 1)
+        kalib_izgara.addWidget(cb_sag_ters_x, 1, 1)
+        kalib_izgara.addWidget(cb_sag_ters_y, 2, 1)
+        kalib_izgara.addWidget(cb_sag_toggle_ters, 3, 1)
+        yerlesim.addWidget(kalib_kutu)
+
+        kaydet_btn = QPushButton("💾 KAYDET VE UYGULA")
+        kaydet_btn.setStyleSheet(
+            "QPushButton { background-color:#00994d; color:white; font-weight:bold; "
+            "border-radius:6px; padding:8px; }"
+            "QPushButton:hover { background-color:#00b359; }"
+        )
+
+        def kaydet_ve_uygula():
+            yeni_ayar = {
+                "sol_x_pin": "A4" if cb_sol_pin_degistir.isChecked() else "A3",
+                "sol_ters_x": cb_sol_ters_x.isChecked(),
+                "sol_ters_y": cb_sol_ters_y.isChecked(),
+                "sol_toggle_ters": cb_sol_toggle_ters.isChecked(),
+                "sag_x_pin": "A1" if cb_sag_pin_degistir.isChecked() else "A0",
+                "sag_ters_x": cb_sag_ters_x.isChecked(),
+                "sag_ters_y": cb_sag_ters_y.isChecked(),
+                "sag_toggle_ters": cb_sag_toggle_ters.isChecked(),
+            }
+            _panel_ayarlarini_kaydet(yeni_ayar)
+            # Ayarlar diske yazıldı; ayrı process'teki panel node'u onları
+            # yeniden okuyup (yeniden bağlanarak) uygulasın diye komut yolla.
+            self._panel_komut_gonder("ayarlari_yeniden_yukle")
+            self.log_yaz("🔧 Kontrol paneli kalibrasyonu kaydedildi, yeniden bağlanıyor...")
+
+        kayit_durum_etiketi = QLabel("")
+        kayit_durum_etiketi.setStyleSheet("color:#3ddc84; font-weight:bold; font-size:12px;")
+        kayit_durum_etiketi.setAlignment(Qt.AlignCenter)
+
+        def kaydet_ve_uygula_ve_bildir():
+            kaydet_ve_uygula()
+            # Kullanıcı geri bildirimi: "kaydet ve uygula diyince ... kaydedildi
+            # diye mesaj gelmiyor oldu mu anlamadım" - eskiden tek bildirim
+            # self.log_yaz idi (ana ekrandaki log kutusuna yazılıyordu, bu
+            # diyalog ÖNÜNDEYKEN görülmüyordu). Artık diyaloğun İÇİNDE, göz
+            # önünde net bir onay yazısı da gösteriliyor. NOT: diyalog
+            # KASITLI OLARAK kapanmıyor - canlı ham veriyi izlemeye devam
+            # edebilesin diye (bkz. guncelle()).
+            kayit_durum_etiketi.setText(
+                f"✅ Kaydedildi ve uygulandı ({time.strftime('%H:%M:%S')}) — "
+                "panel yeniden bağlanıyor, pencereyi kapatmadan izleyebilirsin."
+            )
+
+        kaydet_btn.clicked.connect(kaydet_ve_uygula_ve_bildir)
+        yerlesim.addWidget(kaydet_btn)
+        yerlesim.addWidget(kayit_durum_etiketi)
+
+        # MERKEZİ SIFIRLA (2026-09-05, canlı bildirildi: "joystickleri
+        # ellemiyorum ama panel testinde sağa çekilmiş gibi davranıyor") -
+        # güç-açılışı kalibrasyonundaki merkez fiziksel ortadan uzak
+        # kalmışsa, canlı oto-merkezleme sınırlı sapmayı (±90 birim) aşan
+        # farkı KENDİ BAŞINA düzeltemiyor. Bu buton joystickler BIRAKILMIŞ
+        # varsayımıyla aynı güç-açılışı kalibrasyon döngüsünü yeniden
+        # çalıştırır (bkz. KontrolPaneliThread.merkezi_sifirla).
+        sifirla_btn = QPushButton("🎯 JOYSTICK MERKEZİNİ SIFIRLA")
+        sifirla_btn.setStyleSheet(
+            "QPushButton { background-color:#cc7a00; color:white; font-weight:bold; "
+            "border-radius:6px; padding:8px; }"
+            "QPushButton:hover { background-color:#e68a00; }"
+        )
+        sifirla_ipucu = QLabel(
+            "⚠️ Basmadan önce HER İKİ joystick'i de BIRAK (ellemeden ortada dursunlar) - "
+            "o anki ham konum yeni merkez (sıfır) olarak kaydedilir."
+        )
+        sifirla_ipucu.setWordWrap(True)
+        sifirla_ipucu.setStyleSheet("color:#e68a00; font-size:11px;")
+
+        def merkezi_sifirla_ve_bildir():
+            # (2026-09-06) Panel artık AYRI PROCESS - metot doğrudan
+            # çağrılamaz, komut /panel_komut üzerinden gönderilir.
+            if self._panel_komut_gonder("merkezi_sifirla"):
+                kayit_durum_etiketi.setText(
+                    f"🎯 Merkez sıfırlanıyor ({time.strftime('%H:%M:%S')}) — "
+                    "joystickleri BIRAKIN, birkaç saniyede yeniden bağlanıp kalibre olacak."
+                )
+                self.log_yaz("🎯 Joystick merkezi sıfırlama istendi (panel testi).")
+            else:
+                kayit_durum_etiketi.setText(
+                    "⚠️ Kontrol paneli süreci ile bağlantı kurulamadı.")
+
+        sifirla_btn.clicked.connect(merkezi_sifirla_ve_bildir)
+        yerlesim.addWidget(sifirla_ipucu)
+        yerlesim.addWidget(sifirla_btn)
+
+        def guncelle(d):
+            # GERÇEK UYGULANAN PWM (2026-09-04, kullanıcı isteği: "az ittiğimde
+            # yavaş gitsin, şu an hep aynı sanırım") - eskiden burada sadece
+            # ORAN (-1..1) gösteriliyordu, kullanıcı bunu PWM'e nasıl
+            # eşlendiğini göremiyordu; ekrandaki tek sabit sayı (potun
+            # belirlediği ÜST SINIR, ör. 151) hep aynı kaldığı için "hiç
+            # değişmiyor" sanılıyordu. Şimdi telemetri_motoru._pwm_olcekle
+            # ile GERÇEKTEN motorlara giden PWM'i canlı gösteriyoruz - az
+            # itince alt sınıra (85) yakın, tam itince üst sınıra (pot
+            # değeri) yakın olmalı.
+            if hasattr(self, 'telemetri_motoru'):
+                gercek_sol_pwm = self.telemetri_motoru._pwm_olcekle(d['sol_oran'])
+                gercek_sag_pwm = self.telemetri_motoru._pwm_olcekle(d['sag_oran'])
+                pwm_satiri = f"  Gerçek PWM: sol={gercek_sol_pwm:+.0f}   sağ={gercek_sag_pwm:+.0f}   (alt sınır={self.telemetri_motoru.pwm_alt_sinir:.0f}, üst sınır={self.telemetri_motoru.pwm_ust_sinir:.0f})\n"
+            else:
+                pwm_satiri = ""
+            etiket.setText(
+                "HAM ANALOG (0-1023)\n"
+                f"  Sol joystick  : A3={d['A3']:>4}   A4={d['A4']:>4}\n"
+                f"  Sağ joystick  : A0={d['A0']:>4}   A1={d['A1']:>4}\n"
+                f"  Potansiyometre: A5={d['A5']:>4}   → PWM {d['pwm']}\n"
+                f"  Yer bataryası : A2={d.get('A2')}   → {d.get('yer_bat_metin', 'YOK')}\n\n"
+                "HAM DİJİTAL (0 = GND/basılı, 1 = serbest)\n"
+                f"  Sol toggle D4={d['D4']}     Sağ toggle D5={d['D5']}\n"
+                f"  Sol buton  D9={d['D9']}     Sağ buton  D10={d['D10']}\n\n"
+                "HESAPLANAN\n"
+                f"  Sürüş : sol_oran={d['sol_oran']:+.2f}   sağ_oran={d['sag_oran']:+.2f}\n"
+                f"{pwm_satiri}"
+                f"  Silah : turret_x={d['turret_x']:+.2f}   turret_y={d['turret_y']:+.2f}\n"
+                f"  Merkez: sol={d['sol_merkez']}   sağ={d['sag_merkez']}"
+            )
+
+        # HAM VERİ AKIŞI (2026-09-06): panel ayrı process'te olduğu için
+        # ham veri artık /panel_durumu üzerinden {'tip':'ham'} olarak
+        # geliyor (bkz. _panel_durumu_geldi). Dialog açıkken node'a
+        # "yayınla" komutu gönderilir, kapanınca durdurulur - böylece
+        # dialog kapalıyken 50Hz JSON trafiği hiç üretilmez.
+        self._panel_ham_guncelle = guncelle
+        self._panel_komut_gonder("ham_veri_ac")
+
+        def kapandi(_):
+            self._panel_komut_gonder("ham_veri_kapat")
+            self._panel_ham_guncelle = None
+
+        dlg.finished.connect(kapandi)
+        self._panel_testi_dlg = dlg  # GC'lenmesin
+        dlg.show()
 
     def _pwm_izleme_butonu_ekle(self):
         # Kullanici istegi: terminalde Ctrl+C ile canli PWM akisindan
@@ -459,89 +1089,62 @@ class TufanGCS(QMainWindow):
         self.ui.terminal_ekrani.pwm_akisina_don()
         self.ui.terminal_ekrani.setFocus()
 
-    def _yeni_terminal_ikonu_olustur(self):
-        # "+" işaretli küçük bir terminal penceresi ikonu - diğerleriyle
-        # aynı QPainter yöntemi (bkz. _pwm_izleme_ikonu_olustur).
-        boyut = 64
-        pix = QPixmap(boyut, boyut)
-        pix.fill(Qt.transparent)
-        ressam = QPainter(pix)
-        ressam.setRenderHint(QPainter.Antialiasing)
-        kalem = QPen(QColor("#00E5FF"))
-        kalem.setWidth(4)
-        kalem.setJoinStyle(Qt.RoundJoin)
-        ressam.setPen(kalem)
-        cerceve = QRectF(8, 12, boyut - 16, boyut - 24)
-        ressam.drawRoundedRect(cerceve, 6, 6)
-        arti_x, arti_y, kol = cerceve.center().x(), cerceve.center().y() + 2, 8
-        ressam.drawLine(int(arti_x - kol), int(arti_y), int(arti_x + kol), int(arti_y))
-        ressam.drawLine(int(arti_x), int(arti_y - kol), int(arti_x), int(arti_y + kol))
-        ressam.end()
-        return QIcon(pix)
-
-    def _yeni_terminal_butonu_ekle(self):
-        # Kullanici istegi (2026-09-01): birden fazla terminal acabilmek,
-        # hepsi araca otomatik baglanacak. Her tiklamada AYRI, benzersiz
-        # isimli bir tmux oturumuna baglanan yeni bir yuzen pencere acilir
-        # (bkz. terminal_widget.py SshTerminalWidget tmux_oturum parametresi)
-        # - ana terminalden bagimsiz, birbirinden de bagimsiz calisirlar,
-        # hepsi araç kapatilmadan/interface kapatilsa BILE tmux sayesinde
-        # calismaya devam eder.
-        buton = QPushButton(self.ui.sol_menu_frame)
-        buton.setMinimumSize(QSize(148, 64))
-        buton.setMaximumSize(QSize(148, 64))
-        buton.setStyleSheet(self.ui.ayarlar_button.styleSheet())
-        buton.setText("")
-        buton.setIcon(self._yeni_terminal_ikonu_olustur())
-        buton.setIconSize(QSize(64, 64))
-        buton.setToolTip("Yeni terminal aç (araca otomatik bağlanır)")
-        buton.setObjectName("pushButton_yeniTerminal")
-        eklenecek_index = self.ui.verticalLayout_8.indexOf(self.ui.pushButton_pwmIzle)
-        self.ui.verticalLayout_8.insertWidget(eklenecek_index, buton)
-        buton.clicked.connect(self._yeni_terminal_ac)
-        self.ui.pushButton_yeniTerminal = buton
-        self._yeni_terminal_sayaci = 0
-        self._terminal_paneli = None
-        self._terminal_splitter = None
+    def _terminal_goster_gizle(self, buton):
+        # bkz. __init__'teki 2026-09-05 notu - gizlemek SSH oturumlarını
+        # KESMEZ (tmux araç Jetson'da yaşamaya devam eder, bkz. terminal_
+        # widget.py), sadece bu pahalı GUI render'ını durdurur.
+        gizli_mi = self._terminal_splitter.isVisible()
+        self._terminal_splitter.setVisible(not gizli_mi)
+        buton.setText("🔺 Terminali Göster" if gizli_mi else "🔻 Terminali Gizle")
 
     def _yeni_terminal_ac(self):
-        # Kullanici istegi (2026-09-01): "termix/tmux gibi ekranlar
-        # bölünmeli, hepsini aynı anda görebilmek için" - ayrı ayrı üst üste
-        # binen pencereler yerine TEK bir panelde, YAN YANA bölünmüş
-        # (QSplitter - sürüklenerek yeniden boyutlandırılabilir) terminaller.
-        # Panel kapatılırsa (X) bir dahaki "+" tıklamasında sıfırdan açılır;
-        # ama içindeki tmux oturumları (bkz. terminal_widget.py) araçta
-        # ÇALIŞMAYA DEVAM EDER, sadece görünümden kaldırılmış olurlar - "+"
-        # tekrar tıklanınca YENİ bir oturum açılır (eskisine dönmek için
-        # tmux oturum adını bilerek ayrıca bağlanmak gerekir, ileride bir
-        # "aç/oturumlar" listesi eklenebilir).
-        if self._terminal_paneli is None:
-            self._terminal_paneli = QDialog(self)
-            self._terminal_paneli.setWindowTitle("TUFAN Terminaller")
-            self._terminal_paneli.resize(1400, 600)
-            duzen = QVBoxLayout(self._terminal_paneli)
-            duzen.setContentsMargins(0, 0, 0, 0)
-            self._terminal_splitter = QSplitter(Qt.Horizontal, self._terminal_paneli)
-            duzen.addWidget(self._terminal_splitter)
-            self._terminal_paneli.setAttribute(Qt.WA_DeleteOnClose)
-            self._terminal_paneli.finished.connect(self._terminal_paneli_kapandi)
-
-        self._yeni_terminal_sayaci += 1
+        # Kullanici istegi (2026-09-01, duzeltildi): "termux gibi bölünmüş
+        # ekranlar, hepsini aynı anda görebilmek için" VE "artı butonu
+        # terminal içinde olsun" - ayrı pencere/panel YOK artık, doğrudan
+        # Ana Ekran'daki terminal alanına (bkz. __init__ - terminal_konteyner/
+        # self._terminal_splitter) YENİ bir yan-yana pane ekler. Her pane
+        # benzersiz isimli AYRI bir tmux oturumuna bağlanır (bkz.
+        # terminal_widget.py) - araç kapatılmadan/arayüz kapatılsa BİLE
+        # tmux sayesinde çalışmaya devam eder.
+        self._yeni_terminal_sayaci = getattr(self, '_yeni_terminal_sayaci', 0) + 1
         oturum_adi = f"tufan_terminal_{self._yeni_terminal_sayaci}"
-        yeni_terminal = SshTerminalWidget(self._terminal_splitter, tmux_oturum=oturum_adi)
-        self._terminal_splitter.addWidget(yeni_terminal)
 
-        self._terminal_paneli.show()
-        self._terminal_paneli.raise_()
-        self._terminal_paneli.activateWindow()
+        # Kapatma butonu eklendi (2026-09-01) - eskiden eklenen pane'i
+        # kaldırmanın hiçbir yolu yoktu, yanlışlıkla/deneme amaçlı eklenen
+        # pane'ler ekranda kalıcı olarak birikiyordu (canlı bildirildi:
+        # "saçma sapan 5 tane yazı"). "×" SADECE bu pane'i görünümden
+        # kaldırır (bağlantıyı temiz kapatır) - araçtaki tmux oturumunu
+        # ÖLDÜRMEZ, sadece DETACH eder (bkz. terminal_widget.py - kapatma
+        # felsefesiyle tutarlı: arayüzden bir şey kapatmak araçta çalışan
+        # hiçbir şeyi durdurmamalı).
+        pane_konteyner = QWidget(self._terminal_splitter)
+        pane_duzen = QVBoxLayout(pane_konteyner)
+        pane_duzen.setContentsMargins(0, 0, 0, 0)
+        pane_duzen.setSpacing(0)
+        pane_cubugu = QWidget(pane_konteyner)
+        pane_cubugu.setFixedHeight(22)
+        pane_cubugu.setStyleSheet("background-color: #0a0a0a;")
+        pane_cubugu_duzen = QHBoxLayout(pane_cubugu)
+        pane_cubugu_duzen.setContentsMargins(6, 0, 4, 0)
+        etiket = QLabel(oturum_adi, pane_cubugu)
+        etiket.setStyleSheet("color: #555; font-size: 10px;")
+        pane_cubugu_duzen.addWidget(etiket)
+        pane_cubugu_duzen.addStretch(1)
+        kapat_butonu = QPushButton("×", pane_cubugu)
+        kapat_butonu.setFixedSize(18, 18)
+        kapat_butonu.setStyleSheet(
+            "QPushButton { background-color: transparent; color: #888; border: none; font-weight: bold; }"
+            "QPushButton:hover { color: #ff4444; }"
+        )
+        pane_cubugu_duzen.addWidget(kapat_butonu)
+        pane_duzen.addWidget(pane_cubugu)
+
+        yeni_terminal = SshTerminalWidget(pane_konteyner, tmux_oturum=oturum_adi)
+        pane_duzen.addWidget(yeni_terminal, 1)
+        kapat_butonu.clicked.connect(lambda: (yeni_terminal.baglantiyi_kapat(), pane_konteyner.deleteLater()))
+
+        self._terminal_splitter.addWidget(pane_konteyner)
         yeni_terminal.setFocus()
-
-    def _terminal_paneli_kapandi(self):
-        # WA_DeleteOnClose ile Qt nesnesi zaten siliniyor - referansi da
-        # temizleyip bir sonraki "+" tıklamasının SIFIRDAN yeni bir panel
-        # açmasını sağlıyoruz.
-        self._terminal_paneli = None
-        self._terminal_splitter = None
 
     def _devam_butonu_ekle(self):
         # Kullanici istegi: ACİL DURDUR'a basilinca araçtaki motor komutlari
@@ -673,21 +1276,34 @@ class TufanGCS(QMainWindow):
         self.radar_zamanlayici.start(50)
 
     def _kamera_ve_joystick_baslat(self):
-        self.kamera_motoru = KameraThread(udp_ip="0.0.0.0", udp_port=5000, tabela_ip="0.0.0.0", tabela_port=5001)
+        # PORT ATAMASI (2026-09-01, kullanici istegi - araç tarafindaki
+        # tufan_mppi.launch.py ile BIREBIR AYNI olmali): on(tabela)=5000,
+        # silah(turret)=5001, arka=5002 - bkz. kamera_sistemi.py basi.
+        self.kamera_motoru = KameraThread(ip="0.0.0.0", on_port=5000, silah_port=5001, arka_port=5002)
         self.kamera_motoru.kare_sinyali.connect(self.video_ekrana_bas)
         self.kamera_motoru.start()
 
-        # KAMERA durumu: UDP'den (silah/ana kamera) gercekten kare gelip
-        # gelmedigine (heartbeat) gore -- veri kesilirse 1.5sn icinde BAĞLANTI
-        # KOPTU'ya doner.
-        self.son_kamera_frame_zamani = 0.0
+        # KAMERA durumu (2026-09-01, kullanici istegi: "kaç kameranın bağlı
+        # olduğunu göstersin" - eskiden TEK bir heartbeat vardı ve SADECE
+        # silah kamerasinin karesine bakiyordu, on/arka'nin baglantisiz olup
+        # olmadigini hic yansitmiyordu). Artik UC AYRI heartbeat zaman
+        # damgasi tutuluyor (bkz. video_ekrana_bas), her biri kendi
+        # UDP portundan (5000/5001/5002) gercek kare gelip gelmedigini
+        # baglantidan bagimsiz izliyor - veri kesilirse 1.5sn icinde o
+        # kamera "bagli degil" sayiliyor.
+        self.son_on_frame_zamani = 0.0
+        self.son_silah_frame_zamani = 0.0
+        self.son_arka_frame_zamani = 0.0
         self.kamera_heartbeat_zamanlayici = QTimer()
         self.kamera_heartbeat_zamanlayici.timeout.connect(self._kamera_heartbeat_kontrol)
         self.kamera_heartbeat_zamanlayici.start(500)
 
     def _kamera_heartbeat_kontrol(self):
-        hazir_mi = (time.time() - self.son_kamera_frame_zamani) < 1.5
-        self.kamera_arayuz_guncelle(hazir_mi)
+        simdi = time.time()
+        bagli_sayisi = sum(1 for zaman in (
+            self.son_on_frame_zamani, self.son_silah_frame_zamani, self.son_arka_frame_zamani
+        ) if (simdi - zaman) < 1.5)
+        self.kamera_arayuz_guncelle(bagli_sayisi)
 
     def _ntrip_rtk_baslat(self):
         # NTRIP (TUSAGA-Aktif) -> mavros /mavros/gps_rtk/send_rtcm
@@ -695,6 +1311,52 @@ class TufanGCS(QMainWindow):
         self.ntrip_motoru = NtripRtkThread()
         self.ntrip_motoru.log_sinyali.connect(self.log_yaz)
         self.ntrip_motoru.start()
+
+        # BEKÇİ (2026-09-01, canlı bulundu - kritik güvenilirlik açığı):
+        # bu thread bazen SESSİZCE ölüyordu (ROS2 düğümü kayboluyordu,
+        # ana uygulama sorunsuz çalışmaya devam ediyordu, kullanıcı
+        # "RTK neden Fixed'e girmiyor" diye sorana kadar fark edilmedi -
+        # aslında düzeltme akışı tamamen durmuştu). Artık her 30 saniyede
+        # bir thread'in gerçekten çalışıp çalışmadığı kontrol ediliyor -
+        # ölmüşse otomatik olarak YENİDEN başlatılıyor (goal_manager_
+        # watchdog.py'nin araç tarafında yaptığı AYNI bekçi deseni).
+        self._ntrip_bekci_zamanlayici = QTimer()
+        self._ntrip_bekci_zamanlayici.setInterval(30000)
+        self._ntrip_bekci_zamanlayici.timeout.connect(self._ntrip_bekci_kontrol)
+        self._ntrip_bekci_zamanlayici.start()
+
+    def _ntrip_bekci_kontrol(self):
+        if not hasattr(self, 'ntrip_motoru'):
+            return
+        # DÜZELTME (2026-09-01, canlı bulundu - "rtk verisini gönderen node
+        # mu çöküyor" sorusu araştırılırken): SADECE isRunning() kontrolü
+        # KÖR NOKTA - canlı bir vakada thread isRunning()=True kalmaya
+        # devam ederken ROS düğümü (`tufan_ntrip_rtk_koprusu`) DDS
+        # grafiğinden tamamen kayboldu, run()'daki try/except HİÇBİR hata
+        # loglamadı (kod incelemesinde açık bir destroy_node()/shutdown()
+        # çağrısı da bulunamadı - "zombi" thread: canlı görünüyor ama
+        # düzeltme akışı fiilen durmuş). Artık ntrip_rtk_sistemi.py'nin
+        # her döngü turunda güncellediği `son_nabiz_zamani`nın tazeliği de
+        # kontrol ediliyor - ikisinden biri (thread bitmiş VEYA nabız
+        # STALE_ESIK_SN'den (75sn) fazla bayatlamış) yeniden başlatmayı
+        # tetikliyor.
+        olmus_mu = not self.ntrip_motoru.isRunning()
+        nabiz_zamani = getattr(self.ntrip_motoru, 'son_nabiz_zamani', 0.0)
+        zombi_mi = self.ntrip_motoru.isRunning() and (time.time() - nabiz_zamani) > 90.0
+        if olmus_mu or zombi_mi:
+            sebep = "thread durmuş" if olmus_mu else "nabız kesildi (zombi thread)"
+            self.log_yaz(f"⚠️ NTRIP/RTK {sebep} bulundu - otomatik olarak yeniden başlatılıyor.")
+            if zombi_mi:
+                # Gerçekten sıkışmış olabilecek eski thread'i GUI'yi
+                # DONDURMADAN (wait() ÇAĞIRMADAN) durdurmaya işaretle -
+                # kendini kapatamasa bile yeni thread devraliyor.
+                try:
+                    self.ntrip_motoru._calisiyor = False
+                except Exception:
+                    pass
+            self.ntrip_motoru = NtripRtkThread()
+            self.ntrip_motoru.log_sinyali.connect(self.log_yaz)
+            self.ntrip_motoru.start()
 
     def _tasarim_hafizasini_kaydet(self):
         self.orijinal_tasarim_hafizasi = {}
@@ -739,12 +1401,25 @@ class TufanGCS(QMainWindow):
         else:
             self.ui.label_wifiYazi.setStyleSheet("color: red; font-weight: bold; font-size: 24px; border: none; background-color: transparent;")
 
-    def kamera_arayuz_guncelle(self, hazir_mi):
+    def kamera_arayuz_guncelle(self, bagli_sayisi):
+        # DÜZELTME (2026-09-01, kullanıcı isteği): eskiden tek bir AKTİF/
+        # BAĞLANTI KOPTU metniydi (SADECE silah kamerasına bakıyordu, bkz.
+        # _kamera_heartbeat_kontrol notu). Artık 3 kameradan (ön/silah/arka)
+        # KAÇININ gerçekten bağlı olduğunu gösteriyor - "2/3 BAĞLI" gibi.
+        # Hiçbiri bağlı değilse eski/tanıdık "BAĞLANTI KOPTU" metni korunuyor.
         dil = getattr(self, 'current_lang', 'Türkçe')
         baslik = "CAMERA" if dil == "English" else "KAMERA"
-        durum = ("READY" if hazir_mi else "ERROR") if dil == "English" else ("HAZIR" if hazir_mi else "BAĞLANTI KOPTU")
+        if bagli_sayisi <= 0:
+            durum = "NO CONNECTION" if dil == "English" else "BAĞLANTI KOPTU"
+            renk = "red"
+        elif bagli_sayisi >= 3:
+            durum = "3/3 CONNECTED" if dil == "English" else "3/3 BAĞLI"
+            renk = "#00ff00"
+        else:
+            durum = f"{bagli_sayisi}/3 CONNECTED" if dil == "English" else f"{bagli_sayisi}/3 BAĞLI"
+            renk = "#ffaa00"  # kısmi bağlantı - ne tam yeşil ne kırmızı
         self.ui.label_kameraYazi.setText(f"{baslik} : {durum}")
-        self.ui.label_kameraYazi.setStyleSheet(f"color: {'#00ff00' if hazir_mi else 'red'}; font-weight: bold; font-size: 24px; border: none; background-color: transparent;")
+        self.ui.label_kameraYazi.setStyleSheet(f"color: {renk}; font-weight: bold; font-size: 24px; border: none; background-color: transparent;")
 
     def lidar_arayuz_guncelle(self, aktif_mi):
         dil = getattr(self, 'current_lang', 'Türkçe')
@@ -926,6 +1601,12 @@ class TufanGCS(QMainWindow):
             self.harita_yoneticisi.ros_motoru.gnss_sinyal.connect(
                 self.ntrip_motoru.guncel_konum_ayarla)
 
+        # KONTROL PANELİ GÖSTERGELERİ (2026-09-06) - panel artık ayrı bir
+        # process'te okunuyor (bkz. _kontrol_paneli_baslat); komutları O
+        # yayınlıyor, arayüz sadece göstergeleri buradan güncelliyor.
+        self.harita_yoneticisi.ros_motoru.panel_durum_sinyali.connect(
+            self._panel_durumu_geldi)
+
     def arac_batarya_renklendir(self, gelen_metin):
         sayilar = re.findall(r'\d+', str(gelen_metin))
         yuzde = int(sayilar[0]) if sayilar else 0
@@ -1055,8 +1736,12 @@ class TufanGCS(QMainWindow):
             self.guc_arayuz_guncelle("NORMAL" in g_metin)
             gps_metin = self.ui.label_gpsYazi.text().upper()
             self.gps_arayuz_guncelle("ETKİN" in gps_metin or "ACTIVE" in gps_metin)
-            k_metin = self.ui.label_kameraYazi.text().upper()
-            self.kamera_arayuz_guncelle("HAZIR" in k_metin or "READY" in k_metin)
+            # DÜZELTME (2026-09-01): eskiden eski metni ("HAZIR" var mı diye)
+            # geri ayrıştırıyordu - artık "X/3 BAĞLI" bir sayı taşıdığı için
+            # bu metin-kazıma güvenilir değil. Doğrudan canlı zaman
+            # damgalarından YENİDEN hesaplanıyor (daha doğru, dil bağımsız).
+            if hasattr(self, '_kamera_heartbeat_kontrol'):
+                self._kamera_heartbeat_kontrol()
             l_metin = self.ui.label_lidarYazi.text().upper()
             self.lidar_arayuz_guncelle("TARANIYOR" in l_metin or "SCANNING" in l_metin)
             # Otonom/manuel: metni geri ayristirmak yerine son bilinen gercek
@@ -1089,31 +1774,45 @@ class TufanGCS(QMainWindow):
         eleman.setStyleSheet(temiz_stil + f" font-size: {yeni_punto}pt;")
 
     def resmi_yuvarla(self, safe_image, kavis, kamera_ismi=""):
-        if safe_image is None:
+        if safe_image is None or safe_image.isNull():
             return QPixmap()
-        pixmap = QPixmap.fromImage(safe_image)
-        if pixmap.isNull():
-            return QPixmap()
+        # DÜZELTME (2026-09-05, kullanıcı: "kamera görüntüsü küçültme
+        # yapma") - eskiden burada manuel bir ön-küçültme (QImage.scaled)
+        # yapılıyordu; GUI takılma izleyicisiyle bunun GIL çekişmesi
+        # yüzünden bazen 1200ms'ye kadar tıkandığı görüldü. Zaten gereksiz
+        # bir işti: tuval_ana/sag1-3 hepsi setScaledContents(True) ile
+        # kuruldu (main.py::__init__) - Qt, pixmap'i widget boyutuna KENDİ
+        # native (C++ tarafında, Python'dan çok daha ucuz) ölçekleme
+        # motoruyla zaten sığdırıyor, ayrıca bizim elle küçültmemize hiç
+        # gerek yoktu.
+        #
+        # QPixmap.fromImage() + drawPixmap yerine drawImage() DOĞRUDAN
+        # çiziyor - Qt forum kaynaklarında QPixmap dönüşümünün kendisinin
+        # yavaş olduğu (1280x960'da ~30ms) belgelendi, ara adım atlanıyor.
+        yuvarlak = QPixmap(safe_image.size())
+        yuvarlak.fill(Qt.transparent)
 
-        yuvarlak = QPixmap(pixmap.size())
-        yuvarlak.fill(Qt.transparent) 
-        
         ressam = QPainter(yuvarlak)
-        ressam.setRenderHint(QPainter.Antialiasing) 
-        
+        ressam.setRenderHint(QPainter.Antialiasing)
+
         yol = QPainterPath()
         yol.addRoundedRect(QRectF(yuvarlak.rect()), kavis, kavis)
         ressam.setClipPath(yol)
-        ressam.drawPixmap(0, 0, pixmap)
+        ressam.drawImage(0, 0, safe_image)
 
-        if kamera_ismi != "": 
-            font = QFont("Arial", 18, QFont.Bold)
-            ressam.setFont(font)
-            ressam.setPen(QColor(0, 0, 0, 200)) 
-            ressam.drawText(32, 52, kamera_ismi) 
-            ressam.setPen(Qt.red) 
+        if kamera_ismi != "":
+            # bu fonksiyon saniyede onlarca kez çağrılıyor (kamera akışı),
+            # her seferinde YENİ bir QFont nesnesi yaratmanın (font arama/
+            # eşleme her defasında tekrar yapılır) bir anlamı yok - tek
+            # sabit stil, bir kez oluşturup sakla.
+            if not hasattr(self, '_kamera_etiket_fontu'):
+                self._kamera_etiket_fontu = QFont("Arial", 18, QFont.Bold)
+            ressam.setFont(self._kamera_etiket_fontu)
+            ressam.setPen(QColor(0, 0, 0, 200))
+            ressam.drawText(32, 52, kamera_ismi)
+            ressam.setPen(Qt.red)
             ressam.drawText(30, 50, kamera_ismi)
-        
+
         ressam.end()
         return yuvarlak
     
@@ -1124,33 +1823,111 @@ class TufanGCS(QMainWindow):
     def video_ekrana_bas(self, goruntu_sozlugu):
         if not isinstance(goruntu_sozlugu, dict):
             return
+        # GEÇİCİ ÖLÇÜM (2026-09-04, "kesin sebebi bul") - bu SLOT'un
+        # GUI thread'e GERÇEKTE ne sıklıkla ulaştığını ölçüyoruz
+        # (resmi_yuvarla'nın İÇ maliyetinden BAĞIMSIZ) - eğer aralık
+        # beklenenden (kamera ~66ms) çok daha büyükse, GUI thread'in
+        # BAŞKA bir şeyle meşgul kalıp kareyi geç işlediği kanıtlanır.
+        _cagri_t = time.perf_counter()
+        self._video_cagri_gecmisi = getattr(self, '_video_cagri_gecmisi', [])
+        son = getattr(self, '_son_video_cagri_t', None)
+        if son is not None:
+            self._video_cagri_gecmisi.append((_cagri_t - son) * 1000.0)
+        self._son_video_cagri_t = _cagri_t
+        if len(self._video_cagri_gecmisi) >= 60:
+            gecmis = self._video_cagri_gecmisi
+            ort = sum(gecmis) / len(gecmis)
+            en_kotu = max(gecmis)
+            print(f"[PERF slot-aralığı] n={len(gecmis)}  ort={ort:.1f}ms  "
+                  f"en_kötü={en_kotu:.1f}ms  (beklenen ~66ms - üstü GUI "
+                  f"thread'in BAŞKA işle meşgul olduğunu gösterir)")
+            self._video_cagri_gecmisi = []
+        # HER ÜÇ kamera için AYRI heartbeat (2026-09-01, bkz. _kamera_ve_
+        # joystick_baslat notu) - hangi sayfada olunursa olunsun HER ZAMAN
+        # güncellenir, "kaç kamera bağlı" göstergesi sayfadan bağımsız doğru
+        # kalsın diye (aşağıdaki erken dönüşten ÖNCE, tıpkı eskisi gibi).
+        simdi = time.time()
         if goruntu_sozlugu.get(1) is not None:
-            self.son_kamera_frame_zamani = time.time()  # heartbeat - HER ZAMAN guncellenir
+            self.son_silah_frame_zamani = simdi
+        if goruntu_sozlugu.get(2) is not None:
+            self.son_on_frame_zamani = simdi
+        if goruntu_sozlugu.get(3) is not None:
+            self.son_arka_frame_zamani = simdi
         # PERFORMANS: kamera onizlemelerini yeniden cizmek (4x QPainter/
         # resmi_yuvarla) her karede pahali. Kamera sayfasinda degilken
         # (indeks 1) bu cizimi atlayip diger ekranlarda "kasma" yaratmasini
         # onluyoruz - kalp atisi (yukarida) yine de guncel kaliyor.
-        if self.ui.stackedWidget.currentIndex() != 1:
+        # DÜZELTME (2026-09-02, kullanıcı isteği: "suni ufuk kısmına silah
+        # kamerasının görüntüsünü koyalım... jetsonun kasmaması için zaten
+        # bir ekran açılınca diğerini kapatma olayı vardı") - kullanıcının
+        # kendi hatırlattığı AYNI kalıp genişletildi: Navigasyon sayfasında
+        # (indeks 2) SADECE silah karesi Suni Ufuk'a iletilir (rounded-rect
+        # işlemesi YOK - Suni Ufuk zaten kendi kırpmasını/dönüşümünü kendi
+        # paintEvent'inde yapıyor, bkz. SuniUfukEkrani - burada SADECE
+        # QImage->QPixmap çevrimi, Kamera sayfasının 4x resmi_yuvarla/
+        # QPainter bindirmesinden ÇOK daha hafif) - HİÇBİR ZAMAN ikisi
+        # (Kamera sayfasının tam bindirmesi + Navigasyon'un Suni Ufuk
+        # güncellemesi) AYNI ANDA çalışmaz, sadece o an GÖRÜNEN sayfanınki
+        # çalışır.
+        # DÜZELTME (2026-09-04, kullanıcı: "hala gecikme var arayüzde
+        # kasmalar var") - backlog boşaltma (bkz. kamera_sistemi.py)
+        # gecikmenin BİRİKMESİNİ önledi ama asıl "kasma" hissinin kaynağı
+        # BAŞKAYDI: her GELEN kare (3 kamera birden, kameranın kendi FPS'i
+        # kadar - saniyede onlarca kez) GUI thread'inde pahalı bir işi
+        # (Kamera sayfasında 4x QPainter/resmi_yuvarla, Navigasyon'da Suni
+        # Ufuk'un tam yeniden çizimi) TETİKLİYORDU - gelen kare hızı ekran
+        # yenileme hızından kat kat fazla olduğu için GUI thread'i sürekli
+        # meşgul kalıp TÜM arayüzü (sadece kamerayı değil) kasıyordu. Artık
+        # bu ağır işler saniyede en fazla ~15 kez (66ms) yapılıyor - ARADA
+        # kalan kareler sessizce atlanıyor (kalp atışı takibi HALA HER
+        # KAREDE güncelleniyor, yukarıda - "bağlı/kopuk" göstergesi bundan
+        # etkilenmiyor, sadece EKRANA ÇİZME hızı sınırlanıyor).
+        simdi_render = time.time()
+        if simdi_render - getattr(self, '_son_video_render_zamani', 0.0) < 0.066:
+            return
+        self._son_video_render_zamani = simdi_render
+
+        aktif_sayfa = self.ui.stackedWidget.currentIndex()
+        if aktif_sayfa == 2 and hasattr(self, 'harita_yoneticisi'):
+            silah_img = goruntu_sozlugu.get(1)
+            if silah_img is not None:
+                pix = QPixmap.fromImage(silah_img)
+                if not pix.isNull():
+                    self.harita_yoneticisi.silah_kamera_guncelle(pix)
+            return
+        if aktif_sayfa != 1:
             return
         try:
             # kamera_sistemi.py gercek silah/turret karesini anahtar 1'e,
-            # TABELA karesini anahtar 2'ye koyuyor. Tabela tespiti ON kameradan
-            # yapiliyor (silah/arka ile alakasi yok) - o yuzden anahtar 2 ON
-            # kutusunda gosteriliyor. ARKA kamera donanimi henuz baglanmadi,
-            # gercek donanim eklenene kadar bos kalsin.
+            # ON (tabela) karesini anahtar 2'ye, ARKA karesini anahtar 3'e
+            # koyuyor (port atamasi: on=5000, silah=5001, arka=5002 - bkz.
+            # kamera_sistemi.py basi). Tabela tespiti ON kameradan yapiliyor
+            # (silah/arka ile alakasi yok) - o yuzden anahtar 2 ON kutusunda
+            # gosteriliyor. DUZELTME (2026-09-01, kullanici istegi): ARKA
+            # artik SABIT None DEGIL - gercek arka_kamera_node.py karesi.
             mesafe_canli_mi = (time.time() - self.son_hedef_mesafe_zamani) < 1.0
             if mesafe_canli_mi and self.son_hedef_mesafe is not None:
                 silah_etiketi = f"{self.kamera_yazi_silah}  {self.son_hedef_mesafe:.1f}m"
             else:
                 silah_etiketi = self.kamera_yazi_silah
-            pix1 = self.resmi_yuvarla(goruntu_sozlugu.get(1), 48, silah_etiketi)
-            pix2 = self.resmi_yuvarla(goruntu_sozlugu.get(2), 48, self.kamera_yazi_on)
-            pix3 = self.resmi_yuvarla(None, 48, self.kamera_yazi_arka)
+            # DÜZELTME (2026-09-04, kullanıcı: "küçük kamera görüntüsü
+            # akmasın sadece büyütülen kamera çalışsın") - 3 küçük önizleme
+            # kutusu (tuval_sag1/2/3) her tikte (yukarıdaki throttle'a
+            # rağmen hâlâ ~15Hz) resmi_yuvarla ile yeniden çiziliyordu -
+            # sadece BÜYÜTÜLEN (seçili) kamera canlı akış ihtiyacındayken
+            # bu üçü de GUI thread'ini gereksiz yere meşgul ediyordu.
+            # Artık küçük kutular ÇOK daha yavaş (saniyede ~1 kez) durgun
+            # bir önizleme olarak güncelleniyor, sadece büyük/seçili kamera
+            # tam hızda akıyor.
+            if simdi_render - getattr(self, '_son_kucuk_render_zamani', 0.0) >= 1.0:
+                self._son_kucuk_render_zamani = simdi_render
+                pix1 = self.resmi_yuvarla(goruntu_sozlugu.get(1), 48, silah_etiketi)
+                pix2 = self.resmi_yuvarla(goruntu_sozlugu.get(2), 48, self.kamera_yazi_on)
+                pix3 = self.resmi_yuvarla(goruntu_sozlugu.get(3), 48, self.kamera_yazi_arka)
+                if not pix1.isNull(): self.tuval_sag1.setPixmap(pix1)
+                if not pix2.isNull(): self.tuval_sag2.setPixmap(pix2)
+                if not pix3.isNull(): self.tuval_sag3.setPixmap(pix3)
 
-            if not pix1.isNull(): self.tuval_sag1.setPixmap(pix1)
-            if not pix2.isNull(): self.tuval_sag2.setPixmap(pix2)
-            if not pix3.isNull(): self.tuval_sag3.setPixmap(pix3)
-            
             secili_img = goruntu_sozlugu.get(self.aktif_kamera)
             if secili_img:
                 buyuk_pix = self.resmi_yuvarla(secili_img, 16, "")
@@ -1249,50 +2026,348 @@ class TufanGCS(QMainWindow):
         # araç sürülmesin diye). Kullanıcı Ayarlar sayfasındayken klavyeyi
         # aktif edip hemen WASD'a basınca "aktif ettim ama süremiyorum"
         # oluyordu - klavye aktif olunca otomatik ana ekrana dön.
-        if self.klavye_aktif:
-            self.ui.stackedWidget.setCurrentIndex(0)
+        # DÜZELTME (2026-09-01, ikinci kez canlı bildirildi - "manuele
+        # basınca / klavyeyi aktif edince hâlâ atıyor"): sayfa bazlı korumalı
+        # otomatik yönlendirme (currentIndex() not in (0,1,2)) kod
+        # incelemesinde doğru görünse de kullanıcı hâlâ istenmeyen bir
+        # sayfa değişikliği bildirdi. Kesin çözüm için otomatik sayfa
+        # DEĞİŞTİRME tamamen kaldırıldı - artık klavye hangi sayfadan
+        # aktif edilirse edilsin O SAYFADA kalınır, HİÇBİR ZAMAN başka bir
+        # sayfaya atlanmaz. Bedeli: Ayarlar sayfasındayken (index 4) klavye
+        # aktif edilip hemen WASD'a basılırsa hâlâ tepki vermez (keyPressEvent
+        # kasıtlı olarak sadece [0,1,2] sayfalarında tuş kabul ediyor) - ama
+        # bu artık sessiz/beklenen bir durum, kullanıcı manuel olarak Ana/
+        # Kamera/Navigasyon sayfasına geçtiğinde klavye zaten aktif olacak.
+        pass
+
+    # =====================================================================
+    # YER İSTASYONU FİZİKSEL KONTROL PANELİ  (kontrol_paneli_sistemi.py)
+    # Sol joystick=araç sür · Sağ joystick=silah · Pot=PWM üst sınırı ·
+    # Sol toggle=ACİL STOP · Sağ toggle=silah ateş · Sol buton=Manuel/Otonom ·
+    # Sağ buton=farlar. Açılışta otomatik başlar (bkz. _kontrol_paneli_baslat).
+    # =====================================================================
+    def _kontrol_paneli_baslat(self):
+        # DUZELTME (2026-09-06, kullanıcı: "arduinodan çektiğimiz verileri
+        # arka tarafta bir panelden gönderelim, arayüz üzerinde kasma
+        # oluyor lidar ekranında") - ARTIK PANEL BU PROCESS'TE OKUNMUYOR.
+        #
+        # Kök neden (nihayet): KontrolPaneliThread bu process'in İÇİNDE bir
+        # QThread'di - yani arayüzle AYNI GIL'i paylaşıyordu. Taktik Radar
+        # (lidar) ekranı açıkken GUI thread her karede CPU-yoğun çizim
+        # yaparken GIL'i tutuyor; joystick thread'i veriyi okusa bile
+        # yayınlamak için GIL'i beklemek zorunda kalıyordu. Daha önce
+        # denenenler (turret BEST_EFFORT QoS, Qt.DirectConnection,
+        # paintEvent'in 29.7ms->11ms optimizasyonu) marjı genişletti ama
+        # GIL rekabetini ORTADAN KALDIRAMAZ - çünkü sorun Qt kuyruğu
+        # değil, yorumlayıcı kilidiydi.
+        #
+        # Artık panel AYRI BİR PROCESS'te (kontrol_paneli_node.py, ayrı GIL)
+        # okunuyor ve joystick/acil-stop/silah komutlarını DOĞRUDAN ROS2'ye
+        # yayınlıyor. Arayüz ne kadar meşgul olursa olsun (hatta donsa
+        # bile) bu komutlar kesintisiz gider - bu aynı zamanda bir GÜVENLİK
+        # İYİLEŞTİRMESİDİR: ACİL STOP artık arayüzün sağlığına bağlı değil.
+        # Bu process sadece /panel_durumu'na abone olup GÖSTERGELERİ
+        # günceller (gecikmeye duyarsız).
+        #
+        # KRİTİK: iki process AYNI seri portu açamaz - bu yüzden burada
+        # KontrolPaneliThread ARTIK BAŞLATILMIYOR.
+        self.kontrol_paneli_motoru = None
+        # ÇİFT BAŞLATMA KORUMASI (2026-09-06): bu metot birden fazla
+        # yerden çağrılıyor (__init__, telemetri kurulumu, joystick
+        # aç/kapa butonu). İKİ node AYNI seri portu açamaz - zaten
+        # çalışan sağlıklı bir süreç varsa yenisi başlatılmaz.
+        _mevcut = getattr(self, '_panel_node_süreci', None)
+        if _mevcut is not None and _mevcut.poll() is None:
+            return
+        self._panel_node_süreci = None
+        # ORPHAN TEMİZLİĞİ (2026-09-06): arayüz çöküp süpervizör tarafından
+        # yeniden başlatıldığında, ÖNCEKİ main.py'nin başlattığı node
+        # sahipsiz (orphan) olarak yaşamaya devam eder. Node'un kendi
+        # tekil-çalışma kilidi ikinci bir örneğin açılmasını engeller, ama
+        # o zaman da bu process'in node'u HİÇ başlayamaz ve bekçi boşuna
+        # denemeye devam eder. Bu yüzden başlamadan önce eski örnekler
+        # temizlenir - tek sahiplik garanti edilir.
+        # NOT (2026-09-06): burada eski/orphan node'ları temizlemek için
+        # pkill DENENDİ ve İKİ KEZ geri alındı:
+        #   1) subprocess.run(timeout=5)+sleep -> burası GUI thread'i
+        #      (__init__) olduğu için arayüz AÇILIŞTA dondu ("force quit").
+        #   2) subprocess.Popen (non-blocking) -> bu sefer pkill, hemen
+        #      ardından başlatılan YENİ node ile de eşleşip onu öldürme
+        #      yarışı yarattı.
+        # Temizliğe zaten GEREK YOK: node kendi tekil-çalışma kilidini
+        # tutuyor (bkz. kontrol_paneli_node.py::_tekil_calisma_kilidi) -
+        # orphan bir node varsa O çalışmaya devam eder (joystick çalışır),
+        # ikinci örnek sessizce çıkar. Bekçi de bunu pgrep ile görüp
+        # boşuna yeniden başlatmaya çalışmaz (bkz. _panel_bekci_kontrol).
+        try:
+            # Node'un çıktısı bir log dosyasına yazılır - DEVNULL YAPMA:
+            # ayrı process olduğu için sorun çıktığında (Arduino bağlanmadı,
+            # port meşgul vb.) tek teşhis kaynağı burasıdır.
+            _panel_log = open("/tmp/tufan_kontrol_paneli_node.log", "a")
+            _panel_log.write(f"\n--- {time.strftime('%Y-%m-%d %H:%M:%S')} yeniden başlatıldı ---\n")
+            _panel_log.flush()
+            self._panel_node_süreci = subprocess.Popen(
+                [sys.executable, "-u",
+                 os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "kontrol_paneli_node.py")],
+                stdout=_panel_log, stderr=subprocess.STDOUT)
+            self.log_yaz("🎮 Kontrol paneli AYRI PROCESS olarak başlatıldı "
+                         "(joystick artık arayüz yükünden bağımsız).")
+        except Exception as e:
+            self.log_yaz(f"⚠️ Kontrol paneli süreci başlatılamadı: {e}")
+
+    def _panel_surecini_durdur(self):
+        """Ayrı process olarak çalışan kontrol paneli node'unu sonlandırır.
+        SIGTERM gönderilir (node bunu yakalayıp seri portu temiz kapatır),
+        kısa bir süre beklenir, gerekirse zorla kapatılır."""
+        sur = getattr(self, '_panel_node_süreci', None)
+        if sur is None:
+            return
+        try:
+            if sur.poll() is None:
+                sur.terminate()
+                try:
+                    sur.wait(timeout=3)
+                except Exception:
+                    sur.kill()
+        except Exception:
+            pass
+        self._panel_node_süreci = None
+
+    def _panel_komut_gonder(self, komut):
+        """PANEL TESTİ butonları -> ayrı process'teki panel node'u
+        (bkz. kontrol_paneli_node.py::_komut_cb). Panel artık bu process'te
+        olmadığı için metot çağrısı yerine ROS2 topic'i kullanılıyor."""
+        hy = getattr(self, 'harita_yoneticisi', None)
+        if hy is None or getattr(hy, 'ros_motoru', None) is None:
+            return False
+        return hy.ros_motoru.panel_komut_gonder(komut)
+
+    def _panel_durumu_geldi(self, veri):
+        """Ayrı process'teki kontrol paneli node'undan gelen gösterge
+        güncellemeleri (bkz. kontrol_paneli_node.py::durum_yayinla).
+        Joystick/acil-stop/silah komutları BURADAN GEÇMEZ - onları node
+        doğrudan ROS2'ye yayınlıyor; burada sadece ekrandaki göstergeler
+        güncelleniyor, bu yüzden gecikmesi önemsiz."""
+        tip = veri.get('tip')
+        if tip == 'baglanti':
+            self._panel_baglanti_degisti(bool(veri.get('bagli')))
+        elif tip == 'acil_stop_manuel':
+            # ACİL STOP -> MANUEL (2026-09-06, kullanıcı isteği). Komutun
+            # kendisini panel node DOĞRUDAN araca gönderdi; burada arayüzün
+            # KENDİ durumu da MANUEL yapılıyor. Bu şart: arayüz
+            # /surus_modu'nu HER TURDA tekrar yayınlıyor
+            # (telemetri_sistemi.py::surekli_yayin_dongusu), kendi modunu
+            # değiştirmezse bir sonraki turda OTONOM'u geri yazar ve acil
+            # stop'un mod değişimi ANINDA geri alınırdı.
+            mod = getattr(getattr(self, 'telemetri_motoru', None),
+                          'arac_modu', 'MANUEL')
+            if mod != "MANUEL":
+                self.manuel_sec()
+                self.log_yaz("🛑 ACİL STOP: sürüş modu OTONOM → MANUEL'e alındı, "
+                             "otonom hedef üretimi durduruldu.")
+            self.acil_durdurma()
+        elif tip == 'fren':
+            # FREN (2026-09-06): fiziksel sol buton (D9) artik surus modunu
+            # DEGIL freni degistiriyor. Komutun kendisi ayri process'teki
+            # kontrol_paneli_node'dan DOGRUDAN araca gidiyor (/fren_komut);
+            # buraya sadece operatore gosterilecek bilgi geliyor.
+            acik = bool(veri.get('acik'))
+            self.log_yaz(
+                f"🅿️ FİZİKSEL BUTON: FREN {'AÇILIYOR' if acik else 'KAPANIYOR'} "
+                f"(araçta motor 3 sn çalışacak)")
+        elif tip == 'sol_buton':
+            # Geriye donuk uyumluluk: eski kontrol_paneli_node calisiyorsa
+            # (yeni surum yuklenmeden once baslatilmissa) hala bu tip gelir.
+            # Sessizce yok sayiliyor - mod degistirme artik EKRAN
+            # butonlariyla (MANUEL/OTONOM) yapiliyor.
+            pass
+        elif tip == 'sag_buton':
+            self._farlar_toggle()
+        elif tip == 'pot':
+            self._panel_pot_geldi(int(veri.get('pwm', 0)))
+        elif tip == 'yer_batarya':
+            self.yer_batarya_renklendir(str(veri.get('metin', '')))
+        elif tip == 'log':
+            self.log_yaz(str(veri.get('mesaj', '')))
+        elif tip == 'ham':
+            # PANEL TESTİ dialogu açıkken canlı ham veri (bkz.
+            # _panel_testi_ac içindeki guncelle fonksiyonu).
+            gnc = getattr(self, '_panel_ham_guncelle', None)
+            if gnc is not None:
+                try:
+                    gnc(veri.get('veri', {}))
+                except Exception:
+                    pass
+
+    def _panel_surus_geldi(self, sol_oran, sag_oran):
+        if hasattr(self, 'telemetri_motoru'):
+            self.telemetri_motoru.joystick_pwm_gonder(sol_oran, sag_oran)
+
+    def _panel_turret_geldi(self, x, y):
+        if hasattr(self, 'telemetri_motoru'):
+            self.telemetri_motoru.joystick_turret_gonder(x, y)
+
+    def _panel_pot_geldi(self, deger):
+        # Potansiyometre (A5) -> PWM üst sınırı. CANLI, onaysız (histerezis +
+        # throttle thread tarafında). Ayarlar'daki kutu + ekran altı OSD
+        # göstergesi güncellenir. NOT: sessiz=True -> her küçük oynamada log
+        # satırı basılmasın.
+        if hasattr(self, 'telemetri_motoru'):
+            uygulanan = self.telemetri_motoru.pwm_ust_sinirini_ayarla(deger, sessiz=True)
+        else:
+            uygulanan = float(deger)
+        kutu = self.ui.lineEdit_kullaniciAdi_2
+        kutu.setText(f"{uygulanan:.0f}")
+        kutu.setStyleSheet(PWM_LIMIT_AKTIF)
+        self._pwm_son_uygulanan_metin = kutu.text()
+        self._pwm_osd_goster(uygulanan)
+
+    def _panel_acil_stop(self, aktif):
+        # Sol toggle switch. GND'ye alınca ACİL STOP; bırakınca OTOMATİK DEVAM
+        # (kullanıcı kararı: switch tek yetkili). Thread sadece kenar yayınlar.
+        if aktif:
+            self.log_yaz("🛑 FİZİKSEL ANAHTAR: Sol toggle GND'ye alındı → ACİL STOP")
+            self.acil_durdurma()
+        else:
+            self.log_yaz("✅ FİZİKSEL ANAHTAR: Sol toggle bırakıldı → DEVAM (otomatik)")
+            if hasattr(self, 'telemetri_motoru'):
+                self.telemetri_motoru.hareket_emri_gonder("DEVAM_CMD")
+            self._arac_kilitli_mi = False
+            if hasattr(self.ui, 'pushButton_devamEt'):
+                self.ui.pushButton_devamEt.setVisible(False)
+            self.ui.terminal_ekrani.append(
+                "<br><span style='color:#00FF7B;'><b>✅ DEVAM (fiziksel anahtar): "
+                "acil durdurma kilidi açıldı, araç tekrar komut kabul ediyor.</b></span><br>"
+            )
+
+    def _panel_mod_toggle(self):
+        # ARTIK FİZİKSEL BUTONA BAĞLI DEĞİL (2026-09-06, kullanıcı isteği:
+        # sol buton FREN oldu, bkz. kontrol_paneli_node.py::fren_toggle).
+        # Metot, ekrandan/başka bir yerden çağrılabilsin diye duruyor.
+        # Her basışta MANUEL <-> OTONOM.
+        mod = getattr(getattr(self, 'telemetri_motoru', None), 'arac_modu', 'MANUEL')
+        if mod == "MANUEL":
+            self.otonom_sec()
+        else:
+            self.manuel_sec()
+        self.log_yaz("🎮 FİZİKSEL BUTON: sürüş modu değiştirildi.")
+
+    def _panel_baglanti_degisti(self, bagli):
+        dil = CEVIRILER.get(self.aktif_dil, CEVIRILER["Türkçe"])
+        if bagli:
+            self.log_yaz("🎮 Kontrol paneli Arduino bağlandı.")
+            if hasattr(self, 'telemetri_motoru'):
+                self.telemetri_motoru.surus_kaynagi = "JOYSTICK"
+                self.telemetri_motoru.silah_manuel_moduna_al()
+            if getattr(self, 'joystick_bagli', True):
+                self.ui.pushButton_joystick.setStyleSheet(AYAR_AKTIF)
+                self.ui.pushButton_joystick.setText(dil["btn_bagli"])
+        else:
+            self.log_yaz("⚠️ Kontrol paneli Arduino bağlantısı yok/koptu — klavye sürüşü aktif.")
+            # Arduino çıkarılırsa sürücü klavyeyle sürebilsin diye kaynağı geri al.
+            if hasattr(self, 'telemetri_motoru') and self.telemetri_motoru.surus_kaynagi == "JOYSTICK":
+                self.telemetri_motoru.surus_kaynagi = "KLAVYE"
+                if not getattr(self, 'klavye_aktif', False):
+                    self.ayar_klavye_tetikle()
+            if getattr(self, 'joystick_bagli', True):
+                self.ui.pushButton_joystick.setStyleSheet(AYAR_PASIF)
+                self.ui.pushButton_joystick.setText(dil["btn_baglantiyok"])
 
     def ayar_joystick_tetikle(self):
+        # Ayarlar'daki "Joystick" butonu artık kontrol panelini YAZILIMSAL
+        # olarak aç/kapatır (donanım açılışta otomatik başlar).
         dil = CEVIRILER.get(self.aktif_dil, CEVIRILER["Türkçe"])
-        self.joystick_bagli = not getattr(self, 'joystick_bagli', False)
+        self.joystick_bagli = not getattr(self, 'joystick_bagli', True)
         if self.joystick_bagli:
             self.ui.pushButton_joystick.setStyleSheet(AYAR_AKTIF)
             self.ui.pushButton_joystick.setText(dil["btn_bagli"])
-            self.log_yaz("Donanım: USB Joystick portları taranıyor...")
-            if hasattr(self, 'telemetri_motoru'): self.telemetri_motoru.surus_kaynagi = "JOYSTICK"
-            if not hasattr(self, 'surus_joystick_motoru'):
-                self.surus_joystick_motoru = SurusJoystickThread()
-                self.surus_joystick_motoru.pwm_sinyali.connect(self.joystick_pwm_geldi)
-                self.surus_joystick_motoru.yon_sinyali.connect(self.joystick_yon_geldi)
-                self.surus_joystick_motoru.baglanti_sinyali.connect(self.joystick_baglanti_degisti)
-                self.surus_joystick_motoru.guvenlik_sinyali.connect(self.log_yaz)
-            self.surus_joystick_motoru.start()
+            self.log_yaz("Donanım: Kontrol paneli portları taranıyor...")
+            # Panel artık AYRI PROCESS (bkz. _kontrol_paneli_baslat) -
+            # thread yerine sürecin yaşayıp yaşamadığına bakılıyor.
+            _sur = getattr(self, '_panel_node_süreci', None)
+            if _sur is None or _sur.poll() is not None:
+                self._kontrol_paneli_baslat()
         else:
             self.ui.pushButton_joystick.setStyleSheet(AYAR_PASIF)
             self.ui.pushButton_joystick.setText(dil["btn_baglantiyok"])
-            self.log_yaz("Donanım: Joystick bağlantısı YAZILIMSAL OLARAK KESİLDİ.")
-            if hasattr(self, 'telemetri_motoru'): self.telemetri_motoru.surus_kaynagi = "KLAVYE"
-            if hasattr(self, 'surus_joystick_motoru'):
-                self.surus_joystick_motoru.durdur()
-            # DÜZELTME: joystick kapatılınca sürüş kaynağı KLAVYE'ye
-            # dönüyor ama klavye_aktif ayrıca açık DEĞİLSE keyPressEvent
-            # yine de tuşları yok sayıyordu - "joystick kapatıp klavye
-            # açtığımda süremiyorum" olarak canlı bildirildi. Kaynak
-            # KLAVYE'ye döndüğü an klavyeyi de otomatik aç.
+            self.log_yaz("Donanım: Kontrol paneli YAZILIMSAL OLARAK KESİLDİ.")
+            if hasattr(self, 'telemetri_motoru'):
+                self.telemetri_motoru.surus_kaynagi = "KLAVYE"
+            self._panel_surecini_durdur()
+            # Kaynak KLAVYE'ye döndüğü an klavyeyi de otomatik aç (yoksa
+            # "joystick kapatıp klavye açtığımda süremiyorum" - canlı bildirildi).
             if not getattr(self, 'klavye_aktif', False):
                 self.ayar_klavye_tetikle()
         self.setFocus()
 
-    def joystick_pwm_geldi(self, sol_pwm, sag_pwm):
-        if hasattr(self, 'telemetri_motoru'):
-            self.telemetri_motoru.joystick_pwm_gonder(sol_pwm, sag_pwm)
+    # --- PWM üst sınırı ekran-altı göstergesi (ses OSD'si gibi belir/sön) ---
+    def _pwm_osd_olustur(self):
+        osd = QLabel(self.ui.centralwidget)
+        osd.setObjectName("pwmOsd")
+        osd.setAlignment(Qt.AlignCenter)
+        osd.setStyleSheet(
+            "QLabel { background-color: rgba(13, 20, 28, 235); color: #E6F7FF; "
+            "border: 1px solid #00E5FF; border-radius: 14px; padding: 12px 26px; "
+            "font-size: 18px; font-weight: bold; }"
+        )
+        self._pwm_osd_efekt = QGraphicsOpacityEffect(osd)
+        osd.setGraphicsEffect(self._pwm_osd_efekt)
+        self._pwm_osd_anim = QPropertyAnimation(self._pwm_osd_efekt, b"opacity", self)
+        self._pwm_osd_gizle_zamanlayici = QTimer(self)
+        self._pwm_osd_gizle_zamanlayici.setSingleShot(True)
+        self._pwm_osd_gizle_zamanlayici.timeout.connect(self._pwm_osd_solmaya_basla)
+        osd.hide()
+        self.ui.pwmOsd = osd
 
-    def joystick_yon_geldi(self, x, y):
-        if hasattr(self, 'telemetri_motoru'):
-            self.telemetri_motoru.joystick_turret_gonder(x, y)
+    def _pwm_osd_goster(self, deger):
+        if not hasattr(self.ui, 'pwmOsd'):
+            self._pwm_osd_olustur()
+        osd = self.ui.pwmOsd
+        oran = max(0.0, min(1.0, (float(deger) - 85.0) / (255.0 - 85.0)))
+        dolu = int(round(oran * 22))
+        cubuk = "█" * dolu + "░" * (22 - dolu)
+        osd.setText(f"PWM ÜST SINIRI   ·   {float(deger):.0f}\n{cubuk}\nmin 85   —   max 255")
+        osd.adjustSize()
+        # DÜZELTME (2026-09-04, kullanici: "gösterge ekranın altındaki
+        # gözükmüyor") - BUG: osd, centralwidget'in ÇOCUĞU (bkz.
+        # _pwm_osd_olustur) - move() PARENT'A GÖRE koordinat alır. Burada
+        # yanlışlıkla QApplication.primaryScreen().geometry() (TÜM masaüstü
+        # ekranının boyutu, GLOBAL koordinat) kullanılıyordu - pencere/
+        # centralwidget tam ekranla piksel piksel eşleşmiyorsa (pencere
+        # kenarlıkları, onboard klavye açılışında tam ekrandan çıkma vb.,
+        # bkz. proje notu) hesaplanan Y konumu centralwidget'in GERÇEK
+        # sınırlarının DIŞINA taşıyor - Qt görünmez alanı kırpıyor, OSD
+        # hiç görünmüyordu. Artık GERÇEK ebeveynin (centralwidget) kendi
+        # boyutuna göre konumlandırılıyor.
+        ust_widget = osd.parentWidget() or self.ui.centralwidget
+        osd.move((ust_widget.width() - osd.width()) // 2, ust_widget.height() - osd.height() - 90)
+        self._pwm_osd_anim.stop()
+        self._pwm_osd_efekt.setOpacity(1.0)
+        osd.show()
+        osd.raise_()
+        self._pwm_osd_gizle_zamanlayici.start(1400)
 
-    def joystick_baglanti_degisti(self, bagli):
-        self.log_yaz("🕹️ Joystick Arduino bağlandı." if bagli else "⚠️ Joystick Arduino bağlantısı yok/koptu.")
+    def _pwm_osd_solmaya_basla(self):
+        osd = self.ui.pwmOsd
+        self._pwm_osd_anim.stop()
+        self._pwm_osd_anim.setDuration(600)
+        self._pwm_osd_anim.setStartValue(1.0)
+        self._pwm_osd_anim.setEndValue(0.0)
+        try:
+            self._pwm_osd_anim.finished.disconnect()
+        except TypeError:
+            pass
+        self._pwm_osd_anim.finished.connect(osd.hide)
+        self._pwm_osd_anim.start()
+
+    def _farlar_toggle(self):
+        # Hem "F" tuşu hem kontrol panelindeki sağ buton buradan geçer -
+        # /farlar (Bool) topic'ine AÇIK/KAPALI yayınlanır. Farlar bir sürüş
+        # komutu değil yardımcı ekipman: OTONOM modda da çalışır.
+        self.farlar_acik = not getattr(self, 'farlar_acik', False)
+        if hasattr(self, 'telemetri_motoru'):
+            self.telemetri_motoru.farlar_ayarla(self.farlar_acik)
 
     def sayfa_odak_ayarla(self, index):
         if index in [0, 1, 2]:
@@ -1350,6 +2425,19 @@ class TufanGCS(QMainWindow):
             return
         if not self.klavye_aktif: return
         if self.ui.stackedWidget.currentIndex() not in [0, 1, 2]: return
+
+        # FARLAR (2026-09-01, kullanıcı isteği): "F" tuşuna basınca AÇIK/
+        # KAPALI arasında geçiş yapıp /farlar topic'ine (Bool) yayınlanıyor.
+        # KASITLI OLARAK aşağıdaki "sadece MANUEL modda" şartından ÖNCE
+        # işleniyor - farlar bir sürüş komutu değil yardımcı ekipman,
+        # OTONOM modda da (ör. gece/tünel/rampa) açılabilmeli.
+        # event.isAutoRepeat() koruması: tuşu basılı tutunca OS'un ürettiği
+        # tekrarlı keyPress'ler yüzünden AÇIK/KAPALI arasında hızlıca
+        # ÇIRPINMASIN diye - sadece gerçek/tek basışta geçiş yapılır.
+        if event.key() == Qt.Key_F and not event.isAutoRepeat():
+            self._farlar_toggle()
+            return
+
         if hasattr(self, 'telemetri_motoru') and self.telemetri_motoru.arac_modu != "MANUEL": return
 
         if hasattr(self, 'telemetri_motoru'):
@@ -1394,7 +2482,153 @@ class TufanGCS(QMainWindow):
             if event.key() in [Qt.Key_W, Qt.Key_S, Qt.Key_A, Qt.Key_D]:
                 self.telemetri_motoru.hareket_emri_gonder("DUR (SPACE)")
 
+    def closeEvent(self, event):
+        # 2026-09-04, kullanıcı: "arayüzün bir anda çökmemesi lazım çok
+        # nadiren de olsa oluyor" - KÖK NEDEN BULUNDU: pencere kapanırken
+        # (X butonu, "Sistemi Kapat", Alt+F4) hiçbir closeEvent YOKTU -
+        # QThread tabanlı worker'lar (kamera/telemetri/ntrip/kontrol
+        # paneli/harita ROS motoru) HALA ÇALIŞIRKEN Qt nesneleri direkt
+        # yok ediliyordu. Qt bunu "QThread: Destroyed while thread is
+        # still running" FATAL hatasıyla (terminate called without an
+        # active exception) SESSİZCE çökerek cezalandırıyor - canlı
+        # app_log'da BİREBİR bu iz bulundu. Artık hepsi kapanmadan ÖNCE,
+        # BLOKE EDEREK (quit()+wait(), bkz. ilgili dosyalardaki durdur()/
+        # stop() metotları) düzgünce durduruluyor.
+        if getattr(self, '_kapatma_tamamlandi', False):
+            event.accept()
+            return
+        # Kontrol paneli AYRI PROCESS (2026-09-06) - EN ÖNCE sonlandırılır
+        # ki ROS2 context'i kapanırken hâlâ komut yayınlamaya çalışmasın.
+        self._panel_surecini_durdur()
+        for ad, yontem in (
+            ('kontrol_paneli_motoru', 'durdur'),
+            ('kamera_motoru', 'stop'),
+            ('telemetri_motoru', 'durdur'),
+            ('ntrip_motoru', 'durdur'),
+        ):
+            nesne = getattr(self, ad, None)
+            if nesne is not None:
+                try:
+                    getattr(nesne, yontem)()
+                except Exception:
+                    pass
+        if hasattr(self, 'harita_yoneticisi'):
+            try:
+                self.harita_yoneticisi.kapat()
+            except Exception:
+                pass
+        self._kapatma_tamamlandi = True
+        # DUZELTME (2026-09-06): "-u" bayrağı kaldırılıp stdout tekrar
+        # tamponlu yapıldığı için (bkz. calistir.sh notu), TEMİZ kapanışta
+        # tampondaki son satırların kaybolmaması için burada MANUEL flush -
+        # normal çalışma sırasında GUI thread'i BLOKE ETME riski yok
+        # (sadece kapanış anında, TEK SEFERLİK).
+        try:
+            sys.stdout.flush()
+        except Exception:
+            pass
+        event.accept()
+
+_ANA_PENCERE_REF = None
+
+
+def _kirilmaz_hata_yakalayici(exc_type, exc_value, exc_tb):
+    """2026-09-04, kullanıcı isteği: "arayüzün bir anda çökmemesi lazım
+    çok nadiren de olsa oluyor" - PyQt5'in VARSAYILAN davranışı: bir slot/
+    callback içinde YAKALANMAMIŞ bir Python hatası olursa (ör. ROS
+    mesajından beklenmeyen bir alan, seri porttan bozuk bir satır, nadir
+    bir race condition), traceback stderr'e yazılıp UYGULAMA SESSİZCE
+    ÇÖKER (event loop C++ tarafında abort ediyor) - hiçbir hata penceresi/
+    log satırı görülmeden arayüz anında kapanır. Kullanıcının tarif ettiği
+    "bir anda çökme" tam olarak bu.
+
+    Artık TÜM yakalanmamış hatalar burada tutuluyor: diske (crash_log.txt)
+    yazılıyor ve (ana pencere zaten oluşmuşsa) log kutusuna basılıyor, ama
+    UYGULAMA KAPANMIYOR - araç/harita/kontrol çalışmaya devam ediyor. Bir
+    slot ortasında yarım kalan durum riski var ama bu, canlı bir yarışma
+    yer istasyonu için "sessizce kapanmak"tan HER ZAMAN daha güvenli.
+    """
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+        return
+    metin = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+    zaman = time.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        crash_dosya = os.path.join(os.path.dirname(os.path.abspath(__file__)), "crash_log.txt")
+        with open(crash_dosya, "a") as f:
+            f.write(f"\n--- {zaman} ---\n{metin}\n")
+    except Exception:
+        pass
+    sys.stderr.write(f"\n[YAKALANMAMIŞ HATA - UYGULAMA AYAKTA KALDI, bkz. crash_log.txt]\n{metin}\n")
+    try:
+        if _ANA_PENCERE_REF is not None:
+            _ANA_PENCERE_REF.log_yaz(f"⚠️ Beklenmeyen hata yakalandı (uygulama çalışmaya devam ediyor): {exc_value}")
+    except Exception:
+        pass
+
+
+def _gui_takilma_izleyici():
+    """GEÇİCİ TEŞHİS (2026-09-04, "kesin sebebi bul" - kullanıcı: "hala çok
+    kasma var yaklaşık 1.5sn civarı") - önceki ölçümler (resmi_yuvarla,
+    setPixmap) TEK TEK hızlı çıktı (~12ms, ~0.1ms) ama video slot'unun
+    GUI thread'e ULAŞMA aralığı arada 200-500ms'ye sıçrıyordu - yani sorun
+    video kodunun İÇİNDE değil, GUI thread'in ARADA BAŞKA BİR YERDE
+    (muhtemelen tek bir C-uzantısı çağrısında, ör. yavaş bir QPainter
+    işlemi, subprocess/ağ çağrısı, ya da GIL'i uzun süre tutan bir işlem)
+    TIKANIP KALMASIYDI. Bu, GUI thread'in KENDİSİ ile ölçülemez (tıkanan
+    thread kendi ölçüm kodunu da çalıştıramaz) - AYRI bir arka plan
+    thread'i, sys._current_frames() ile GUI thread'in o anki Python
+    çağrı yığınını DIŞARIDAN periyodik örnekliyor. Yığın ÜST ÜSTE aynı
+    satırda kalırsa (thread ilerlemiyor demektir), o satırı ve tam yığını
+    konsola basıyor - "kesin sebep" burada görünecek. Sorun bulununca bu
+    fonksiyon (ve çağrısı) kaldırılacak.
+    """
+    ana_id = threading.main_thread().ident
+    son_imza = None
+    tekrar = 0
+    while True:
+        time.sleep(0.03)
+        try:
+            kareler = sys._current_frames()
+        except Exception:
+            continue
+        f = kareler.get(ana_id)
+        if f is None:
+            continue
+        yigin = traceback.extract_stack(f)
+        imza = (yigin[-1].filename, yigin[-1].lineno) if yigin else None
+        if imza == son_imza:
+            tekrar += 1
+        else:
+            if tekrar >= 5:  # ~150ms+ AYNI satırda takılı kalmış
+                gecen_ms = tekrar * 30
+                ozet = "".join(traceback.format_list(yigin[-8:]))
+                print(f"\n[STALL] GUI thread ~{gecen_ms}ms boyunca aynı "
+                      f"satırda tıkandı:\n{ozet}")
+            tekrar = 0
+            son_imza = imza
+
+
 if __name__ == "__main__":
+    # DÜZELTME (2026-09-05, kullanıcı: "yine çöktü, çöktüğü zaman sana
+    # raporlasın neden çöktüğünü") - sys.excepthook SADECE Python
+    # seviyesindeki hataları yakalar; GERÇEK bir native çökme (segfault/
+    # SIGABRT - ör. Qt/C++ tarafında bir hata) hiçbir Python hatası
+    # ÜRETMEZ, hiçbir şey loglamadan aniden ölür - bu oturumda defalarca
+    # görülen "hiçbir iz yok" çökmelerinin muhtemel sınıfı bu.
+    # `faulthandler` tam bunun için var: sudo/ptrace GEREKTİRMEDEN,
+    # SIGSEGV/SIGABRT/SIGBUS/SIGILL/SIGFPE alındığı anda TÜM thread'lerin
+    # o anki Python çağrı yığınını otomatik olarak dosyaya yazar - bir
+    # sonraki "neden çöktü" sorusuna kesin bir cevap verir.
+    import faulthandler
+    _crash_dosya = os.path.join(os.path.dirname(os.path.abspath(__file__)), "crash_log.txt")
+    _crash_f = open(_crash_dosya, "a")
+    _crash_f.write(f"\n--- {time.strftime('%Y-%m-%d %H:%M:%S')} (faulthandler etkin) ---\n")
+    _crash_f.flush()
+    faulthandler.enable(file=_crash_f, all_threads=True)
+
+    sys.excepthook = _kirilmaz_hata_yakalayici
+    threading.Thread(target=_gui_takilma_izleyici, daemon=True).start()
     if hasattr(Qt, 'AA_EnableHighDpiScaling'):
         QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     if hasattr(Qt, 'AA_UseHighDpiPixmaps'):
@@ -1402,5 +2636,6 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     pencere = TufanGCS()
+    _ANA_PENCERE_REF = pencere
     pencere.show()
     sys.exit(app.exec_())

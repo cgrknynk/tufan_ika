@@ -8,7 +8,13 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     pkg_share = get_package_share_directory('tufan_v2_ws')
-    varsayilan_model_path = os.path.join(pkg_share, 'models', 'hedefv2.pt')
+    # KESIN COZUM (2026-09-01): hedefv2.pt (PyTorch, CPU-agir) yerine
+    # hedefv3-seg.engine (TensorRT) - bkz. tufan_mppi.launch.py'deki tabela
+    # icin AYNI tarihli not (CPU asiri yuk -> rf2o gecikmesi -> odometri
+    # kaymasi + Nav2 lifecycle bond timeout). imgsz=800 bu engine icin
+    # DOGRULANDI (izole testte basarili, imgsz=640 HATA verdi) - asagidaki
+    # declare_model_imgsz_cmd default'u da 800'e cekildi.
+    varsayilan_model_path = os.path.join(pkg_share, 'models', 'hedefv3-seg.engine')
 
     camera_index = LaunchConfiguration('camera_index')
     turret_serial_port = LaunchConfiguration('turret_serial_port')
@@ -38,7 +44,7 @@ def generate_launch_description():
         description='YOLO model dosyasi (.pt/.engine/.onnx) - farkli bir model icin mutlak yol verilebilir'
     )
     declare_model_imgsz_cmd = DeclareLaunchArgument(
-        'model_imgsz', default_value='480',
+        'model_imgsz', default_value='800',
         description='Model giris boyutu (piksel) - TensorRT (.engine) export edilen modeller icin export sirasindaki boyutla AYNI olmali'
     )
 

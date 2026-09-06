@@ -82,10 +82,46 @@ class TelemetriThread(QThread):
         self.cmd_pub = None
         self.mod_pub = None
         self.palet_pub = None
+        # DÜZELTME (2026-09-01, canlı bildirilen "arayüz açılmıyor" hatasının
+        # devamı - bkz. aşağıdaki return bloğundaki uzun not): TÜM
+        # publisher'lar (sadece farlar_pub değil) ROS2 yoksa da None olarak
+        # erken tanımlanmalı - main.py'deki ilgili *_ayarla() metodları
+        # "if self.xxx_pub is None: return" ile ROS2'siz durumu zaten
+        # DOĞRU yönetiyordu, ama attribute'un kendisi hiç YOK olduğunda
+        # (sadece None olmadığında) AttributeError'a düşüyordu - canlı
+        # tekrarlanarak doğrulandı (`yon_pid_pub` için de aynı hata çıktı).
+        self.silah_modu_pub = None
+        self.turret_cmd_pub = None
+        self.silah_ates_pub = None
+        self.yon_pid_pub = None
+        self.farlar_pub = None
         self.ros2_bagli = False
 
         if rclpy is None or Node is None or String is None or Float32 is None or Bool is None or Int32 is None or Float32MultiArray is None:
             self.log_sinyali.emit("⚠️ ROS2 bulunamadığı için telemetri yayıncısı devre dışı bırakıldı.")
+            # DÜZELTME (2026-09-01, canlı bildirildi: "VS Code terminalinden
+            # python3 main.py çalıştırınca AttributeError: 'TelemetriThread'
+            # object has no attribute 'pwm_ust_sinir' ile açılmıyor") - kök
+            # neden: VS Code'un entegre terminali ROS2 ortamını (setup.bash)
+            # source ETMEDEN çalıştırılınca "import rclpy" burada başarısız
+            # oluyor, bu ERKEN DÖNÜŞ (yukarıdaki satır) tetikleniyor - ama
+            # aşağıdaki ROS2'ye bağımlı bölümde tanımlanan pwm_ust_sinir/
+            # arac_modu gibi SADE Python durum değişkenleri (ROS'a hiç
+            # ihtiyacı olmayan) hiç oluşturulmuyordu. main.py bunları ROS2
+            # durumuna BAKMADAN doğrudan okuyor (ör. _buton_baglantilarini_kur
+            # içinde `pwm_ust_sinir`) - araç Jetson'un açık/kapalı olması
+            # DEĞİL, bu eksik varsayılan durum arayüzün hiç açılmamasının
+            # gerçek nedeniydi. Artık ROS2 olmasa bile bu değerler var - arayüz
+            # açılır, sadece sürüş/telemetri devre dışı kalır (ros2_bagli=False).
+            self.arac_modu = "MANUEL"
+            self.surus_kaynagi = "KLAVYE"
+            self.anlik_sol_pwm = 0.0
+            self.anlik_sag_pwm = 0.0
+            self.pwm_alt_sinir = 85.0
+            self.pwm_ust_sinir = 255.0
+            self.sol_hiz_kademesi = 85.0
+            self.sag_hiz_kademesi = 85.0
+            self.manuel_hazir = False
             return
 
         if not rclpy.ok():
@@ -123,7 +159,27 @@ class TelemetriThread(QThread):
         # gecikme geregi oldugundan ayni izole surus_node'da yayinlaniyor. ---
         self.joystick_hedefi = "ARAC"  # "ARAC" veya "SILAH"
         self.silah_modu_pub = self.surus_node.create_publisher(String, '/silah_modu', 10)
-        self.turret_cmd_pub = self.surus_node.create_publisher(Twist, '/turret_manuel_cmd', 10)
+        # DUZELTME (2026-09-05, canlı bildirildi: "joystick bile çok geç
+        # gidiyor" - crash_rapor_son.txt/[STALL] izleyicisi kanıtladı):
+        # turret_cmd_pub varsayılan RELIABLE QoS ile GUI thread'inde
+        # SENKRON publish() çağrılıyordu (bkz. main.py _panel_turret_geldi
+        # -> joystick_turret_gonder). Bu ağın RELIABLE ack/retransmit
+        # mekanizması /palet_hizlari'nda daha önce tespit edilenle AYNI
+        # şekilde tıkanıyor - publish() 15+ saniye BLOKE oldu, TEK bir Qt
+        # slot GUI thread'ini bloke edince kuyruktaki TÜM diğer sinyaller
+        # (joystick sürüş güncellemeleri DAHİL) da aynı süre bekletiliyordu
+        # - kullanıcının "joystick bile çok geç gidiyor" şikayetinin gerçek
+        # nedeni buydu. turret_manuel_cmd sürekli (joystick poll hızında)
+        # yeniden yayınlanan bir kontrol sinyali - kaybolan tek bir örneğin
+        # önemi yok. UYUMLULUK İÇİN araç tarafındaki turret_node.py'nin
+        # aboneliği de AYNI ANDA BEST_EFFORT'a alındı (yayıncı BEST_EFFORT
+        # iken abone RELIABLE beklerse DDS sessizce eşleşmez).
+        turret_qos = QoSProfile(
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
+        self.turret_cmd_pub = self.surus_node.create_publisher(Twist, '/turret_manuel_cmd', turret_qos)
         self.silah_ates_pub = self.surus_node.create_publisher(Bool, '/silah_ates_manuel', 10)
 
         # --- YENİ: Düz gidişte otomatik yön düzeltme (araç tarafı gyro-PID)
@@ -131,6 +187,12 @@ class TelemetriThread(QThread):
         # AÇIK başlıyor, kullanıcı sahada beklenmedik davranış görürse tek
         # tıkla kapatabilsin diye (bkz. main.py _yon_pid_butonu_ekle). ---
         self.yon_pid_pub = self.surus_node.create_publisher(Bool, '/yon_pid_aktif', 10)
+
+        # --- FARLAR (2026-09-01, kullanıcı isteği): F tuşuna basınca AÇIK/
+        # KAPALI arasında geçiş yapıp /farlar topic'ine (Bool) yayınlanıyor -
+        # araç tarafındaki farlar/GPIO-röle düğümü bunu dinleyip fiziksel
+        # farları sürecek (bkz. main.py keyPressEvent, farlar_ayarla). ---
+        self.farlar_pub = self.surus_node.create_publisher(Bool, '/farlar', 10)
 
         # --- Genel telemetri/gosterge dugumu (SADECE abonelikler - gecikmesi
         # sürüşü ASLA etkilemez, ayri node'da oldugu icin) ---
@@ -172,6 +234,17 @@ class TelemetriThread(QThread):
         self.node.create_subscription(Float32, '/turret_hedef_mesafe', self.hedef_mesafe_cb, 10)
         self.son_lidar_zamani = 0.0
         self.anlik_lidar_durumu = None
+        # HIZ CANLILIK KONTROLU (2026-09-01, kullanıcı isteği: "hız verisi
+        # gelmiyorken her zaman 0 yazsın") - eskiden hiz_cb/odom_cb SADECE
+        # yeni veri geldiğinde hiz_sinyali yayınlıyordu; veri kesilince
+        # (araç Jetson kapandı/bağlantı gitti) ekranda EN SON gelen değer
+        # SONSUZA KADAR asılı kalıyordu (ör. "3.2 m/s" araç durduktan/
+        # bağlantı kesildikten SONRA bile öylece duruyordu - yanıltıcı).
+        # Diğer heartbeat'lerle (lidar/imu/gps, hemen altta/yukarıda) AYNI
+        # desen: surekli_yayin_dongusu (0.1sn) tazelik kontrolü yapıp veri
+        # durunca BİR KEZ "0.0 m/s" yayınlıyor (bkz. aşağıda).
+        self.son_hiz_zamani = 0.0
+        self.anlik_hiz_canli = None
         self.son_imu_zamani = 0.0
         self.anlik_imu_durumu = None
         self.son_otonom_zamani = 0.0
@@ -203,7 +276,20 @@ class TelemetriThread(QThread):
         # --- YENİ EKLENEN: SİSTEM MERKEZİ WATCHDOG TAKİBİ ---
         self.son_telemetri_zamani = 0.0  # İlk açılışta çevrimdışı (PASİF) başlasın
         # ----------------------------------------------------
-        
+
+        # 2026-09-04, kullanıcı: "arayüzden veri bazen çok geç gidiyor,
+        # arayüzü kapat aç yapınca düzeliyor" - ntrip_rtk_sistemi.py'de
+        # DAHA ÖNCE bulunan "zombi thread" deseniyle AYNI kök neden
+        # şüphesi: DDS/rclpy bağlantısı sessizce bozulabiliyor, thread
+        # isRunning()=True kalmaya devam ediyor, tek çare tüm uygulamayı
+        # kapatıp açmaktı. son_telemetri_zamani SADECE araçtan veri
+        # GELİNCE güncelleniyor (araç bağlı değilken de doğal olarak
+        # bayatlar - "zombi" ile "araç kapalı" ayırt edilemez). Bu yeni
+        # nabız ise run()'daki spin döngüsünün HER TURUNDA (veri gelse de
+        # gelmese de) güncelleniyor - main.py'deki bekçi bunu kullanıyor
+        # (bkz. _telemetri_bekci_kontrol, NTRIP'teki AYNI desen).
+        self.son_nabiz_zamani = time.time()
+
         # UBIQUITI LINK KALITESI: ROS'tan gelen bir sey degil, arac Jetson'a
         # periyodik ping atarak olculuyor (bkz. _wifi_kontrol). ONEMLI: bu
         # ROS2 timer'i (create_timer) DEGIL, ayri bir thread - ping
@@ -224,10 +310,12 @@ class TelemetriThread(QThread):
 
     def hiz_cb(self, msg):
         self.son_telemetri_zamani = time.time() # Veri geldi, kalp atışı güncellendi!
+        self.son_hiz_zamani = self.son_telemetri_zamani
         self.hiz_sinyali.emit(f"{round(msg.data, 1)} m/s")
 
     def odom_cb(self, msg):
         self.son_telemetri_zamani = time.time()  # Veri geldi, kalp atışı güncellendi!
+        self.son_hiz_zamani = self.son_telemetri_zamani
         hiz = abs(msg.twist.twist.linear.x)
         self.hiz_sinyali.emit(f"{round(hiz, 1)} m/s")
 
@@ -266,7 +354,18 @@ class TelemetriThread(QThread):
 
     def guncel_etap_cb(self, msg):
         self.son_telemetri_zamani = time.time()
-        self.etap_sinyali.emit(str(msg.data))
+        # 2026-09-04, kullanici istegi: "stop tabelasini gorunce etap
+        # kisminda stop yazmali, 11in endinde de oyle olmali, digerleri
+        # sayi zaten direkt" - tabela_etap_yoneticisi.py (arac) artik Stop/
+        # EndOfEleven icin de /guncel_etap'e negatif sentinel degerler
+        # yayinliyor (Int32 tipi DEGISMEDI, bkz. o dosya). Burada metne
+        # ceviriyoruz; 1-11 arasi HER ZAMANKI GIBI dogrudan sayi.
+        if msg.data == -1:
+            self.etap_sinyali.emit("STOP")
+        elif msg.data == -2:
+            self.etap_sinyali.emit("BİTİŞ")
+        else:
+            self.etap_sinyali.emit(str(msg.data))
 
     def gps_raw_cb(self, msg):
         # /mavros/gpsstatus/gps1/raw (GPSRAW) -- gercek GNSS fix kalitesi.
@@ -383,6 +482,20 @@ class TelemetriThread(QThread):
         mod_msg.data = self.arac_modu
         self.mod_pub.publish(mod_msg)
 
+        # DUZELTME (2026-09-05, kullanici istegi: "araçtaki manuel otonom
+        # geçiş fiziksel tuşu ... silah manuel otonom geçiş tuşu yap") -
+        # eskiden burada KOŞULSUZ "MANUEL" yayınlanıyordu, silah/turret'in
+        # KENDİ otonom (YOLO ile hedef takibi) yeteneği turret_node.py'de
+        # HAZIR olsa da hiç kullanılamıyordu. Artık aynı fiziksel "Manuel <->
+        # Otonom" düğmesi (D9, bkz. _panel_mod_toggle) HEM araç sürüşünü HEM
+        # silahı BİRLİKTE değiştiriyor - turret_node.py zaten KENDİ İÇİNDE
+        # güvenlik önlemi alıyor (OTONOM'dan çıkışta lazer anında kapanır,
+        # PID/hedef takibi sıfırlanır, bkz. o dosyadaki _mod_cb). mod_pub
+        # gibi her turda tekrar yayınlanır (ucuz, String) - turret_node.py
+        # bu topic'i görmezse manuel komutları yok sayar.
+        if self.silah_modu_pub is not None:
+            self.silah_modu_pub.publish(String(data=self.arac_modu))
+
         # --- OTONOM/MANUEL MOD DURUMU ---
         # Otonom: goal_manager_node heartbeat'i geliyor mu (Nav2/goal_manager
         # yigini calisiyor mu). Manuel: arduino_motor_kontrol.py'nin seri
@@ -394,15 +507,37 @@ class TelemetriThread(QThread):
             self.mod_durum_sinyali.emit(otonom_hazir, self.manuel_hazir)
         # ----------------------------------------------
 
+        # --- HIZ CANLILIK KONTROLU (gercek /arac_hiz veya /odom heartbeat'i) ---
+        # bkz. __init__'teki not - veri kesilince (son_hiz_zamani bayatlayinca)
+        # gosterge "0.0 m/s"a ZORLANIYOR, eski deger asili KALMIYOR. Diger
+        # heartbeat'lerle AYNI "durum degisince BIR KEZ yayinla" deseni.
+        hiz_canli_mi = (time.time() - self.son_hiz_zamani) < 1.0
+        if hiz_canli_mi != self.anlik_hiz_canli:
+            self.anlik_hiz_canli = hiz_canli_mi
+            if not hiz_canli_mi:
+                self.hiz_sinyali.emit("0.0 m/s")
+        # ------------------------------------------------------------
+
         # --- LIDAR CANLILIK KONTROLU (gercek /scan heartbeat'i) ---
-        lidar_canli_mi = (time.time() - self.son_lidar_zamani) < 1.0
+        # DÜZELTME (2026-09-05, kullanıcı: "imu lidar pasif gösteriyor" -
+        # canlı defalarca doğrulandı: /scan VE /imu/data ağda HER ZAMAN
+        # sağlıklı akıyordu (ros2 topic hz ile ayrı ayrı ölçüldü) - sorun
+        # veri değil, bu eşikti. 1.0sn eşiği ÇOK SIKI: bu thread'in
+        # executor'ı (spin_once) diğer thread'lerle (kamera/terminal/vb.)
+        # GIL paylaşırken ara sıra 1sn'yi hafif aşan kısa duraksamalar
+        # yaşayabiliyor (bu oturumda defalarca ölçülen GENEL GIL çekişmesi
+        # deseniyle TUTARLI) - bu, veri KESİLMEDEN gösterge yanlışlıkla
+        # "PASİF" yanıp sönmesine yetiyordu. GPS'in KENDİ tazelik kontrolü
+        # zaten 3.0sn kullanıyor (bkz. gps_canli_mi) - aynı toleransa
+        # çekiliyor, gerçek bir kopma (3sn+) hâlâ doğru yakalanır.
+        lidar_canli_mi = (time.time() - self.son_lidar_zamani) < 3.0
         if lidar_canli_mi != self.anlik_lidar_durumu:
             self.anlik_lidar_durumu = lidar_canli_mi
             self.lidar_durum_sinyali.emit(lidar_canli_mi)
         # ------------------------------------------------------------
 
         # --- IMU CANLILIK KONTROLU (gercek /imu/data heartbeat'i) ---
-        imu_canli_mi = (time.time() - self.son_imu_zamani) < 1.0
+        imu_canli_mi = (time.time() - self.son_imu_zamani) < 3.0
         if imu_canli_mi != self.anlik_imu_durumu:
             self.anlik_imu_durumu = imu_canli_mi
             self.imu_durum_sinyali.emit(imu_canli_mi)
@@ -419,7 +554,16 @@ class TelemetriThread(QThread):
             self.gps_durum_sinyali.emit(gps_etkin)
         # ------------------------------------------------------------
 
-        if self.arac_modu == "MANUEL":
+        # ÇAKIŞMA ÖNLEME (2026-09-06): kontrol paneli artık AYRI BİR
+        # PROCESS'te (kontrol_paneli_node.py) çalışıyor ve JOYSTICK ile
+        # sürerken /palet_hizlari'nı DOĞRUDAN o yayınlıyor. Bu döngü de
+        # aynı topic'e yayın yapmaya devam ederse İKİ YAYINCI çakışır -
+        # arayüz tarafında joystick verisi olmadığı için burada PWM 0
+        # kalır ve araç titrer/durur (canlı ölçümde yakalandı: hedef
+        # 100ms yerine 49.8ms aralık = iki kaynak). Bu yüzden sürüş
+        # kaynağı JOYSTICK iken burası SUSAR; KLAVYE ile sürüşte
+        # (surus_kaynagi != "JOYSTICK") eskisi gibi yayınlamaya devam eder.
+        if self.arac_modu == "MANUEL" and self.surus_kaynagi != "JOYSTICK":
             if (self.anlik_sol_pwm != 0.0 or self.anlik_sag_pwm != 0.0):
                 if (time.time() - self.son_komut_zamani) > self.guvenlik_zaman_asimi:
                     self.anlik_sol_pwm = 0.0
@@ -437,16 +581,20 @@ class TelemetriThread(QThread):
         palet_msg.data = [-float(self.anlik_sol_pwm), -float(self.anlik_sag_pwm)]
         self.palet_pub.publish(palet_msg)
 
-    def pwm_ust_sinirini_ayarla(self, deger):
-        # Ayarlar ekranindaki (eski "Telefon") kutudan gelir. Alt sinir
-        # (85 - motorlarin fiziksel olarak donmeye basladigi deger) SABIT;
-        # sadece ust sinir (kolay surus icin tavan hiz) degistirilebilir.
+    def pwm_ust_sinirini_ayarla(self, deger, sessiz=False):
+        # Ayarlar ekranindaki kutudan VEYA yer istasyonu kontrol panelindeki
+        # potansiyometreden (A5) gelir. Alt sinir (85 - motorlarin fiziksel
+        # olarak donmeye basladigi deger) SABIT; sadece ust sinir (kolay
+        # surus icin tavan hiz) degistirilebilir.
+        # sessiz=True: potansiyometre canli cevrilirken her adimda log
+        # satiri basilmasin diye (kutu/OSD guncellemesini cagiran yapar).
         deger = max(self.pwm_alt_sinir, min(255.0, float(deger)))
         self.pwm_ust_sinir = deger
         # Klavye kademeleri yeni tavani asmasin.
         self.sol_hiz_kademesi = min(self.sol_hiz_kademesi, deger)
         self.sag_hiz_kademesi = min(self.sag_hiz_kademesi, deger)
-        self.log_yaz(f"🎚️ PWM üst sınırı {deger:.0f} olarak ayarlandı.")
+        if not sessiz:
+            self.log_yaz(f"🎚️ PWM üst sınırı {deger:.0f} olarak ayarlandı.")
         return deger
 
     def _pwm_olcekle(self, oran):
@@ -467,39 +615,51 @@ class TelemetriThread(QThread):
         # watchdog zaman damgasini guncelliyoruz.
         if self.arac_modu != "MANUEL" or self.surus_kaynagi != "JOYSTICK":
             return
-        # GECICI paylasimli joystick: hedef SILAH iken araca HICBIR komut
-        # gitmesin (fiziksel joystick su an silah nisanlamak icin kullaniliyor).
-        if self.joystick_hedefi != "ARAC":
-            return
+        # NOT: eskiden burada "joystick_hedefi != ARAC ise dur" kontrolu vardi
+        # (tek joystick araç/silah arasinda paylasiliyordu). Yer istasyonu
+        # kontrol panelinde araç (sol joystick) ve silah (sag joystick) AYRI
+        # oldugundan bu paylasim kaldirildi - bkz. kontrol_paneli_sistemi.py.
         self.son_komut_zamani = time.time()
         self.anlik_sol_pwm = self._pwm_olcekle(float(sol_oran))
         self.anlik_sag_pwm = self._pwm_olcekle(float(sag_oran))
 
     def joystick_hedefini_ayarla(self, hedef):
-        # hedef: "ARAC" veya "SILAH". Degisirken araci guvenli tarafta
-        # birak: SILAH'a gecerken araç PWM'i hemen sifirla (joystick artik
-        # ona komut gondermeyecek, eski deger PALET'te takili kalmasin).
-        if hedef == self.joystick_hedefi:
-            return
+        # KULLANIM DISI: yer istasyonu kontrol panelinde araç/silah AYRI
+        # joystick'lerde (bkz. kontrol_paneli_sistemi.py). Geriye donuk
+        # uyumluluk icin no-op birakildi.
         self.joystick_hedefi = hedef
-        if hedef == "SILAH":
-            self.anlik_sol_pwm = 0.0
-            self.anlik_sag_pwm = 0.0
-            if self.silah_modu_pub is not None:
-                self.silah_modu_pub.publish(String(data="MANUEL"))
+
+    def silah_manuel_moduna_al(self):
+        # turret_node.py manuel turret komutlarini + manuel atesi ancak
+        # /silah_modu == "MANUEL" iken kabul eder. Eskiden bu sadece
+        # "HEDEF: SILAH"a gecince yayinlaniyordu; kontrol panelinde sag
+        # joystick her zaman silahi kontrol ettiginden acilista + her
+        # surekli_yayin_dongusu turunda yayinlanir.
+        if self.silah_modu_pub is not None:
+            self.silah_modu_pub.publish(String(data="MANUEL"))
 
     def joystick_turret_gonder(self, x, y):
-        # surus_joystick_sistemi.py'den gelen HAM x/y (tank karisimi
-        # ONCESI) - aracin joystick kalibrasyonu (merkez/olu bolge/oto-
-        # merkezleme/guvenlik siniri) zaten uygulanmis durumda, silah icin
-        # ayrica kalibrasyona gerek yok. turret_node.py bunu Twist.linear.x
+        # kontrol_paneli_sistemi.py'den gelen HAM x/y (sag joystick) -
+        # kalibrasyonu (merkez/olu bolge/oto-merkezleme/guvenlik siniri)
+        # zaten uygulanmis durumda. turret_node.py bunu Twist.linear.x
         # (pan) / linear.y (tilt) olarak bekliyor (bkz. _manuel_cmd_cb).
-        if self.joystick_hedefi != "SILAH" or self.turret_cmd_pub is None:
+        # Sürüş modundan BAGIMSIZ - silah OTONOM sürüşte de nisan alabilir.
+        if self.turret_cmd_pub is None:
             return
         msg = Twist()
         msg.linear.x = float(x)
         msg.linear.y = float(y)
-        self.turret_cmd_pub.publish(msg)
+        try:
+            self.turret_cmd_pub.publish(msg)
+        except Exception:
+            # KAPANIŞ YARIŞI (2026-09-06): bu metot artık Qt.DirectConnection
+            # ile KontrolPaneliThread'in KENDİ thread'inden çağrılıyor - kapanış
+            # sırasında ROS2 context'i kapandıktan sonra son bir joystick
+            # örneği gelirse rclpy "publisher's context is invalid" fırlatır
+            # (canlı logda yakalandı). closeEvent artık kontrol panelini ÖNCE
+            # durduruyor ama bu, o yarışa karşı ikinci/kesin katman - kapanan
+            # bir uygulamada tek bir turret komutunun düşmesi zararsız.
+            pass
 
     def silah_ates_ayarla(self, aktif: bool):
         if self.silah_ates_pub is None:
@@ -510,6 +670,12 @@ class TelemetriThread(QThread):
         if self.yon_pid_pub is None:
             return
         self.yon_pid_pub.publish(Bool(data=bool(aktif)))
+
+    def farlar_ayarla(self, acik: bool):
+        if self.farlar_pub is None:
+            return
+        self.farlar_pub.publish(Bool(data=bool(acik)))
+        self.log_yaz(f"💡 Farlar: {'AÇIK' if acik else 'KAPALI'} (/farlar yayınlandı)")
 
     def hareket_emri_gonder(self, yon):
         if self.cmd_pub is None:
@@ -635,6 +801,21 @@ class TelemetriThread(QThread):
         executor.add_node(self.node)
         try:
             while rclpy.ok() and self.calisiyor:
+                self.son_nabiz_zamani = time.time()  # bkz. __init__'teki not
                 executor.spin_once(timeout_sec=0.05)
         finally:
             executor.remove_node(self.node)
+
+    def durdur(self):
+        # 2026-09-04, kullanici: "arayüzün bir anda çökmemesi lazım" -
+        # diger worker thread'lerdeki (Ros2GcsMotoru.stop, NtripRtkThread.
+        # durdur, KontrolPaneliThread.durdur) desenle TUTARLI: quit()+
+        # wait() ile run()'un GERCEKTEN bitmesini bekliyoruz, aksi halde
+        # uygulama kapanirken bu QThread hala calisirken yok edilebilir
+        # (Qt "QThread: Destroyed while thread is still running" ile
+        # sessizce coker - bkz. main.py closeEvent).
+        self._wifi_thread_calisiyor = False
+        self._surus_thread_calisiyor = False
+        self.calisiyor = False
+        self.quit()
+        self.wait()

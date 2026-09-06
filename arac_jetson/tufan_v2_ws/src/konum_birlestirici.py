@@ -83,6 +83,31 @@ duzeltilmesinin sonucudur:
    *** heading_offset turetme yonu/isareti (bkz. _enu_to_odom yorumu),
    *** gps_correction_max_speed_mps varsayilani (0.05 m/s - cok yavas/hizli
    *** olabilir), h_acc alaninin bu donanimda gercekten dolduruldugu. ***
+
+5) RF2O KALP ATIŞI (2026-09-04, kullanici: "odometride kaymalar var" +
+   "hiz gostergesi calismiyor" - canli testte DOGRULANDI): rf2o_laser_
+   odometry process AYAKTA ama /odom_rf2o yayinini KESMISTI (echo ile hem
+   arac Jetson'da hem arayuzde SIFIR mesaj dogrulandi, grafikte ayrica
+   "2 ayni isimli node" hayalet kaydi vardi). _rf2o_cb bir daha hic
+   cagrilmadigi icin _son_vx SONSUZA KADAR DONMUS kaliyordu, _tick() bunu
+   kosulsuz entegre edip saatler icinde /odom pozisyonunu km mertebesinde
+   SAHTE bir surunmeye tasidi, hiz gostergesi de hep ayni donmus degeri
+   gosterdi. NTRIP'te daha once bulunan "zombi thread" ile AYNI kategori
+   hata - simdi rf2o_stale_timeout_sec (varsayilan 1.0sn) icinde yeni
+   /odom_rf2o mesaji gelmezse hiz 0 sayilir (bkz. _rf2o_cb/_tick).
+
+6) CM HASSASIYETINE HIZLI YAKINSAMA (2026-09-05, kullanici: "gps olayini
+   cozelim cm hassasiyetinde veri alalim konum tahmini yapalim" - RTK
+   Fixed canli olcumde h_acc=32mm veriyordu ama pratikte cok yavas
+   kullaniliyordu): iki ayar degisikligi -
+   a) gps_heading_samples_needed 30'dan 15'e indirildi - heading_offset
+      (odom<->gercek dunya hizalamasi) artik yariya inen surede kilitleniyor.
+   b) YENI: gps_correction_max_speed_mps_fixed (varsayilan 0.3 m/s) -
+      duzeltme hedefi RTK FIXED (fix_type>=gps_fixed_fix_type, varsayilan
+      6) kalitesindeyken bu HIZLI oran kullanilir; Float (5) kalitesindeyken
+      eski temkinli gps_correction_max_speed_mps (0.05 m/s) hala gecerli -
+      Fixed<->Float arasi gecislerde hiz da otomatik degisir (bkz.
+      _apply_gps_correction, self._gps_target_fix_type).
 """
 
 import math
@@ -94,7 +119,7 @@ from rclpy.qos import qos_profile_sensor_data
 from geometry_msgs.msg import Quaternion, TransformStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu, NavSatFix
-from std_msgs.msg import Float64
+from std_msgs.msg import Float64, String
 from tf2_ros import TransformBroadcaster
 
 try:
@@ -213,15 +238,46 @@ class KonumBirlestirici(Node):
         self._vx_deadband = self.get_parameter('vx_deadband_mps').value
 
         # --- GPS parametreleri (bkz. dosya basi "4) GPS" notu) ---
+        # DUZELTME (2026-09-05, kullanici: "gps olayini cozelim cm
+        # hassasiyetinde veri alalim konum tahmini yapalim") - RTK Fixed
+        # (fix_type=6) canli olcumde h_acc=32mm (cm mertebesinde) veriyor,
+        # ama eskiden HEM heading_offset kilitlenmesi (30 ornek, yavas)
+        # HEM DE duzeltmenin kendisi (0.05 m/s - 1 metrelik hatayi
+        # duzeltmek 20 SANIYE surer) cok temkinliydi - Fixed kalitesindeki
+        # veriyi elde ETSEK BILE ondan pratikte cok yavas faydalaniyorduk.
+        # Iki degisiklik: (1) heading_offset artik yariya inen ornek
+        # sayisiyla (15) kilitleniyor - hala istatistiksel olarak guvenilir
+        # (dairesel ortalama), ama 2 KAT daha hizli devreye giriyor. (2)
+        # RTK Fixed (>=6) ozelinde AYRI, cok daha hizli bir duzeltme hizi
+        # (0.3 m/s) kullaniliyor - Float (5) kalitesinde eski/temkinli hiz
+        # (0.05 m/s) korunuyor (Float ondaklik-metre mertebesinde daha az
+        # guvenilir, "teleport" riskine karsi temkinli kalinmali) - Fixed
+        # geldiginde konum GERCEKTEN cm hassasiyetine hizla yakinsıyor,
+        # Fixed kaybolup Float'a dusulunce otomatik olarak yine yavaslıyor.
         self.declare_parameter('gps_anchor_min_fix_type', 5)  # RTK Float+
         self.declare_parameter('gps_anchor_samples_needed', 5)
         self.declare_parameter('gps_correct_min_fix_type', 5)  # RTK Float+
         self.declare_parameter('gps_correct_max_h_acc_m', 0.5)
         self.declare_parameter('gps_correct_max_age_sec', 3.0)
-        self.declare_parameter('gps_correction_max_speed_mps', 0.05)
+        self.declare_parameter('gps_correction_max_speed_mps', 0.05)  # Float kalitesi icin (temkinli)
+        self.declare_parameter('gps_correction_max_speed_mps_fixed', 0.3)  # RTK Fixed icin (cm hassasiyetine hizli yakinsama)
+        self.declare_parameter('gps_fixed_fix_type', 6)  # RTK Fixed'in gercek fix_type degeri
+        # DUZELTME (2026-09-05, canli bildirildi: "arac hareket ederken"
+        # fark surekli BUYUYORDU - 522cm->621cm gibi - kanit: h_acc zaten
+        # 22mm (2.2cm, COK guvenilir) idi ama hiz SADECE fix_type'a (Float=
+        # 5cm/s sabit) bagliydi, GERCEK olcum kalitesine (h_acc) DEGIL.
+        # Dead-reckoning hatasi hareket ederken (yaw/olcek hatasi mesafeyle
+        # katlanarak buyudugu icin) duzeltme hizindan DAHA HIZLI birikiyordu.
+        # Kullanici onerisi: h_acc kucukse (COK dogru GPS ornegi) fix_type
+        # Float bile olsa RTK Fixed hizina (0.3 m/s) guvenilsin - GERCEK
+        # dogruluk gostergesi h_acc'in KENDISI, fix_type sadece kategorik
+        # bir etiket. "Teleport" riski YOK cunku hedefe hala DOGRUDAN
+        # atlanmiyor, sadece cekme HIZI artiyor (ust sinir yine Fixed
+        # hizinin AYNISI - asirilastirilmadi).
+        self.declare_parameter('gps_hizli_h_acc_esik_m', 0.05)  # 5cm - bu altindaki h_acc Fixed hizina guvenir
         self.declare_parameter('gps_heading_min_fix_type', 3)  # 3D fix yeter
         self.declare_parameter('gps_heading_min_speed_mps', 0.3)
-        self.declare_parameter('gps_heading_samples_needed', 30)
+        self.declare_parameter('gps_heading_samples_needed', 15)
 
         self._anchor_min_fix = self.get_parameter('gps_anchor_min_fix_type').value
         self._anchor_samples_needed = self.get_parameter('gps_anchor_samples_needed').value
@@ -229,13 +285,37 @@ class KonumBirlestirici(Node):
         self._correct_max_h_acc = self.get_parameter('gps_correct_max_h_acc_m').value
         self._correct_max_age = self.get_parameter('gps_correct_max_age_sec').value
         self._correction_max_speed = self.get_parameter('gps_correction_max_speed_mps').value
+        self._correction_max_speed_fixed = self.get_parameter('gps_correction_max_speed_mps_fixed').value
+        self._fixed_fix_type = self.get_parameter('gps_fixed_fix_type').value
+        self._hizli_h_acc_esik = self.get_parameter('gps_hizli_h_acc_esik_m').value
         self._heading_min_fix = self.get_parameter('gps_heading_min_fix_type').value
         self._heading_min_speed = self.get_parameter('gps_heading_min_speed_mps').value
         self._heading_samples_needed = self.get_parameter('gps_heading_samples_needed').value
+        self._gps_target_fix_type = 0  # en son duzeltme hedefinin geldigi fix_type - hangi hizin kullanilacagini belirler
+        self._gps_target_h_acc = None  # en son duzeltme hedefinin h_acc'i (metre) - None ise bilinmiyor
 
         self._son_imu_orientation = None
         self._son_imu_wz = 0.0
         self._son_vx = 0.0
+        # DUZELTME (2026-09-04, kullanici: "odometride kaymalar var" +
+        # "hiz gostergesi calismiyor") - CANLI TESTTE TESPIT EDILDI: rf2o_
+        # laser_odometry process AYAKTA (CPU tuketiyor) ama /odom_rf2o
+        # yayinlamayi durdurmus (echo ile DOGRULANDI: hem arac Jetson'da
+        # hem arayuzde SIFIR mesaj - ustelik grafikte "2 ayni isimli
+        # rf2o_laser_odometry node" uyarisi da var, hayalet/takili bir
+        # kayit). _rf2o_cb bir daha HIC CAGRILMIYOR, ama _son_vx eskiden
+        # HICBIR ZAMAN ESKIMEZ sayilirdi - _tick() bu DONMUS (ornegin
+        # 0.796 m/s) degeri SONSUZA KADAR entegre etti: saatlerce calisan
+        # bir node'da bu, /odom pozisyonunu km mertebesinde SAHTE bir
+        # surunmeye tasidi (canli /odom'da x=179->158, y=4149->4285 gibi
+        # gercek disi degerler DOGRULANDI) VE hiz gostergesi hep ayni
+        # DONMUS degeri gosterdi (gercek surusu yansitmiyordu). NTRIP'teki
+        # "zombi thread" ile AYNI KATEGORIDE hata (bu oturumda daha once
+        # bulunup duzeltildi) - simdi buraya da ayni kalp atisi/heartbeat
+        # deseni uygulaniyor.
+        self._son_rf2o_zamani = None
+        self.declare_parameter('rf2o_stale_timeout_sec', 1.0)
+        self._rf2o_stale_timeout = self.get_parameter('rf2o_stale_timeout_sec').value
 
         # dead-reckoning durumu (odom cercevesinde, baslangic = 0,0)
         self._x = 0.0
@@ -274,6 +354,17 @@ class KonumBirlestirici(Node):
                 'mavros_msgs bulunamadi - GPS surunme duzeltmesi DEVRE DISI, '
                 'sadece dead-reckoning calisiyor.')
 
+        # DÜZELTME (2026-09-05, kullanıcı: "gpsin konum tahminine olan
+        # katkısı da yazılsın arayüzde taktik lidar ekranında") - eskiden
+        # GPS'in konum uzerindeki ETKISI hicbir yerde GORUNMUYORDU -
+        # kullanici sadece fix_type/h_acc goruyordu, "bu bilgi konumu
+        # GERCEKTEN duzeltiyor mu, ne kadar?" sorusuna cevap yoktu. Bu
+        # topic, _apply_gps_correction'in HER adimda ne yaptigini
+        # (bekliyor mu, ne kadar/hangi hizla duzeltiyor, kalan hata ne
+        # kadar) insan-okunur bir metin olarak yayinlar - arayuz
+        # (harita_sistemi.py -> TaktikRadarEkrani) bunu dogrudan gosterir.
+        self._katki_pub = self.create_publisher(String, '/gps_katki_durumu', 10)
+
         self._pub = self.create_publisher(Odometry, '/odom', 10)
         self._tf_broadcaster = TransformBroadcaster(self)
 
@@ -292,6 +383,7 @@ class KonumBirlestirici(Node):
         self._son_imu_wz = msg.angular_velocity.z
 
     def _rf2o_cb(self, msg: Odometry):
+        self._son_rf2o_zamani = self.get_clock().now()
         vx = self._vx_sign * msg.twist.twist.linear.x
         if abs(vx) < self._vx_deadband:
             vx = 0.0
@@ -380,24 +472,60 @@ class KonumBirlestirici(Node):
         gx, gy = _enu_to_odom(east, north, self._heading_offset)
         self._gps_target = (gx, gy)
         self._gps_target_time = self.get_clock().now()
+        self._gps_target_fix_type = msg.fix_type
+        self._gps_target_h_acc = (msg.h_acc / 1000.0) if msg.h_acc > 0 else None
+
+    def _gps_katki_yayinla(self, metin):
+        # bkz. __init__'teki 2026-09-05 notu - kullanicinin arayuzde
+        # gormesi icin GPS'in konum uzerindeki ETKISINI insan-okunur bir
+        # metin olarak yayinlar.
+        if self._katki_pub is not None:
+            self._katki_pub.publish(String(data=metin))
 
     def _apply_gps_correction(self, now, dt):
+        if self._heading_offset is None:
+            self._gps_katki_yayinla("GPS katkısı YOK - yön hizalaması bekleniyor (düz sürüş gerekli)")
+            return
+        if self._anchor is None:
+            self._gps_katki_yayinla("GPS katkısı YOK - referans nokta (anchor) bekleniyor")
+            return
         if self._gps_target is None or self._gps_target_time is None:
+            self._gps_katki_yayinla("GPS katkısı YOK - henüz düzeltme hedefi yok")
             return
         age = (now - self._gps_target_time).nanoseconds / 1e9
         if age > self._correct_max_age:
+            self._gps_katki_yayinla("GPS katkısı DURDU - veri bayatladı (kalite düştü)")
             return  # hedef bayatlamis, GPS kalitesi dustu - duzeltmeyi durdur
 
         ex = self._gps_target[0] - self._x
         ey = self._gps_target[1] - self._y
         err_mag = math.hypot(ex, ey)
         if err_mag < 1e-6:
+            self._gps_katki_yayinla("GPS katkısı: konum zaten hizalı (fark yok)")
             return
         # SINIRLI duzeltme: hedefe DOGRUDAN ATLAMA YOK, sabit bir "duzeltme
         # hizi" ile cekilir (bkz. dosya basi 4b notu - "teleport" onleme).
-        step = min(err_mag, self._correction_max_speed * dt)
+        # HIZ SECIMI (2026-09-05, bkz. __init__'teki not): hedef RTK Fixed
+        # kalitesindeyken (cm hassasiyeti GERCEK) cok daha hizli, Float
+        # kalitesindeyken (daha az guvenilir) eski temkinli hizla cekilir -
+        # Fixed<->Float arasinda gecis oldukca hiz da otomatik degisir.
+        fixed_mi = self._gps_target_fix_type >= self._fixed_fix_type
+        h_acc_iyi_mi = (self._gps_target_h_acc is not None and
+                        self._gps_target_h_acc <= self._hizli_h_acc_esik)
+        hizli_mi = fixed_mi or h_acc_iyi_mi
+        hiz = self._correction_max_speed_fixed if hizli_mi else self._correction_max_speed
+        step = min(err_mag, hiz * dt)
         self._x += ex / err_mag * step
         self._y += ey / err_mag * step
+        if fixed_mi:
+            kalite = "RTK FIXED (cm)"
+        elif h_acc_iyi_mi:
+            kalite = f"RTK FLOAT (h_acc {self._gps_target_h_acc*100:.1f}cm - guvenilir)"
+        else:
+            kalite = "RTK FLOAT"
+        self._gps_katki_yayinla(
+            f"GPS katkısı: {kalite} ~{hiz*100:.0f}cm/sn ile düzeltiliyor "
+            f"(kalan fark {err_mag*100:.0f}cm)")
 
     def _tick(self):
         if self._son_imu_orientation is None:
@@ -414,9 +542,22 @@ class KonumBirlestirici(Node):
             # entegre etme, sadece zaman damgasini guncelle.
             return
 
+        # RF2O KALP ATIŞI DENETİMİ (bkz. __init__'teki not) - _son_vx
+        # zamanında hiç güncellenmemişse (rf2o hiç konuşmadı) VEYA
+        # rf2o_stale_timeout_sec'ten uzun süredir yeni mesaj gelmemişse
+        # (rf2o takılı/donmuş, node hâlâ ayakta ama yayın kesilmiş),
+        # DONMUŞ hızı entegre etmek yerine hızı sıfır say - araç GERÇEKTEN
+        # duruyor gibi davranır (KAYMASIZ), rf2o geri gelince otomatik
+        # olarak taze hıza döner.
+        rf2o_taze_mi = (
+            self._son_rf2o_zamani is not None and
+            (now - self._son_rf2o_zamani).nanoseconds / 1e9 <= self._rf2o_stale_timeout
+        )
+        vx_kullan = self._son_vx if rf2o_taze_mi else 0.0
+
         yaw = _yaw_of(self._son_imu_orientation)
-        self._x += self._son_vx * math.cos(yaw) * dt
-        self._y += self._son_vx * math.sin(yaw) * dt
+        self._x += vx_kullan * math.cos(yaw) * dt
+        self._y += vx_kullan * math.sin(yaw) * dt
 
         if _MAVROS_MEVCUT:
             self._apply_gps_correction(now, dt)
@@ -431,7 +572,7 @@ class KonumBirlestirici(Node):
         cikis.pose.pose.position.y = self._y
         cikis.pose.pose.position.z = 0.0
         cikis.pose.pose.orientation = self._son_imu_orientation
-        cikis.twist.twist.linear.x = self._son_vx
+        cikis.twist.twist.linear.x = vx_kullan
         cikis.twist.twist.angular.z = self._son_imu_wz
         self._pub.publish(cikis)
 

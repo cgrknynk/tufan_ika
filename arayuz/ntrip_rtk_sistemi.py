@@ -25,13 +25,14 @@ Kullanim:
     thread.start()
 """
 import base64
+import concurrent.futures
 import socket
 import time
 
 try:
     import rclpy
     from rclpy.node import Node
-    from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
+    from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, qos_profile_sensor_data
     from mavros_msgs.msg import RTCM
     from std_msgs.msg import Header
     from sensor_msgs.msg import NavSatFix
@@ -41,6 +42,7 @@ except Exception:
     QoSProfile = None
     QoSReliabilityPolicy = None
     QoSHistoryPolicy = None
+    qos_profile_sensor_data = None
     RTCM = None
     Header = None
     NavSatFix = None
@@ -66,7 +68,15 @@ MAKS_PARCA_BOYUTU = 700
 # Arac Jetson'daki mavros'un yayinladigi GERCEK GPS konumu - bu Jetson'da
 # GPS olmadigindan, VRSRTCM34 (konum tabanli VRS duzeltmesi) icin GGA/RMC
 # uretmek adina buradan lat/lon/alt okunur.
-ARAC_GPS_TOPIC = "/fix"
+# DUZELTME (2026-09-01, canli bulundu): "/fix" hicbir zaman yayinlanmiyor
+# (Publisher count: 0, canli dogrulandi) - bu, tum RTK oturumu boyunca
+# GERCEK konum yerine asagidaki VARSAYILAN_ENLEM/BOYLAM (Ankara) yer
+# tutucusunun kullanildigi anlamina geliyordu (VRS yine de RTK Float elde
+# etti ama GERCEK konumla CESITLENMIS/daha dogru bir duzeltme alinabilirdi).
+# konum_birlestirici.py (arac tarafi) AYNI sorunu daha once cozmustu -
+# dogrudan mavros'un kendi yayinladigi "/mavros/global_position/raw/fix"
+# kullaniliyor (bkz. o dosyadaki "koprusune BAGIMLI DEGILIZ" notu).
+ARAC_GPS_TOPIC = "/mavros/global_position/raw/fix"
 
 # KRITIK: VRSRTCM34 1Hz GGA+RMC bekliyor - 10sn'de bir gonderim akisi
 # zayiflatiyor/kesiyor (saatlerce test edilerek dogrulandi). SADECE GGA
@@ -210,6 +220,21 @@ class NtripRtkThread(QThread):
         self._enlem = VARSAYILAN_ENLEM
         self._boylam = VARSAYILAN_BOYLAM
         self._yukseklik = 850.0
+        # NABIZ (2026-09-01, canlı bulundu - "rtk verisini gönderen node mu
+        # çöküyor" sorusu üzerine araştırılırken): main.py'deki bekçi
+        # (_ntrip_bekci_kontrol) SADECE isRunning()'e bakıyordu - ama bu
+        # thread'in ROS düğümü DDS grafiğinden kaybolmasına RAĞMEN Python
+        # thread'inin isRunning()=True kalabileceği (kod incelemesinde AÇIK
+        # bir destroy_node()/rclpy.shutdown() çağrısı bulunamadı - ihtimal
+        # rclpy/DDS seviyesinde bir "zombi" durumu) bir kör nokta bulundu -
+        # canlı doğrulandı: node `ros2 node list`'ten kayboldu, run()'daki
+        # try/except HİÇBİR hata loglamadı, watchdog da HİÇBİR yeniden
+        # başlatma denemesi yapmadı - thread teknik olarak "çalışıyor"
+        # görünüyordu. Artık iç döngünün HER turunda güncellenen bir zaman
+        # damgası tutuluyor - bekçi artık SADECE isRunning() değil, bu
+        # nabzın da (STALE_ESIK_SN'den daha uzun süre) tazeliğini kontrol
+        # edip gerçek "zombi" durumunu da yakalayabiliyor.
+        self.son_nabiz_zamani = time.time()
 
     def yapilandirilmis_mi(self):
         return "DOLDURULMADI" not in (self.host, self.mountpoint, self.kullanici, self.sifre)
@@ -248,7 +273,11 @@ class NtripRtkThread(QThread):
         )
         self._pub = self._node.create_publisher(RTCM, MAVROS_RTCM_TOPIC, rtcm_qos)
         if NavSatFix is not None:
-            self._node.create_subscription(NavSatFix, ARAC_GPS_TOPIC, self._gps_callback, 10)
+            # mavros varsayilan olarak BEST_EFFORT yayinliyor -
+            # qos_profile_sensor_data ile eslesiyoruz (konum_birlestirici.py'deki
+            # AYNI cozum) - yoksa RELIABLE/BEST_EFFORT uyumsuzlugu nedeniyle
+            # hicbir mesaj gelmez (canli bulundu, ARAC_GPS_TOPIC yorumuna bkz.).
+            self._node.create_subscription(NavSatFix, ARAC_GPS_TOPIC, self._gps_callback, qos_profile_sensor_data)
         return True
 
     def _rtcm_yayinla(self, veri: bytes):
@@ -267,9 +296,44 @@ class NtripRtkThread(QThread):
         # NOT: basit NTRIP v1 istek formati - HTTP/1.0, Host/Ntrip-Version/
         # Connection basliklari YOK, birebir bu sirayla. Hem Skylark'ta hem
         # TUSAGA-Aktif'te calistigi canli test edilerek dogrulandi.
+        #
+        # DÜZELTME (2026-09-05, kullanıcı: "arayüz sürekli çöküyor" - canlı
+        # testte py-spy/wchan ile KANITLANDI: arayüz açılışı bazen 30-45
+        # SANİYE tamamen donuyordu, ana thread futex_wait_queue_me'de
+        # (GIL bekliyor) TAKILI kalıyordu). Kök neden: soket.settimeout(10)
+        # SADECE bağlantı/okuma/yazma sürelerini sınırlar - self.host bir
+        # ALAN ADI (www.tusaga-aktif.gov.tr) olduğu için connect() önce
+        # DNS ÇÖZÜMLEMESİ (getaddrinfo) yapıyor, bu adım socket timeout'un
+        # KAPSAMI DIŞINDA - glibc çözücü birden fazla nameserver'ı sırayla
+        # dener, her biri için ayrı bekleme yapar (resolv.conf'a göre
+        # toplamda 20-40+ saniyeye çıkabilir), bu süre boyunca hangi
+        # thread'de olursa olsun GIL serbest bırakılmıyormuş gibi
+        # davranıyor (canlı ölçüldü: ana GUI thread'i de aynı anda donuyor).
+        # Çözüm: DNS çözümlemesini AYRI bir thread'de, KESİN bir üst
+        # sınırla (8sn) çalıştırıyoruz - süre aşılırsa bu deneme sessizce
+        # vazgeçilip DIŞARIDAKİ yeniden bağlanma döngüsüne (zaten var)
+        # bırakılıyor, sonsuza kadar donmak yerine.
+        # NOT: ThreadPoolExecutor'ı `with` ile KULLANMIYORUZ - `with`
+        # bloğundan çıkarken shutdown(wait=True) çağrılır, bu da
+        # ZAMAN AŞIMINA UĞRASAK BİLE arka plandaki (hâlâ kendi DNS
+        # sorgusunda tıkalı) worker thread'in GERÇEKTEN bitmesini
+        # bekler - tam da önlemeye çalıştığımız donmayı GERİ GETİRİR.
+        # shutdown(wait=False) ile bırakıp devam ediyoruz, worker
+        # eninde sonunda kendi başına biter.
+        havuz = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            gelecek = havuz.submit(socket.gethostbyname, self.host)
+            ip = gelecek.result(timeout=8.0)
+        except concurrent.futures.TimeoutError:
+            raise TimeoutError(
+                f"DNS çözümlemesi zaman aşımına uğradı ({self.host}, 8sn) - "
+                "ağ/DNS sorunu olabilir")
+        finally:
+            havuz.shutdown(wait=False)
+
         soket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         soket.settimeout(10.0)
-        soket.connect((self.host, self.port))
+        soket.connect((ip, self.port))
 
         kimlik = base64.b64encode(f"{self.kullanici}:{self.sifre}".encode()).decode()
         istek = (
@@ -310,6 +374,24 @@ class NtripRtkThread(QThread):
         return soket, parcali_mi
 
     def run(self):
+        # KRİTİK SAĞLAMLIK DÜZELTMESİ (2026-09-01): canlı bulundu - bu
+        # thread SESSİZCE ölüyordu (ROS2 düğümü grafikten kayboluyordu,
+        # HİÇBİR hata logu yazılmıyordu, ana uygulama 19+ dakika sorunsuz
+        # çalışmaya devam ediyordu) - "RTK neden Fixed'e girmiyor" sorusunun
+        # gerçek cevabı buydu: düzeltme akışı bir noktada tamamen durmuştu.
+        # Alttaki while döngüsü SADECE soket/bağlantı hatalarını yakalıyordu
+        # (`except Exception` içeride) - _ros_baglanti_kur()'daki veya
+        # rclpy.spin_once()'daki BEKLENMEYEN bir hata bu döngünün DIŞINA
+        # sessizce çıkıp thread'i sonlandırabiliyordu. Artık TÜM run() gövdesi
+        # sarılı - ne olursa olsun loglanır, thread çökse bile main.py'deki
+        # yeni bekçi (_ntrip_bekci_kontrol) bunu fark edip yeniden başlatır.
+        try:
+            self._run_ic()
+        except Exception as e:
+            self.log_sinyali.emit(f"🛑 NTRIP thread'i BEKLENMEYEN bir hatayla durdu: {e!r}")
+            self.baglanti_sinyali.emit(False)
+
+    def _run_ic(self):
         if not self.yapilandirilmis_mi():
             self.log_sinyali.emit(
                 "ℹ️ NTRIP/RTK bilgileri henüz girilmedi (ntrip_rtk_sistemi.py "
@@ -322,6 +404,7 @@ class NtripRtkThread(QThread):
             return
 
         while self._calisiyor:
+            self.son_nabiz_zamani = time.time()  # bağlanma denemesi de nabız sayılır
             soket = None
             try:
                 soket, parcali_mi = self._ntrip_baglan()
@@ -342,6 +425,7 @@ class NtripRtkThread(QThread):
                 self.log_sinyali.emit(f"🛰️ NTRIP bağlandı: {self.host}:{self.port}/{self.mountpoint}")
 
                 while self._calisiyor:
+                    self.son_nabiz_zamani = time.time()  # bkz. __init__'teki nabız notu
                     rclpy.spin_once(self._node, timeout_sec=0.0)  # yeni GPS okumalarini isle
 
                     if time.time() - son_gga_zamani >= GGA_GONDERIM_ARALIGI_SN:

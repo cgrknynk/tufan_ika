@@ -97,6 +97,7 @@ from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import Twist
 from rcl_interfaces.msg import SetParametersResult
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 from std_msgs.msg import String, Bool, Int32
 from ultralytics import YOLO
 
@@ -515,7 +516,43 @@ class TurretNode(Node):
         self._debug_son_ham_deger = None
 
         self.create_subscription(String, 'silah_modu', self._mod_cb, 10)
-        self.create_subscription(Twist, 'turret_manuel_cmd', self._manuel_cmd_cb, 10)
+        # DUZELTME (2026-09-05, arayuz tarafinda canli olculdu: turret_cmd_pub
+        # varsayilan RELIABLE QoS ile GUI thread'inde SENKRON publish() cagriliyordu -
+        # bu agin RELIABLE ack/retransmit mekanizmasi /palet_hizlari'nda daha once
+        # tespit edilenle AYNI sekilde tikaniyor, publish() 15+ saniye BLOKE olup
+        # TUM arayuzu (joystick dahil) donduruyordu. turret_manuel_cmd surekli
+        # (joystick poll hizinda, 10-50Hz) yeniden yayinlanan bir kontrol sinyali -
+        # kaybolan tek bir ornegin onemi yok, bir sonraki hemen geliyor - bkz.
+        # /palet_hizlari'nin AYNI nedenle BEST_EFFORT'a alinmasi (telemetri_sistemi.py).
+        # QoS UYUMLULUGU ICIN yayinci (interface, telemetri_sistemi.py) ile BIRLIKTE
+        # degistirildi - yayinci BEST_EFFORT iken abone RELIABLE beklerse DDS
+        # SESSIZCE eslesmez (mesaj hic gelmez), bu yuzden ikisi de ayni anda guncellendi.
+        turret_qos = QoSProfile(
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
+        self.create_subscription(Twist, 'turret_manuel_cmd', self._manuel_cmd_cb, turret_qos)
+        # /silah_manuel (2026-09-03, kullanici istegi): GCS'deki HAZIR ok-
+        # tusu widget'i (silah_kontrol_sistemi.py, SilahKontrolSistemi)
+        # zaten "YUKARI"/"ASAGI"/"SOL"/"SAG" (std_msgs/String) komutlari
+        # uretiyordu AMA farkli bir topic'e (/turret_cmd_vel) yayinliyordu -
+        # bu node onu HIC dinlemiyordu (turret_manuel_cmd Twist bekliyor,
+        # hicbir GCS dosyasinda ona yayinci YOK). Ayri bir Twist donusumu
+        # YERINE, ayni manuel-komut durumuna (_manuel_x/_manuel_y/
+        # _manuel_zaman - _manuel_heartbeat'in zaten 20Hz gonderdigi,
+        # timeout/otomatik-durma mantigi dahil) DOGRUDAN yazan ikinci bir
+        # abonelik eklendi - iki kaynak (Twist VE String) ayni anda
+        # guvenle var olabilir, EN SON gelen kazanir.
+        self.create_subscription(String, 'silah_manuel', self._silah_manuel_cb, 10)
+        # /silah_manuel_adim (2026-09-04, kullanici istegi: "100 adim saga,
+        # 100 adim yukari gonder"): firmware'de ZATEN olan coklu-adim
+        # protokolunu (bkz. _coklu_adim_gonder, sketch_jul28b.ino'daki
+        # cokluAdimAt - 'b'+yon+sayi, TEK seferde N step pulse) disaridan
+        # (manuel/test) tetiklemek icin. Format: "YON:SAYI" (orn. "SAG:100"),
+        # SADECE hassas otonom modun kendi ic kullanimindan bagimsiz, elle
+        # test/kalibrasyon icin.
+        self.create_subscription(String, 'silah_manuel_adim', self._silah_manuel_adim_cb, 10)
         self.create_subscription(Bool, 'silah_ates_manuel', self._ates_manuel_cb, 10)
         self.create_subscription(Bool, '/turret_model_aktif', self._model_aktif_cb, 10)
         # Bool DEGIL Int32: gorev sekansi sadece "vuruldu oldu" anini degil,
@@ -630,6 +667,45 @@ class TurretNode(Node):
         self._manuel_x = msg.linear.x
         self._manuel_y = msg.linear.y
         self._manuel_zaman = time.time()
+
+    # SilahKontrolSistemi'nin (GCS) yon kelimelerini _yon_komutunu_hesapla
+    # ile AYNI isaret sozlesmesine (gx>0=sag/d, gy>0=asagi/s) cevirir.
+    _SILAH_MANUEL_YON_HARITASI = {
+        'YUKARI': (0.0, -1.0),
+        'ASAGI': (0.0, 1.0),
+        'SOL': (-1.0, 0.0),
+        'SAG': (1.0, 0.0),
+    }
+
+    def _silah_manuel_cb(self, msg: String):
+        yon = self._SILAH_MANUEL_YON_HARITASI.get(msg.data.strip().upper())
+        if yon is None:
+            return
+        self._manuel_x, self._manuel_y = yon
+        self._manuel_zaman = time.time()
+
+    # Firmware'in yon karakterleri ('w'/'a'/'s'/'d') ile Turkce kelimeler
+    # arasi cevrim - _coklu_adim_gonder DOGRUDAN karakter bekliyor.
+    _SILAH_ADIM_YON_KARAKTERI = {'YUKARI': 'w', 'ASAGI': 's', 'SOL': 'a', 'SAG': 'd'}
+
+    def _silah_manuel_adim_cb(self, msg: String):
+        """Format: "YON:SAYI" (orn. "SAG:100") - firmware'in coklu-adim
+        protokolunu (bkz. _coklu_adim_gonder) manuel/test icin tetikler."""
+        parca = msg.data.strip().upper().split(':')
+        if len(parca) != 2:
+            self.get_logger().warn(f'/silah_manuel_adim: gecersiz format "{msg.data}" (beklenen "YON:SAYI")')
+            return
+        yon_char = self._SILAH_ADIM_YON_KARAKTERI.get(parca[0])
+        if yon_char is None:
+            self.get_logger().warn(f'/silah_manuel_adim: bilinmeyen yon "{parca[0]}"')
+            return
+        try:
+            adim_sayisi = int(parca[1])
+        except ValueError:
+            self.get_logger().warn(f'/silah_manuel_adim: gecersiz sayi "{parca[1]}"')
+            return
+        self._coklu_adim_gonder(yon_char, adim_sayisi)
+        self.get_logger().info(f'/silah_manuel_adim: {parca[0]} yonunde {adim_sayisi} adim gonderildi.')
 
     def _ates_manuel_cb(self, msg: Bool):
         self._ates_manuel_aktif = bool(msg.data)
@@ -1032,6 +1108,17 @@ class TurretNode(Node):
                     f'camera_index parametresine ({self._camera_index}) dusuluyor'
                 )
         cap = cv2.VideoCapture(kamera_index)
+        # DUZELTME (2026-09-01, canli bulundu, kullanici onayiyla): bu
+        # kamera (C922) HAM YUYV formatinda TEK BASINA USB hub'inin
+        # neredeyse tum bant genisligini tuketiyordu - tabela_node (3.
+        # kamera) MJPG'ye gecirilse, hatta arka_kamera_node de MJPG'ye
+        # gecirilse bile No space left on device (klasik UVC bant
+        # genisligi hatasi) almaya devam ediyordu; turret durdurulup
+        # izole test edilince kesin kanitlandi. MJPG (sikistirilmis)
+        # format bant genisligini cok dusurur - YOLO tespiti/nisan alma
+        # hassasiyetini gozle gorulur sekilde ETKİLEMEMESİ beklenir
+        # (birkac ms ek encode/decode gecikmesi disinda).
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)

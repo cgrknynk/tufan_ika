@@ -31,13 +31,19 @@ spin_until_future_complete GIBI BLOKE EDEN bir cagri YAPILMAZ (tek
 threadli executor'da bu, executor zaten o callback'i calistirdigi icin
 future'in hic tamamlanamamasina / donume yol acar).
 
-*** CANLI TESTTE DOGRULANMASI GEREKEN DEGERLER: pitch_esigi_derece
-*** (varsayilan 8.0) ve dusuk_menzil_m (varsayilan 1.1 - 63cm LIDAR
-*** yuksekligi + 25 derece rampa acisindan hesaplanan ~1.35m kesisim
-*** mesafesinin altinda, guvenli pay icin). Arac tepede/duzlukte
-*** GENUINE (gercek) bir engele bu dusuk menzil nedeniyle GEC tepki
-*** verebilir - bu, rampa gecisinde LIDAR'in yanlis engel algilama
-*** riskine karsi BILINCLI bir odun.
+*** CANLI TESTTE GUNCELLENDI (2026-09-01): pitch_esigi_derece 8.0'dan
+*** 3.0'a dusuruldu - "rampadan inerken zemini engel goruyor" sikayeti
+*** uzerine, aracin govdesinin rampanin nominal 25 derecesine hic
+*** yaklasmadigi, olculen tepe pitch'in sadece ~8-8.8 derece oldugu
+*** bulundu (bkz. __init__ icindeki hesaplama notu) - eski esik tam bu
+*** tepe noktasindaydi, rampanin cogu suresinde korumali mod hic
+*** devreye girmiyordu. dusuk_menzil_m (1.1) HER olculen acida zemin
+*** kesisim mesafesinin cok altinda kaldigi icin gercek-engel-kacirma
+*** riski olmadan dusuruldu. histerezis_saniye 2.0->4.0 (kisa sureli
+*** esik-alti pitch'te korumali moddan erken cikmasin diye). Arac
+*** tepede/duzlukte GENUINE bir engele bu dusuk menzil nedeniyle GEC
+*** tepki verebilir - bu, rampa gecisinde LIDAR'in yanlis engel
+*** algilama riskine karsi BILINCLI bir odun, degismedi.
 """
 import math
 
@@ -81,9 +87,25 @@ class EgimCostmapAyarlayici(Node):
     def __init__(self):
         super().__init__('egim_costmap_ayarlayici')
 
-        self.declare_parameter('pitch_esigi_derece', 8.0)
+        # CANLI TESTTE BULUNDU (2026-09-01): rampa NOMINAL 25 derece olsa da
+        # aracin GOVDESI (rijit, tekerlek tabanindan dolayi) gecis sirasinda
+        # bu acinin cok altinda kaliyor - canli veride olculen tepe pitch
+        # SADECE ~8-8.8 derece (25 degil). Eski esik (8.0) tam bu tepe
+        # noktasindaydi, yani rampanin cogu suresinde pitch esigin ALTINDA
+        # kalip korumali (dusuk menzil) mod hic devreye girmiyordu - o
+        # sirada zemin hala ORIJINAL (6-10m) menzil icinde gorunup engel
+        # sanildi ("dik engelden inerken zemini engel goruyor" sikayeti).
+        # Geometri (h=0.63m, zemin kesisim mesafesi = h/tan(pitch)):
+        #   pitch=25 -> 1.35m, pitch=8 -> 4.48m, pitch=4 -> 9.01m,
+        #   pitch=3 -> 12.02m, pitch=2 -> 18.04m. dusuk_menzil_m=1.1m HER
+        #   BU ACIDA da kesisim mesafesinin cok altinda kaliyor (guvenli) -
+        #   esigi dusurmenin gercek engelleri kacirma riski YOK, sadece
+        #   korumali modun DAHA ERKEN/DAHA UZUN devrede kalmasini sagliyor.
+        # Esik 8.0->3.0, histerezis 2.0->4.0 (rampa gecisinde pitch kisa
+        # sureli esigin altina dusse bile korumali moddan hemen cikmasin).
+        self.declare_parameter('pitch_esigi_derece', 3.0)
         self.declare_parameter('dusuk_menzil_m', 1.1)
-        self.declare_parameter('histerezis_saniye', 2.0)
+        self.declare_parameter('histerezis_saniye', 4.0)
 
         self._pitch_esigi = math.radians(self.get_parameter('pitch_esigi_derece').value)
         self._dusuk_menzil = self.get_parameter('dusuk_menzil_m').value

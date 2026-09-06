@@ -120,6 +120,80 @@ class ArduinoMotorKontrol(Node):
         self.create_subscription(Bool, '/yon_pid_aktif', self._pid_aktif_cb, 10)
         self.create_subscription(Imu, '/imu/data', self._imu_cb, qos_profile_sensor_data)
 
+        # --- YENİ: FARLAR (2026-09-01, kullanıcı isteği) ---
+        # /farlar (Bool) -> Arduino Uno'nun 2. ve 3. pinine bağlı röle (AKTİF-
+        # DÜŞÜK: pin 0'a çekilince farlar AÇILIR). AYNI seri portu (motor
+        # Arduino'su) kullanıyor - ayrı bir node/port AÇILMIYOR (kullanıcının
+        # açık isteği: "iki kod aynı seri portu açmasın"). Protokol
+        # "SOL_PPM,SAG_PPM\n"'den "SOL_PPM,SAG_PPM,FAR\n"'e genişletildi
+        # (bkz. .ino dosyasindaki 2026-09-01 notu - eski 2-alanli format da
+        # hala calisir, 3. alan opsiyonel). Son gonderilen PPM degerleri
+        # saklanir ki far durumu DEGISTIGINDE (palet_hizlari beklemeden)
+        # ANINDA, hareketi ETKILEMEDEN iletilebilsin - motor komutu her
+        # zaman GUNCEL PPM'i tekrar yazar (dur komutu GONDERMEZ).
+        self._far_durumu = False
+        self._son_sol_ppm = self.ppm_merkez
+        self._son_sag_ppm = self.ppm_merkez
+        self.create_subscription(Bool, '/farlar', self._far_cb, 10)
+
+        # FREN (2026-09-06, kullanici istegi): yer istasyonundaki FIZIKSEL
+        # buton (eskiden manuel/otonom gecisi) artik freni ac/kapa yapiyor.
+        # Buraya SADECE HEDEF DURUM (True=acik, False=kapali) gelir; motoru
+        # 3 saniye dondurme isini ARDUINO kendi yapar (bkz. sketch'teki
+        # kenar-tetiklemeli, bloklamayan blok). Sureyi Jetson'da saymak
+        # YANLIS olurdu: baglanti o 3 saniye icinde koparsa fren yarim
+        # kalirdi; Arduino'da sayilinca hareket her halukarda tamamlanir.
+        self._fren_durumu = False
+        self.create_subscription(Bool, '/fren_komut', self._fren_cb, 10)
+
+    def _fren_cb(self, msg):
+        yeni = bool(msg.data)
+        if yeni == self._fren_durumu:
+            return  # ayni durum tekrar gelirse Arduino zaten tetiklenmez
+        self._fren_durumu = yeni
+        self.get_logger().warn(
+            "\U0001F17F\uFE0F FREN: " + ("ACILIYOR" if yeni else "KAPANIYOR")
+            + " (motor 3 sn calisacak)")
+        if not self.arduino or not self.arduino.is_open:
+            return
+        # NOT: acil durdurma KILIDI freni ENGELLEMEZ - kilitliyken de fren
+        # kumanda edilebilmeli (arac durdurulduktan sonra fren cekmek
+        # gerekebilir). Kilit sadece PALET komutlarini kesiyor.
+        try:
+            self.arduino.write(self._seri_komut().encode('utf-8'))
+        except Exception as e:
+            self.get_logger().error("\u26A0\uFE0F Fren komutu gonderme hatasi: " + str(e))
+
+    def _seri_komut(self):
+        """Arduino paketi: "SOL_PPM,SAG_PPM,FAR,FREN\n" - tek yerden
+        uretilir ki alan eklendiginde bir cagri yeri unutulmasin.
+
+        *** KILITLIYKEN NOTR (2026-09-06, kod incelemesinde bulundu) ***
+        Acil durdurma kilidi aktifken palet_callback zaten hic yazmiyor,
+        AMA _fren_cb KASITLI OLARAK kilitten muaf (arac durdurulduktan
+        sonra fren cekilebilmeli). O yazma, paketin ilk iki alanina
+        _son_sol_ppm/_son_sag_ppm'i (acil stop ANINDAKI son surus hizi)
+        koyuyordu - yani fren dugmesine basmak kilitli araci SON HIZIYLA
+        yeniden hareket ettirebilirdi. Kilitliyken PPM alanlari her zaman
+        merkez (dur) degerine zorlanir; far/fren alanlari calismaya devam
+        eder."""
+        if self._kilitli:
+            sol = sag = self.ppm_merkez
+        else:
+            sol, sag = self._son_sol_ppm, self._son_sag_ppm
+        return "%d,%d,%d,%d\n" % (sol, sag,
+                                   int(self._far_durumu), int(self._fren_durumu))
+
+    def _far_cb(self, msg):
+        self._far_durumu = bool(msg.data)
+        self.get_logger().info(f"💡 Farlar: {'AÇIK' if self._far_durumu else 'KAPALI'}")
+        if self._kilitli or not self.arduino or not self.arduino.is_open:
+            return
+        try:
+            self.arduino.write(self._seri_komut().encode('utf-8'))
+        except Exception as e:
+            self.get_logger().error(f"⚠️ Far komutu gönderme hatası: {e}")
+
     def _pid_aktif_cb(self, msg):
         self._pid_aktif = bool(msg.data)
         if not self._pid_aktif:
@@ -272,11 +346,14 @@ class ArduinoMotorKontrol(Node):
             # Bu yüzden sol motora 'ters_yon=True' parametresi vererek bu simetriyi mekanik olarak sağlıyoruz.
             sol_ppm = self.pwm_to_ppm(ham_sol_pwm, ters_yon=True)
             sag_ppm = self.pwm_to_ppm(ham_sag_pwm, ters_yon=False)
+            self._son_sol_ppm = sol_ppm
+            self._son_sag_ppm = sag_ppm
 
-            # Arduino'nun okuyabileceği paket formatı: "SOL_PPM,SAG_PPM\n"
-            # Örn: "1400,1650\n" (Sol hafif ileri, Sağ orta-üst ileri -> Araç yumuşakça sola kıvrılır!)
-            komut = f"{sol_ppm},{sag_ppm}\n"
-            
+            # Arduino paket formatı: "SOL_PPM,SAG_PPM,FAR,FREN\n"
+            # Örn: "1400,1650,0,1\n" (Sol hafif ileri, Sağ orta-üst ileri,
+            # farlar kapalı, fren açık)
+            komut = self._seri_komut()
+
             self.arduino.write(komut.encode('utf-8'))
 
             # TEŞHİS LOG (gecici): gercekten seri porta yazilan komutu goster.

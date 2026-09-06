@@ -40,23 +40,119 @@ _VARSAYILAN_MODEL_YOLU = os.path.join(
 )
 
 
+def _kamera_indexini_otomatik_bul(arama_metni, usb_port_ipucu=None):
+    """CANLI TESTTE BULUNDU (2026-09-01): sabit camera_index kirilgan -
+    /dev/videoN numaralari USB yeniden-enumerasyonunda (guc kesilip
+    verilmesi, farkli takma sirasi) DEGISEBILIYOR, bu yuzden tabela
+    modeli YANLISLIKLA arka kameraya baglanmisti (kullanici geri
+    bildirimi). turret_node.py'nin AYNI deseni (isimle bulma) burada
+    GENISLETILDI: isminde arama_metni (kucuk/buyuk harf duyarsiz, orn.
+    "C270") GECEN /dev/videoN GERCEK video-capture dugumlerini
+    (/sys/.../videoN/index=="0" - digerleri ayni fiziksel kameranin
+    BOS-FORMAT metadata dugumleridir) bulur. AYNI MODELDEN BIRDEN FAZLA
+    kamera varsa (iki C270 gibi, ISIM ILE AYIRT EDILEMEZLER - hatta
+    ID_SERIAL bile Logitech tarafindan PAYLASILMIS/sahte) usb_port_ipucu
+    (fiziksel USB port yolunun TAM son segmenti, orn "1-2.2.3") ile
+    filtrelenir - kablo AYNI FIZIKSEL PORTA takili kaldigi surece bu
+    deger USB KESIF SIRASINDAN BAGIMSIZ SABIT kalir (index numarasinin
+    aksine). Eslesme yoksa None doner (cagiran taraf camera_index
+    parametresine geri duser)."""
+    import glob
+    adaylar = []  # (index, usb_port_adi)
+    for isim_dosyasi in sorted(glob.glob('/sys/class/video4linux/video*/name')):
+        try:
+            with open(isim_dosyasi) as f:
+                isim = f.read().strip()
+        except OSError:
+            continue
+        if arama_metni.lower() not in isim.lower():
+            continue
+        video_dizin = os.path.dirname(isim_dosyasi)
+        try:
+            with open(os.path.join(video_dizin, 'index')) as f:
+                if f.read().strip() != '0':
+                    continue  # metadata dugumu, gercek capture DEGIL
+            index = int(os.path.basename(video_dizin).replace('video', ''))
+        except (OSError, ValueError):
+            continue
+        usb_port = None
+        if usb_port_ipucu:
+            try:
+                device_link = os.path.realpath(os.path.join(video_dizin, 'device'))
+                usb_port = os.path.basename(os.path.dirname(device_link))
+            except OSError:
+                pass
+        adaylar.append((index, usb_port))
+
+    if not adaylar:
+        return None
+    if usb_port_ipucu:
+        # TAM esitlik VEYA usb_port_ipucu'nun bir "ust dal" (hub seviyesi)
+        # olmasi: USB yeniden-enumerasyonunda port yolunun SON basamagi
+        # (orn "1-2.2.4.3" -> "1-2.2.4.4") kayabildigi CANLI TESTTE
+        # gozlemlendi - bu yuzden ipucu "1-2.2.4" gibi kisa/hub-seviyesi
+        # verilirse ".3"/".4" gibi alt-dallarin HEPSI kabul edilir. Farkli
+        # bir hub kolunu (orn "1-2.2.40") YANLISLIKLA eslestirmemek icin
+        # SADECE tam-segment sinirinda ('.' sonrasi) devam KABUL edilir.
+        for index, usb_port in adaylar:
+            if usb_port == usb_port_ipucu or (
+                    usb_port and usb_port.startswith(usb_port_ipucu + '.')):
+                return index
+        return None  # port ipucu verildi ama eslesen YOK - yanlis kameraya baglanmaktansa vazgec
+    return min(index for index, _ in adaylar)
+
+
 class TabelaNode(Node):
     def __init__(self):
         super().__init__('tabela_node')
 
-        self.declare_parameter('camera_index', 0)
+        # camera_index SADECE otomatik bulma (asagida) BASARISIZ olursa
+        # kullanilir (yedek) - bkz. _kamera_indexini_otomatik_bul.
+        self.declare_parameter('camera_index', 2)
+        self.declare_parameter('kamera_arama_ismi', 'C270')
+        # GORSEL OLARAK KESIN DOGRULANAN fiziksel USB port yolu (ON kamera,
+        # 2026-09-01): iki C270'ten de birer kare cekilip GOZLE incelendi -
+        # bu port (o zamanki /dev/video0) kisi/kapi/DUBA (trafik konisi) +
+        # aracin kendi paleti gorunen GERCEK on-kamera goruntusu verdi,
+        # digeri (o zamanki /dev/video2, port "1-2.2.3") sadece bir masa/
+        # mobilya gorundu (arka kamera). ONCEKI deger ('1-2.2.3') bu
+        # dogrulamadan ONCE, harici bir testte YANLISLIKLA tersine
+        # cevrilmisti - GORSEL kanitla DUZELTILDI. Port numarasi USB
+        # yeniden-enumerasyonunda son basamakta kayabiliyor (orn
+        # "1-2.2.4.3"->"1-2.2.4.4") - HUB SEVIYESI kismi kullanildi, alt-port
+        # basamagi HARIC tutuldu (bu, arka kameranin PORTUYLA cakismadigi
+        # surece guvenli - bkz. usb_port_ipucu eslesme mantigi asagida, TAM
+        # segment yerine .startswith kullanilarak degistirildi, bkz.
+        # _kamera_indexini_otomatik_bul).
+        # IKINCI GORSEL DOGRULAMA (2026-09-01, gece, farlarla): USB portlari
+        # TEKRAR kaymisti (1-2.2.4/1-2.2.3 -> 1-2.2.1/1-2.2.4.3) - port
+        # numaralandirmasinin bu donanimda TAM KARARLI OLMADIGI dogrulandi
+        # (muhtemelen hub/kablo yeniden-baglanmasi). Agac/bina goren kare
+        # (kullanici tarafindan ON olarak dogrulandi) artik 1-2.2.1 portunda.
+        self.declare_parameter('kamera_usb_port', '1-2.2.1')
         self.declare_parameter('model_path', _VARSAYILAN_MODEL_YOLU)
         self.declare_parameter('hedef_confidence', 0.5)
         self.declare_parameter('imgsz', 640)
         self.declare_parameter('video_target_ip', '10.40.64.44')
         self.declare_parameter('video_target_port', 5001)
+        # 2026-09-01, kullanici istegi: "kalitesinden ziyade hizi onemli" -
+        # UDP'ye giden goruntu bu ikisiyle kucultulur/dusuk kalitede encode
+        # edilir. YOLO'nun ALDIGI kare BUNDAN ETKILENMEZ (tespit hala tam
+        # cozunurlukte/imgsz'de calisir) - SADECE gonderim oncesi resize
+        # edilir, boylece hiz kazanci tespit KALITESINI dusurmez.
+        self.declare_parameter('yayin_genislik', 480)
+        self.declare_parameter('jpeg_kalite', 40)
 
         self._camera_index = self.get_parameter('camera_index').value
+        self._kamera_arama_ismi = self.get_parameter('kamera_arama_ismi').value
+        self._kamera_usb_port = self.get_parameter('kamera_usb_port').value
         self._model_path = self.get_parameter('model_path').value
         self._conf = self.get_parameter('hedef_confidence').value
         self._imgsz = self.get_parameter('imgsz').value
         self._video_target_ip = self.get_parameter('video_target_ip').value
         self._video_target_port = self.get_parameter('video_target_port').value
+        self._yayin_genislik = self.get_parameter('yayin_genislik').value
+        self._jpeg_kalite = self.get_parameter('jpeg_kalite').value
 
         self._tespit_pub = self.create_publisher(String, 'tabela_tespit', 10)
         self._sock_video = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -77,6 +173,27 @@ class TabelaNode(Node):
             f'{self._video_target_ip}:{self._video_target_port} adresine gonderiliyor'
         )
 
+    def _kucult_ve_gonder(self, frame):
+        """Yayin oncesi frame'i _yayin_genislik'e olcekler (en-boy orani
+        korunur) ve dusuk JPEG kalitesiyle UDP ile gonderir - hiz oncelikli
+        (bkz. __init__ yorumu). YOLO/tespit BU FONKSIYONDAN ONCE, TAM
+        cozunurlukte zaten tamamlanmis olur, buradan ETKILENMEZ."""
+        h, w = frame.shape[:2]
+        if w > self._yayin_genislik:
+            oran = self._yayin_genislik / float(w)
+            frame = cv2.resize(frame, (self._yayin_genislik, int(h * oran)),
+                                interpolation=cv2.INTER_LINEAR)
+        ret_enc, buffer = cv2.imencode(
+            '.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), self._jpeg_kalite])
+        if not ret_enc:
+            return
+        data = buffer.tobytes()
+        if len(data) < 65000:
+            try:
+                self._sock_video.sendto(data, (self._video_target_ip, self._video_target_port))
+            except Exception:
+                pass
+
     def _model_aktif_cb(self, msg: Bool):
         yeni = bool(msg.data)
         if yeni != self._model_aktif:
@@ -84,7 +201,33 @@ class TabelaNode(Node):
         self._model_aktif = yeni
 
     def _ana_dongu(self):
+        if self._kamera_arama_ismi:
+            otomatik_index = _kamera_indexini_otomatik_bul(
+                self._kamera_arama_ismi, self._kamera_usb_port)
+            if otomatik_index is not None:
+                if otomatik_index != self._camera_index:
+                    self.get_logger().info(
+                        f'Kamera otomatik bulundu: "{self._kamera_arama_ismi}" '
+                        f'(port={self._kamera_usb_port}) -> /dev/video{otomatik_index} '
+                        f'(parametre camera_index={self._camera_index} yerine kullanildi).')
+                self._camera_index = otomatik_index
+            else:
+                self.get_logger().warn(
+                    f'"{self._kamera_arama_ismi}" (port={self._kamera_usb_port}) isminde '
+                    f'kamera bulunamadi, camera_index parametresi (={self._camera_index}) '
+                    'YEDEK olarak kullaniliyor.')
+
         cap = cv2.VideoCapture(self._camera_index, cv2.CAP_V4L2)
+        # DUZELTME (2026-09-01, canli bulundu): ayni USB hub'i paylasan UC
+        # kamerayla (turret C922 + arka C270) birlikte HAM YUYV formatinda
+        # calisinca USB izokron bant genisligi tukeniyordu - cap.read()
+        # sessizce SUREKLI False donuyordu (hic loglanmiyordu), VIDIOC_
+        # STREAMON dogrudan test edilince "No space left on device"
+        # (klasik UVC bant genisligi hatasi, disk ile alakasi yok) verdigi
+        # dogrulandi. MJPG (sikistirilmis) format bant genisligini cok
+        # dusurur - digerlerine dokunmadan SADECE bu kamerayi MJPG'ye
+        # gecirmek yeterli oldu.
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
@@ -103,16 +246,7 @@ class TabelaNode(Node):
                     # Model KAPALI: sadece ham kareyi UDP'ye gonder, YOLO
                     # calistirma / /tabela_tespit'e yayin yok - kamera
                     # yine de ACIK/canli kalsin diye.
-                    ret_enc, buffer = cv2.imencode(
-                        '.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
-                    if ret_enc:
-                        data = buffer.tobytes()
-                        if len(data) < 65000:
-                            try:
-                                self._sock_video.sendto(
-                                    data, (self._video_target_ip, self._video_target_port))
-                            except Exception:
-                                pass
+                    self._kucult_ve_gonder(frame)
                     continue
 
                 try:
@@ -133,14 +267,7 @@ class TabelaNode(Node):
                     else:
                         self._tespit_pub.publish(String(data='YOK'))
 
-                    ret_enc, buffer = cv2.imencode('.jpg', cizili_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
-                    if ret_enc:
-                        data = buffer.tobytes()
-                        if len(data) < 65000:
-                            try:
-                                self._sock_video.sendto(data, (self._video_target_ip, self._video_target_port))
-                            except Exception:
-                                pass
+                    self._kucult_ve_gonder(cizili_frame)
 
                 except Exception as e:
                     self.get_logger().error(f'Kare isleme hatasi, atlaniyor: {e}')

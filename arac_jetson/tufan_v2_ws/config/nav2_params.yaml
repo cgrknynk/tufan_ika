@@ -35,7 +35,14 @@ controller_server:
       vy_std: 0.0
       wz_std: 0.5
       vx_max: 0.4      # Hiz dusuruldu (once 0.8 idi, cok hizliydi)
-      vx_min: -0.2
+      # KESIN COZUM (2026-09-01): 0.0 yapildi - U donuslerinde/genis acili
+      # hedeflerde MPPI, kisa ufukta (25 adim x 0.1s = 2.5s) donup ileri
+      # gitmek yerine GERI GERI hedefe yaklasmayi daha "ucuz" buluyordu.
+      # LIDAR'in govde braketi yuzunden arkasi zaten ~200 derece kor nokta
+      # (bkz. scan_front_filter.py) - geri giderken arac pratikte korlu
+      # gidiyor. Reverse YETENEGINI kaldirmak, MPPI'yi donup-ileri-git
+      # stratejisine (wz_max ile pivot + vx ile ileri) zorluyor.
+      vx_min: 0.0
       wz_max: 1.0
       
       iteration_count: 1
@@ -177,9 +184,16 @@ local_costmap:
       # Gercek arac boyutu: 1.65m (uzunluk) x 1.10m (genislik) - Poligon Şasi
       # (String formatı YAML çökmesini engeller)
       footprint: "[[0.825, 0.55], [0.825, -0.55], [-0.825, -0.55], [-0.825, 0.55]]"
-      
+
+      # static_layer KALDIRILDI (2026-09-02, kullanici istegi): kaba_harita
+      # ozelligi devre disi birakildi (kaba_harita_olusturucu_node artik
+      # launch'ta degil), /kaba_harita HICBIR ZAMAN yayinlanmiyor - bu katman
+      # sadece "Can't update static costmap layer, no map received" log
+      # spam'i uretiyordu, hicbir islevi yoktu. Node kaynagi hala dosyada
+      # duruyor (bkz. kaba_harita_olusturucu.py) - istenirse buraya ve
+      # launch'a geri eklenebilir.
       plugins: ["obstacle_layer", "inflation_layer"]
-      
+
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True
@@ -216,16 +230,27 @@ global_costmap:
       update_frequency: 2.0
       publish_frequency: 1.0
       rolling_window: true
-      width: 15
-      height: 15
+      # 15m -> 22m (2026-09-01, kullanici istegi: gap-following onde engel
+      # yoksa artik UZAK_HEDEF_MESAFESI_M=10m hedef atiyor - serbest_yon_
+      # takipcisi.py). Rolling costmap robotu MERKEZLEDIGI icin 10m'lik bir
+      # hedef, 15m genislikte (yari-genislik 7.5m) costmap'in DISINA
+      # tasip NavFn'in "hedef costmap disinda" ile planlamayi REDDETMESINE
+      # yol acabilirdi. 22m (yari-genislik 11m) 10m hedefe rahat pay birakir.
+      # Onceki 40m denemesi Jetson'i asiri yukleyip swap'e dusurmustu (bkz.
+      # eski not) ama o zamandan beri CPU yuku ayri bir nedenle (.pt->
+      # .engine model gecisi) COK dustu - 22m (hucre sayisi ~2.15x, 40m'nin
+      # ~7x'ine kiyasla COK daha az) guvenli bir orta yol.
+      width: 22
+      height: 22
       resolution: 0.05
       always_send_full_costmap: true
 
       # Gercek arac boyutu: 1.65m (uzunluk) x 1.10m (genislik)
       footprint: "[[0.825, 0.55], [0.825, -0.55], [-0.825, -0.55], [-0.825, 0.55]]"
-      
+
+      # static_layer KALDIRILDI - bkz. local_costmap'teki AYNI konudaki not.
       plugins: ["obstacle_layer", "inflation_layer"]
-      
+
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True
@@ -236,8 +261,10 @@ global_costmap:
           clearing: True
           marking: True
           data_type: "LaserScan"
-          # 15x15m costmap'in yarim genisligini (7.5m) ve kosegenini (~10.6m)
-          # kapsayacak sekilde ayarlandi.
+          # 22x22m costmap'in yarim genisligini (11m) ve kosegenini (~15.6m)
+          # kapsayacak sekilde ayarlandi (2026-09-01, width 15->22 sonrasi
+          # guncellendi - LIDAR'in fiziksel menzili zaten bunun altinda
+          # kalacagi icin degerler DEGISTIRILMEDI, sadece bu not).
           raytrace_min_range: 0.0
           raytrace_max_range: 12.0
           # LIDAR braketindeki 3D baski kaynakli sahte yakin-mesafe yansimalarini
@@ -257,7 +284,9 @@ velocity_smoother:
     scale_velocities: True
     feedback: "OPEN_LOOP"
     max_velocity: [0.4, 0.0, 1.0]
-    min_velocity: [-0.2, 0.0, -1.0]
+    # vx_min ile ayni sebep: dogrusal geri gidis KAPALI, aci (z) reverse
+    # (-1.0) kalsin - yerinde saga/sola donusu engellemiyor.
+    min_velocity: [0.0, 0.0, -1.0]
     max_accel: [1.5, 0.0, 1.5]
     max_decel: [-1.5, 0.0, -1.5]
     odom_topic: "odom"

@@ -1,0 +1,10 @@
+{
+  "sol_x_pin": "A4",
+  "sol_ters_x": true,
+  "sol_ters_y": true,
+  "sag_x_pin": "A0",
+  "sag_ters_x": false,
+  "sag_ters_y": true,
+  "sol_toggle_ters": true,
+  "sag_toggle_ters": false
+}

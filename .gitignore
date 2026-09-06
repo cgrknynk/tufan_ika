@@ -6,3 +6,10 @@ build/
 install/
 log/
 .claude/
+# Calisma zamani cikti / cokme dokumleri (2026-09-06)
+core.*
+crash_log.txt
+crash_rapor_son.txt
+*.bak
+*.bak_*
+*.ino.bak

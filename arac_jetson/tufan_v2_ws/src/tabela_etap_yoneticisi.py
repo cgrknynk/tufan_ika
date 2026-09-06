@@ -1,36 +1,46 @@
 #!/usr/bin/env python3
-"""Tum gorev sekansini yoneten karar dugumu (2026-08-31, kullanici istegi).
+"""Tum gorev sekansini yoneten karar dugumu (2026-08-31, kullanici istegi;
+2026-09-01 GUNCELLENDI - kullanici istegi: "'1' numarasini gorunce ileri
+hareket baslasin, S donuslerini tamamlayacak sekilde hareket etsin";
+2026-09-01 TEKRAR GUNCELLENDI - kullanici istegi: "arka kamerayi simdilik
+kullanmayalim, sadece on kamera ve silah kamerasi acik olsun, Stop'u
+gordugunde on kamera modeli kapansin ve silahin modeli acilsin ve silahin
+kodu calissin" - Stop -> 15sn bekleyip devam etme davranisi KALDIRILDI,
+ORIJINAL silah/turret fazi GERI GETIRILDI).
 
-AKIS:
+GUNCEL AKIS (2026-09-01):
   1) Etap takibi (risksiz, bilgi amacli): One..Eleven tabelalari gorulunce
      /guncel_etap (Int32) yayinlanir. EndOfEleven -> /parkur_durumu
-     "TAMAMLANDI".
-  2) ETAP 8 (kullanicinin DUZELTMESI - ilk mesajda "10" denmisti, sonra
-     "8 olacak" diye duzeltildi) -> DIK RAMPAYA CIKIS: guncel pozisyon+
-     yon (/odom) okunur, RAMPA_HEDEF_MESAFE_M (varsayilan 20m - tam rampa+
-     duzluk mesafesi bilinmedigi icin BOL tutuldu, Stop tabelasi zaten
-     erken kesecek) kadar ileri bir /ugv_goal gonderilir. LIDAR'in rampada
-     zemini engel sanma sorunu bu dugumun degil, egim_costmap_ayarlayici.py
-     node'unun isi (pitch-tabanli, otomatik - bkz. o dosyanin basi).
-  3) STOP TABELASI (SADECE OTONOM modda, ARDIŞIK STOP_DOGRULAMA_ADEDI kare
-     boyunca) -> GECICI DURDURMA: mevcut /odom pozisyonu YENI /ugv_goal
-     olarak yayinlanir - goal_manager_node.py bunu ANINDA "hedefe ulasildi"
-     sayip yumusakca durur (KALICI acil-durdurma kilidi - /arac_komut
-     EMERGENCY_STOP_CMD - KULLANILMAZ, kullanicinin acik istegi: "otomatik
-     devam etsin", o kilit operator "DEVAM ET" basmadan asla acilmaz).
-     Ayni anda: /tabela_model_aktif=False (on kamera modeli durur, kamera
-     ACIK kalir), /turret_model_aktif=True (silah kamerasi/izleme baslar),
-     /silah_modu=OTONOM (turret_node.py varsayilan MANUEL'de baslar,
-     otonom hedeflemenin baslamasi icin BU sart).
-  4) /silah_hedef_vuruldu >= HEDEF_VURULDU_ESIGI (turret_node.py: 3 kere
-     kilitlenip 5er saniye bekleme dongusu TAMAMLANDI, kullanicinin acik
-     istegi) -> /turret_model_aktif=False, /silah_modu=MANUEL (silah
-     devre disi), sonra INIS: rampaya cikarken kat edilen mesafe KADAR
-     (kullanicinin secimi: "cikista kullanilan mesafeyle ayni - simetrik
-     rampa") + 5m (kullanicinin sabit istegi) ileri bir /ugv_goal
-     gonderilir. Bu hedef DOGAL olarak (goal_manager SUCCESS) tamamlanir,
-     ayrica bir durdurma tetiklemeye gerek yok - MPPI/velocity_smoother
-     zaten hedefte yumusakca durur.
+     "TAMAMLANDI". DEGISMEDI.
+  2) ETAP 1 (One) tabelasi ILK gorulunce -> /otonom_surus_aktif=True
+     yayinlanir. serbest_yon_takipcisi.py bu sinyali dinleyip LIDAR'a
+     gore en acik yone dogru surekli kisa-mesafeli hedefler gondermeye
+     baslar (gap-following - bkz. o dosyanin basi, haritasiz/bilinmeyen
+     parkurda S donuslerini REAKTIF olarak takip eder).
+  3) ETAP 8 RAMPA TETIKLEMESI HALA GECICI DEVRE DISI (bu mesajda
+     degismedi) - asagida _rampa_cikisini_baslat() cagrisi YORUM
+     SATIRINDA, kod silinmedi, ileride geri acilabilir.
+  4) STOP TABELASI (SADECE OTONOM modda, ARDIŞIK STOP_DOGRULAMA_ADEDI kare
+     boyunca) -> GECICI DURDURMA + SILAH FAZI: mevcut /odom pozisyonu
+     YENI /ugv_goal olarak yayinlanir (goal_manager_node aninda "hedefe
+     ulasildi" sayip yumusakca durur) + /otonom_surus_aktif=False
+     (serbest_yon_takipcisi durur, silah fazi boyunca yeniden hedef
+     atmasin diye) + /tabela_model_aktif=False (on kamera modeli durur,
+     KAMERA ACIK KALIR) + /turret_model_aktif=True + /silah_modu=OTONOM
+     (turret_node.py varsayilan MANUEL'de baslar, otonom hedeflemenin
+     baslamasi icin BU sart). KALICI acil-durdurma kilidi (/arac_komut
+     EMERGENCY_STOP_CMD) KULLANILMAZ (degismedi, dosya sonu notu).
+  5) /silah_hedef_vuruldu >= HEDEF_VURULDU_ESIGI (turret_node.py: 3 kere
+     kilitlenip 5er saniye bekleme dongusu TAMAMLANDI) -> /turret_model_
+     aktif=False, /silah_modu=MANUEL (silah devre disi), sonra INIS:
+     rampaya cikarken kat edilen mesafe KADAR (rampa tetiklemesi devre
+     disi oldugu icin bu bilgi genelde YOK - bu durumda sadece
+     SON_ILERI_PAY_M sabit mesafesi kullanilir, guvenli fallback) ileri
+     bir /ugv_goal gonderilir.
+
+ARKA KAMERA (2026-09-01, kullanici istegi): tufan_mppi.launch.py'den
+CIKARILDI - simdilik SADECE on kamera (tabela) ve silah (turret) kamerasi
+acik. Bu dosyayla dogrudan ilgisi yok, launch dosyasinda not var.
 
 Model siniflari (tabela_ana.engine/Tabela_ana.pt, canli sorgulandi):
 One..Eleven (etap numarasi tabelalari), EndOfEleven (parkur/etap 11 bitis
@@ -51,7 +61,8 @@ SAYI_ETAP_HARITASI = {
 
 GUVEN_ESIGI = 0.6  # bu altindaki tespitler yok sayilir (gurultu/kararsizlik)
 STOP_DOGRULAMA_ADEDI = 3  # ust uste bu kadar kare Stop gormeden TETIKLENMEZ
-RAMPA_ETABI = 8  # *** kullanicinin duzeltmesi: ilk mesajda 10 (Ten) denmisti ***
+ILERI_BASLATMA_ETABI = 1  # 'One' tabelasi -> serbest yon takibi baslasin
+RAMPA_ETABI = 8  # *** GECICI DEVRE DISI (2026-09-01, kullanici istegi) ***
 RAMPA_HEDEF_MESAFE_M = 20.0  # tam mesafe bilinmedigi icin bol tutuldu
 SON_ILERI_PAY_M = 5.0  # inis sonrasi sabit ek mesafe (kullanici istegi)
 HEDEF_VURULDU_ESIGI = 3  # turret_node.py ile TUTARLI olmali
@@ -69,13 +80,14 @@ class TabelaEtapYoneticisi(Node):
         self._surus_modu = 'MANUEL'
         self._ardisik_stop_sayaci = 0
         self._stop_tetiklendi = False
-        self._rampa_baslangic_pozu = None  # (x, y) - etap 8 hedefi gonderilirken
+        self._rampa_baslangic_pozu = None  # (x, y) - etap 8 hedefi gonderilirken (su an tetiklenmiyor)
 
         self._son_odom = None
 
         self._etap_pub = self.create_publisher(Int32, '/guncel_etap', 10)
         self._parkur_pub = self.create_publisher(String, '/parkur_durumu', 10)
         self._goal_pub = self.create_publisher(PoseStamped, '/ugv_goal', 10)
+        self._otonom_surus_pub = self.create_publisher(Bool, '/otonom_surus_aktif', 10)
         self._tabela_model_pub = self.create_publisher(Bool, '/tabela_model_aktif', 10)
         self._turret_model_pub = self.create_publisher(Bool, '/turret_model_aktif', 10)
         self._silah_modu_pub = self.create_publisher(String, '/silah_modu', 10)
@@ -87,8 +99,9 @@ class TabelaEtapYoneticisi(Node):
 
         self.get_logger().info(
             'tabela_etap_yoneticisi aktif: /tabela_tespit dinleniyor - '
-            f'etap {RAMPA_ETABI} -> rampa cikisi, Stop -> gecici dur + silah '
-            'fazi, hedef vuruldu -> inis + son ilerleme.'
+            f'etap {ILERI_BASLATMA_ETABI} -> serbest yon takibi (gap-following) '
+            'baslar, Stop -> gecici dur + on kamera modeli kapanir + silah '
+            'fazi baslar, hedef vuruldu -> silah kapanir + inis.'
         )
 
     def _mod_cb(self, msg):
@@ -170,8 +183,13 @@ class TabelaEtapYoneticisi(Node):
                 self._guncel_etap = yeni_etap
                 self._etap_pub.publish(Int32(data=yeni_etap))
                 self.get_logger().info(f'🏁 ETAP {yeni_etap} tabelasi algilandi (güven={guven:.2f})')
-                if yeni_etap == RAMPA_ETABI and onceki_etap != RAMPA_ETABI:
-                    self._rampa_cikisini_baslat()
+                if yeni_etap == ILERI_BASLATMA_ETABI and onceki_etap != ILERI_BASLATMA_ETABI:
+                    self._otonom_surus_pub.publish(Bool(data=True))
+                    self.get_logger().info(
+                        '🧭 Etap 1 tabelasi görüldü - serbest yön takibi (gap-following) BAŞLADI.')
+                # RAMPA TETIKLEMESI GECICI DEVRE DISI (kullanici istegi, 2026-09-01):
+                # if yeni_etap == RAMPA_ETABI and onceki_etap != RAMPA_ETABI:
+                #     self._rampa_cikisini_baslat()
             return
 
         if cls_adi == 'EndOfEleven':
@@ -188,6 +206,7 @@ class TabelaEtapYoneticisi(Node):
         self._ardisik_stop_sayaci = 0
 
     def _rampa_cikisini_baslat(self):
+        # GECICI DEVRE DISI - bkz. dosya basi notu. Kod korunuyor, cagrilmiyor.
         self._rampa_baslangic_pozu = self._relatif_hedef_gonder(RAMPA_HEDEF_MESAFE_M)
         if self._rampa_baslangic_pozu is None:
             self.get_logger().error(
@@ -210,6 +229,7 @@ class TabelaEtapYoneticisi(Node):
         self.get_logger().warn('🛑 STOP TABELASI DOĞRULANDI - araç geçici durduruluyor, silah fazına geçiliyor.')
 
         self._gecici_dur()
+        self._otonom_surus_pub.publish(Bool(data=False))
         self._tabela_model_pub.publish(Bool(data=False))
         self._turret_model_pub.publish(Bool(data=True))
         self._silah_modu_pub.publish(String(data='OTONOM'))
@@ -235,7 +255,7 @@ class TabelaEtapYoneticisi(Node):
                 f'inis+son ilerleme hedefi: {inis_mesafesi:.1f}m')
         else:
             self.get_logger().warn(
-                'Rampa cikis mesafesi bilinmiyor (kayit yok) - sadece '
+                'Rampa cikis mesafesi bilinmiyor (rampa tetiklemesi devre disi) - sadece '
                 f'{SON_ILERI_PAY_M}m sabit ilerleniyor.')
 
         self._relatif_hedef_gonder(inis_mesafesi)

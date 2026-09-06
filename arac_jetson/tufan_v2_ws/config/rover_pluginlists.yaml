@@ -1,0 +1,68 @@
+/**:
+  ros__parameters:
+    # Rover-ozgu plugin denylist (2026-09-01, kullanici istegi - mavros CPU
+    # kullanimini azalt). Kod tabaninda GERCEKTEN kullanilan mavros topic'leri
+    # SADECE ikisi: /mavros/global_position/raw/fix ve /mavros/gpsstatus/
+    # gps1/raw (bkz. konum_birlestirici.py). mavros'un varsayilan apm_
+    # pluginlists.yaml 56 plugin yukluyor - bunlarin cogu drone/multirotor'a
+    # ozgu (setpoint_*, gimbal_control, terrain, adsb, optical_flow vb.) veya
+    # bu projede hic tuketilmeyen ozellikler. command plugin'i (set_stream_
+    # rate servisi icin KRITIK) ve sys_status/sys_time/global_position/
+    # gps_status (temel GPS+baglanti durumu icin) BILEREK TUTULDU. gps_rtk/
+    # gps_input/distance_sensor/rangefinder/esc_status/param/companion_
+    # process_status EMIN OLUNAMADIGI (baska bir makinedeki RTCM koprusu
+    # veya donanim baglantisi kullaniyor olabilir) icin GUVENLI TARAFTA
+    # kalinarak DOKUNULMADI.
+    plugin_denylist:
+      # orijinal apm_pluginlists.yaml'dan (degismedi)
+      - actuator_control
+      - ftp
+      - hil
+      - altitude
+      - debug_value
+      - image_pub
+      - px4flow
+      - vibration
+      - vision_speed_estimate
+      - wheel_odometry
+      # bu roverda hic kullanilmayan (offboard setpoint kontrolu - motor
+      # komutlari mavros'tan DEGIL, dogrudan Arduino/PPM uzerinden gidiyor)
+      - setpoint_accel
+      - setpoint_attitude
+      - setpoint_position
+      - setpoint_raw
+      - setpoint_trajectory
+      - setpoint_velocity
+      # drone/multirotor'a ozgu, bu araca fiziksel olarak bagli olmayan
+      - gimbal_control
+      - mount_control
+      - terrain
+      - tunnel
+      - adsb
+      - open_drone_id
+      - mocap
+      - optical_flow
+      - wind_estimation
+      - vfr_hud
+      # ayri sistemlerle (Nav2/YOLO/goal_manager) cakisan veya kullanilmayan
+      - obstacle_distance
+      - mission
+      - rallypoint
+      - waypoint
+      - trajectory
+      - nav_controller_output
+      - vision_pose
+      - fake_gps
+      - geofence
+      - manual_control
+      - rc_io
+      - sim_state
+      # donanimi bu araca hic bagli olmayan
+      - play_tune
+      - tdr_radio
+      - onboard_computer
+      - cellular_status
+      - esc_telemetry
+      - camera
+      - cam_imu_sync
+      - mag_calibration

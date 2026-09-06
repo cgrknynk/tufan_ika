@@ -36,6 +36,12 @@ install(PROGRAMS
   src/scan_matcher_filter.py
   src/fix_qos_bridge.py
   src/gps_hedef_donusturucu.py
+  src/tabela_etap_yoneticisi.py
+  src/egim_costmap_ayarlayici.py
+  src/arka_kamera_node.py
+  src/serbest_yon_takipcisi.py
+  src/kaba_harita_olusturucu.py
+  src/on_bosluk_nokta_atici.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

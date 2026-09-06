@@ -1,9 +1,9 @@
 """GPS/RTK (Cube Orange + Here4 GNSS + TUSAGA-Aktif) icin tum bringup'i
 tek yerden baslatir. Ana otonomluk launch dosyasindan (tufan_mppi.launch.py)
-KASITLI OLARAK AYRI tutuldu - bu projedeki here4_gnss.launch.py ile ayni
-gerekce (donanim/baglanti her zaman takili/dogrulanmis olmayabilir, ana
-sistemi etkilememeli). konum_birlestirici.py GPS topic'leri hic gelmese
-BILE saf dead-reckoning ile calismaya devam eder (bkz. o dosyanin basi).
+KASITLI OLARAK AYRI tutuldu - donanim/baglanti her zaman takili/dogrulanmis
+olmayabilir, ana sistemi etkilememeli. konum_birlestirici.py GPS topic'leri
+hic gelmese BILE saf dead-reckoning ile calismaya devam eder (bkz. o
+dosyanin basi).
 
 Ikisini BIRLIKTE calistirmak icin:
     ros2 launch tufan_v2_ws tufan_mppi.launch.py

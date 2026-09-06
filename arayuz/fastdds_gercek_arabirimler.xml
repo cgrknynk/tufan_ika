@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+Kullanici bildirimi (2026-09-01): "ubiquiti bağlayınca arayüz açılmıyor".
+Kok neden: bu makinede coklu ag arabirimi var (WiFi wlP1p1s0=10.40.64.44,
+Ubiquiti enP8p1s0=192.168.1.20, + docker0/l4tbr0/usb0/usb1/can0 gibi
+ilgisiz sanal arabirimler). ROS2'nin varsayilan DDS'i (Fast-DDS) discovery/
+gonderim icin TUM arabirimleri kullanmaya calisiyor - bu ANA GUI thread'ini
+KERNEL SEVIYESINDE bloke ediyordu (canli teshis: wchan sock_alloc_send_pskb'de
+takili kaliyordu - pencere hic acilmiyordu).
+
+DUZELTME (v2 - ILK VERSIYON GERI ALINDI): once SADECE WiFi'ye izin
+verilmisti, ama bu canli testte YENI bir soruna yol acti - arac SADECE
+Ubiquiti uzerinden erisilebilir oldugunda (WiFi yolu "Destination Host
+Unreachable" donuyordu) ROS2 verisi TAMAMEN kesildi ("veri gelmiyor",
+canli bildirildi) - calisan tek yolu yanlislikla disarida birakmis olduk.
+Simdi HER IKI GERCEK arabirim de (WiFi + Ubiquiti) beyaz listede - sadece
+ILGISIZ sanal arabirimler (docker0, l4tbr0, usb0/usb1, can0) disarida
+birakiliyor, hangisi CALISIYORSA ROS2 onu kullanabilsin diye.
+
+ONEMLI: <address> alanlari SU ANKI (DHCP/statik) IP'ler - biri degisirse
+bu dosya da guncellenmeli.
+-->
+<dds xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+    <profiles>
+        <transport_descriptors>
+            <transport_descriptor>
+                <transport_id>gercek_arabirimler_udp</transport_id>
+                <type>UDPv4</type>
+                <interfaceWhiteList>
+                    <address>10.40.64.44</address>
+                    <address>192.168.1.20</address>
+                    <address>127.0.0.1</address>
+                </interfaceWhiteList>
+            </transport_descriptor>
+        </transport_descriptors>
+        <participant profile_name="gercek_arabirimler_participant" is_default_profile="true">
+            <rtps>
+                <userTransports>
+                    <transport_id>gercek_arabirimler_udp</transport_id>
+                </userTransports>
+                <useBuiltinTransports>false</useBuiltinTransports>
+            </rtps>
+        </participant>
+    </profiles>
+</dds>

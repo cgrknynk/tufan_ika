@@ -62,6 +62,26 @@ SAYI_ETAP_HARITASI = {
 GUVEN_ESIGI = 0.6  # bu altindaki tespitler yok sayilir (gurultu/kararsizlik)
 STOP_DOGRULAMA_ADEDI = 3  # ust uste bu kadar kare Stop gormeden TETIKLENMEZ
 ILERI_BASLATMA_ETABI = 1  # 'One' tabelasi -> serbest yon takibi baslasin
+# KAYAR ENGEL (2026-09-06, kullanici istegi: "parkura kayar engel
+# ekleyeceğim; ön kamerada 6. tabelayı tespit ettiğinde aracın kayar engel
+# aşamasına geldiğini anlaması gerekiyor, araç engelden kaçıp geri
+# dönmemeli, kayar engel açıldığında devam etmeli").
+# 'Six' tabelasi gorulunce /kayar_engel_etabi=True yayinlanir;
+# on_bosluk_nokta_atici.py bunu gorunce ONUNDEKI kapali engelden KACMAZ -
+# yerinde bekler ve engel acilinca duz gecer (bkz. o dosyadaki
+# KAYAR_ENGEL modu). Etap 6'yi GECEN bir tabela (7+) gorulunce sinyal
+# kalkar.
+KAYAR_ENGEL_ETABI = 6
+# *** CANLI OLCUMDE BULUNDU (2026-09-06) ***: model, kamera parkurda
+# degilken bile GUVEN_ESIGI'ni (0.6) asan SAHTE tabela tespitleri
+# uretiyor - tek bir test sirasinda Etap 8 (0.77 / 0.80 / 0.71), Etap 2
+# (0.76) ve Etap 1 (0.60) ard arda "goruldu". Kayar engel kararini TEK
+# kareye baglamak tehlikeli: sahte bir "7+" tespiti asamayi ANINDA iptal
+# eder ve arac tam da kacmamasi gereken anda engelden kacmaya calisirdi.
+# Bu yuzden kayar engel durumu, AYNI sinifin ust uste bu kadar kare
+# gorulmesini bekler (Stop tabelasindaki STOP_DOGRULAMA_ADEDI ile ayni
+# desen). /guncel_etap yayini DEGISMEDI - o zaten "risksiz, bilgi amacli".
+KAYAR_ENGEL_DOGRULAMA_ADEDI = 3
 RAMPA_ETABI = 8  # *** GECICI DEVRE DISI (2026-09-01, kullanici istegi) ***
 RAMPA_HEDEF_MESAFE_M = 20.0  # tam mesafe bilinmedigi icin bol tutuldu
 SON_ILERI_PAY_M = 5.0  # inis sonrasi sabit ek mesafe (kullanici istegi)
@@ -91,6 +111,15 @@ class TabelaEtapYoneticisi(Node):
         self._tabela_model_pub = self.create_publisher(Bool, '/tabela_model_aktif', 10)
         self._turret_model_pub = self.create_publisher(Bool, '/turret_model_aktif', 10)
         self._silah_modu_pub = self.create_publisher(String, '/silah_modu', 10)
+        self._kayar_engel_pub = self.create_publisher(Bool, '/kayar_engel_etabi', 10)
+        self._kayar_engel_aktif = False
+        self._son_etap_adayi = None
+        self._etap_aday_sayaci = 0
+        # Durum PERIYODIK tekrarlanir: on_bosluk_nokta_atici.py sonradan
+        # baslarsa ya da yeniden baslatilirsa tek seferlik bir yayini
+        # KACIRIRDI ve kayar engelden kacmaya calisirdi. Bu projede ayni
+        # ders /surus_modu ve panel baglanti durumunda da yasandi.
+        self.create_timer(1.0, self._kayar_engel_durumunu_tekrarla)
 
         self.create_subscription(String, '/tabela_tespit', self._tespit_cb, 10)
         self.create_subscription(String, '/surus_modu', self._mod_cb, 10)
@@ -178,11 +207,20 @@ class TabelaEtapYoneticisi(Node):
         if cls_adi in SAYI_ETAP_HARITASI:
             self._ardisik_stop_sayaci = 0
             yeni_etap = SAYI_ETAP_HARITASI[cls_adi]
+            # KAYAR ENGEL KARARI icin ARDISIK DOGRULAMA (bkz. sabitteki not).
+            if yeni_etap == self._son_etap_adayi:
+                self._etap_aday_sayaci += 1
+            else:
+                self._son_etap_adayi = yeni_etap
+                self._etap_aday_sayaci = 1
+            if self._etap_aday_sayaci >= KAYAR_ENGEL_DOGRULAMA_ADEDI:
+                self._kayar_engel_etabini_guncelle(yeni_etap)
             if yeni_etap != self._guncel_etap:
                 onceki_etap = self._guncel_etap
                 self._guncel_etap = yeni_etap
                 self._etap_pub.publish(Int32(data=yeni_etap))
                 self.get_logger().info(f'🏁 ETAP {yeni_etap} tabelasi algilandi (güven={guven:.2f})')
+
                 if yeni_etap == ILERI_BASLATMA_ETABI and onceki_etap != ILERI_BASLATMA_ETABI:
                     self._otonom_surus_pub.publish(Bool(data=True))
                     self.get_logger().info(
@@ -204,6 +242,33 @@ class TabelaEtapYoneticisi(Node):
 
         # Bilinmeyen/ilgisiz sinif - Stop dogrulama zincirini bozar
         self._ardisik_stop_sayaci = 0
+
+    def _kayar_engel_etabini_guncelle(self, etap):
+        """Etap 6 -> kayar engel asamasi ACIK; 7 ve sonrasi -> KAPALI.
+
+        Etap numarasi GERI gitmez (tabelalar sirayla goruluyor), bu yuzden
+        'etap > 6' testi asamanin bittigini guvenle gosterir."""
+        yeni = (etap == KAYAR_ENGEL_ETABI)
+        if etap > KAYAR_ENGEL_ETABI:
+            yeni = False
+        if yeni == self._kayar_engel_aktif:
+            return
+        self._kayar_engel_aktif = yeni
+        self._kayar_engel_pub.publish(Bool(data=yeni))
+        if yeni:
+            self.get_logger().warn(
+                '🚧 KAYAR ENGEL ASAMASI BASLADI (etap 6 tabelasi) - arac '
+                'onundeki kapali engelden KACMAYACAK, yerinde bekleyip '
+                'engel acilinca duz gececek.')
+        else:
+            self.get_logger().info(
+                '🚧 Kayar engel asamasi bitti (etap %d goruldu).' % etap)
+
+    def _kayar_engel_durumunu_tekrarla(self):
+        try:
+            self._kayar_engel_pub.publish(Bool(data=bool(self._kayar_engel_aktif)))
+        except Exception:
+            pass
 
     def _rampa_cikisini_baslat(self):
         # GECICI DEVRE DISI - bkz. dosya basi notu. Kod korunuyor, cagrilmiyor.

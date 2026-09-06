@@ -2932,6 +2932,99 @@ tick canlı LIDAR'dan yeniden üretiyor, hedefin ömrü saniyenin altında.
 derlemeden denemek için:
 `ros2 param set /konum_birlestirici gps_correct_min_fix_type 5`
 
+## KAYAR ENGEL AŞAMASI (6. tabela, 2026-09-06)
+
+Kullanıcı isteği: *"parkura kayar engel ekleyeceğim; ön kamerada 6.
+tabelayı tespit ettiğinde aracın kayar engel aşamasına geldiğini anlaması
+gerekiyor, araç engelden kaçıp geri dönmemeli, kayar engel açıldığında
+devam etmeli."*
+
+### Akış
+`tabela_etap_yoneticisi.py` 'Six' tabelasını görünce
+**`/kayar_engel_etabi` (Bool) = True** yayınlar; etap 7+ görülünce False.
+Durum 1 Hz ile PERİYODİK tekrarlanır — `on_bosluk_nokta_atici.py`
+sonradan başlarsa tek seferlik bir yayını kaçırır ve engelden kaçmaya
+çalışırdı (bu projede aynı ders `/surus_modu` ve panel bağlantı
+durumunda da yaşandı).
+
+### Davranış (`on_bosluk_nokta_atici.py` → `KAYAR_ENGEL` modu)
+Bayrak açıkken fan taraması **hiç yapılmaz** — yanlarda boşluk olsa bile
+oraya hedef atılmaz ("engelden kaçıp geri dönmemeli"). Sadece dar bir ön
+koniye (±25°) bakılır:
+- **Kapalı** (< 3.0 m): `KAYAR_ENGEL_BEKLIYOR` — aracın **mevcut konumu
+  hedef olarak yayınlanır**, goal_manager bunu "ulaşıldı" sayıp yumuşakça
+  durur. *Hiçbir hedef yayınlamamak YETMEZ* — Nav2 o durumda eski
+  hedefine gitmeye devam eder, yani aracı kapıya sürerdi. Konum
+  3 saniyede bir tekrar sabitlenir (Nav2 kurtarma davranışlarına karşı).
+- **Açık** (≥ 3.0 m): düz ileri kısa hedef, geçiş.
+
+**RAMPA modu bu aşamada çalıştırılmaz.** Kapalı bir kapı da "gövdeye dik
+düz yüzey" testini geçerdi ve araç kapıya SÜRÜLÜRDÜ — offline testte
+doğrulandı: aynı yüzey normalde `RAMPA_YAKLASMA` verirken bayrak
+açıkken `KAYAR_ENGEL_BEKLIYOR` veriyor.
+
+### Offline testte bulunan hata
+Serbest mesafe normalde hedef ufkunda (2.0+0.6 = **2.6 m**) kırpılıyor;
+açılma eşiği **3.0 m** olduğu için ölçülen değer eşiği HİÇBİR ZAMAN
+aşamazdı — kapı tamamen açık olsa bile araç sonsuza kadar beklerdi.
+Bu ölçüm için kırpma eşiğin üstüne taşındı (`tavan_ust`). Rampa geçiş
+testinde birebir aynı hata yaşanmıştı.
+
+### CANLI ÖLÇÜMDE BULUNAN SAHA SORUNU: sahte tabela tespitleri
+Kamera parkurda değilken bile model, `GUVEN_ESIGI`'ni (0.6) aşan sahte
+tespitler üretti — tek bir test sırasında **Etap 8 (0.77 / 0.80 / 0.71),
+Etap 2 (0.76), Etap 1 (0.60)**. Kayar engel kararını tek kareye bağlamak
+tehlikeliydi: sahte bir "7+" tespiti aşamayı anında iptal ediyordu (ilk
+testte tam olarak bu oldu, bayrak True'ya hiç oturmadı).
+
+Çözüm: kayar engel kararı için **ardışık doğrulama**
+(`KAYAR_ENGEL_DOGRULAMA_ADEDI = 3`, Stop tabelasındaki desenin aynısı).
+`/guncel_etap` yayını DEĞİŞMEDİ — o zaten "risksiz, bilgi amaçlı".
+
+**Doğrulama sonrası:** `/kayar_engel_etabi` test boyunca **6/6 mesajda
+True** kaldı, sahte tespitler aşamayı iptal edemedi.
+
+> **NOT (sahada dikkat):** sahte tespitler modelin kendi sorunu; kayar
+> engel kararı artık korunuyor ama `/guncel_etap` ve Stop davranışı hâlâ
+> aynı modele dayanıyor. Gerekirse `GUVEN_ESIGI` yükseltilmeli.
+
+### SAHADA BULUNAN TASARIM HATASI: "6'yı okuyor ama hareket etmiyor"
+Kullanıcı bildirimi. Canlı ölçüm (araç gerçek kayar engelin önünde):
+```
+mod = KAYAR_ENGEL_BEKLIYOR   on_serbest = 2.05m   acik_esik = 3.0m
+LIDAR:  ±10° koni -> en yakın 4.75m, ortanca 9.11m   <-- TAM ÖN AÇIK
+        ±25° koni -> en yakın 1.85m                  <-- kenarda bir şey var
+```
+Geçidin geometrisi ayrıca ölçüldü — **araç zaten geçebiliyordu**:
+```
+DÜZ giderken süpürülen koridor (yarı genişlik 0.85m) -> ilk engel 3.64m
+En iyi açı: -7 derece -> 5.25m
+```
+İlk sürüm koni içindeki **en kısa** mesafeye bakıyordu ("koninin tamamı
+boş mu?"). Kayar engel için bu YANLIŞ test: kapı çerçevesi/direği ya da
+yana kaymış panel koninin kenarına girdiği anda, önündeki geçit
+metrelerce açık olsa bile "kapalı" deniyordu.
+
+**Doğru test "koni boş mu" değil, "ARAÇ BU GENİŞLİKTE GEÇEBİLİYOR MU":**
+her aday açıda araç genişliğinde bir koridor süpürülür ve **en iyisi**
+(en uzağa giden) alınır. "Etrafından dolaşma" koruması bozulmaz — açılar
+±25° ile sınırlı, yani araç ancak geçidi HİZALAMAK için küçük bir
+düzeltme yapabilir, engeli dolaşamaz.
+
+Ek olarak **düz gitmek varsayılan** yapıldı (`kayar_engel_hizalama_payi_m
+= 0.3`): bir aday ancak belirgin ölçüde daha iyiyse seçilir. Yoksa her
+şey eşit olduğunda (önü tamamen boş sahne) döngüye ilk giren açı (-25°)
+kazanıp aracı gereksiz yere yana kırdırıyordu — offline testte görüldü.
+
+**Doğrulama:** düzeltme sonrası, aracı hareket ettirmeden çalıştırılan
+gölge bir düğüm örneği AYNI gerçek sahnede `mod = KAYAR_ENGEL` (geçiş)
+raporladı — artık `KAYAR_ENGEL_BEKLIYOR` değil.
+
+### Offline test (6/6 geçti)
+kapı kapalı→bekle · **yanda geniş geçit varken bile bekle (kaçmıyor)** ·
+etap kapalıyken normal davranış · kapı açık→düz geç · rampa
+tetiklenmiyor · etap kapanınca aynı yüzey yine rampa (regresyon).
+
 ---
 *Bu doküman, `~/Desktop/tufan` altındaki kodun mevcut haline göre otomatik
 olarak (kod incelemesiyle) hazırlanmıştır.*

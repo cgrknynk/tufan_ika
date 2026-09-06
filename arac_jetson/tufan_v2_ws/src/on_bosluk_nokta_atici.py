@@ -292,6 +292,27 @@ class OnBoslukNoktaAtici(Node):
         # donmus bir aracin onundeki duvar rampa SAYILMAZ.
         self.declare_parameter('rampa_maks_yon_sapmasi_derece', 45.0)
 
+        # --- KAYAR ENGEL (2026-09-06, kullanici istegi) ---
+        # 6. tabela gorulunce tabela_etap_yoneticisi.py /kayar_engel_etabi
+        # =True yayinlar. O asamada ONDEKI kapali engel bir KAPI'dir:
+        #   * ETRAFINDAN DOLASILMAZ ("engelden kacip geri donmemeli")
+        #   * RAMPA SANILMAMALI (rampa modu araci yuzeye SURERDI - kapali
+        #     bir kapiya dogru surmek en kotu davranis olurdu)
+        #   * Yerinde BEKLENIR, kapi acilinca DUZ gecilir
+        # Bekleme sirasinda mevcut konum hedef olarak yayinlanir; bu,
+        # goal_manager_node'un "hedefe ulasildi" deyip yumusakca durmasini
+        # saglar (tabela_etap_yoneticisi._gecici_dur ile AYNI desen).
+        # Hicbir hedef yayinlamamak YETMEZ - Nav2 o durumda ESKI hedefine
+        # dogru gitmeye devam eder, yani araci kapiya surerdi.
+        self.declare_parameter('kayar_engel_koni_derece', 25.0)
+        self.declare_parameter('kayar_engel_acik_mesafesi_m', 3.0)
+        self.declare_parameter('kayar_engel_tutma_araligi_s', 3.0)
+        self.declare_parameter('kayar_engel_gecis_mesafesi_m', 2.5)
+        # Duz gitmek yerine yana kirmak icin gereken EN AZ kazanc (m).
+        # Kucuk tutulursa arac gecit onunde gereksiz salinir; buyuk
+        # tutulursa gecidi hizalayamaz.
+        self.declare_parameter('kayar_engel_hizalama_payi_m', 0.3)
+
         # --- Aktivasyon ---
         # OTOMATIK BASLATMA (2026-09-06, kullanici istegi: "otonoma
         # gectigimde nokta atma islemini otomatik olarak baslatacak kodu
@@ -315,6 +336,9 @@ class OnBoslukNoktaAtici(Node):
 
         self._aktif_elle = False
         self._aktif_gorev = False
+        self._kayar_engel_etabi = False
+        self._kayar_engel_son_tutma = 0.0
+        self._kayar_engel_bekliyor = False
         self._surus_modu = 'MANUEL'   # guvenli varsayilan (surus_koprusu.py ile ayni)
         self._surus_modu_zamani = 0.0
         self._son_aktiflik = False
@@ -334,6 +358,7 @@ class OnBoslukNoktaAtici(Node):
         self.create_subscription(Bool, '/oto_nokta_aktif', self._elle_aktif_cb, 10)
         self.create_subscription(Bool, '/otonom_surus_aktif', self._gorev_aktif_cb, 10)
         self.create_subscription(String, '/surus_modu', self._surus_modu_cb, 10)
+        self.create_subscription(Bool, '/kayar_engel_etabi', self._kayar_engel_cb, 10)
         self.create_subscription(LaserScan, '/scan', self._scan_cb, 10)
         self.create_subscription(Odometry, '/odom', self._odom_cb, 10)
 
@@ -382,6 +407,9 @@ class OnBoslukNoktaAtici(Node):
             'rampa_sektor_yari_acisi_derece', 'rampa_kutu_derece',
             'rampa_duzlem_toleransi_m', 'rampa_maks_mesafe_m',
             'rampa_yaklasma_payi_m', 'rampa_maks_yon_sapmasi_derece',
+            'kayar_engel_koni_derece', 'kayar_engel_acik_mesafesi_m',
+            'kayar_engel_tutma_araligi_s', 'kayar_engel_gecis_mesafesi_m',
+            'kayar_engel_hizalama_payi_m',
             'surus_modu_ile_aktiflesir', 'surus_modu_bayatlik_s',
             'otonom_surus_ile_aktiflesir',
             'veri_bayatlik_esigi_s',
@@ -405,6 +433,17 @@ class OnBoslukNoktaAtici(Node):
 
     def _gorev_aktif_cb(self, msg: Bool):
         self._aktif_gorev = bool(msg.data)
+
+    def _kayar_engel_cb(self, msg: Bool):
+        yeni = bool(msg.data)
+        if yeni != self._kayar_engel_etabi:
+            self._kayar_engel_etabi = yeni
+            self.get_logger().warn(
+                'KAYAR ENGEL asamasi ' + ('ACIK - onundeki kapali engelden '
+                'KACILMAYACAK, yerinde beklenip acilinca duz gecilecek.'
+                if yeni else 'KAPANDI - normal davranisa donuldu.'))
+            if not yeni:
+                self._kayar_engel_bekliyor = False
 
     def _surus_modu_cb(self, msg: String):
         yeni = msg.data.strip().upper()
@@ -524,6 +563,13 @@ class OnBoslukNoktaAtici(Node):
                                 mod_adi='YAN_EGIM')
             return
 
+        # KAYAR ENGEL asamasi (6. tabela) - egim modlarindan SONRA kontrol
+        # edilir: gercek bir egimde govde-egimi kaynakli sahte engeller
+        # olusur, onlari "kapali kapi" sanmamak icin egim modlari oncelikli.
+        if self._kayar_engel_etabi:
+            self._kayar_engel_isle(px, py, yaw, odom, durum)
+            return
+
         self._normal_ilerle(px, py, yaw, odom, durum,
                             fan_yari_derece=float(self._p['fan_yari_acisi_derece']),
                             mod_adi='NORMAL')
@@ -586,6 +632,124 @@ class OnBoslukNoktaAtici(Node):
         self._hedef_gonder(d, 0.0, yaw, odom, durum)
 
     # ---------------- mod: normal (fan puanlamasi) ----------------
+    def _kayar_engel_isle(self, px, py, yaw, odom, durum):
+        """6. tabela asamasi: ONDEKI engel bir KAPI'dir, etrafindan
+        dolasilmaz.
+
+        Kullanici tarifi: "araç engelden kaçıp geri dönmemeli, kayar engel
+        açıldığında devam etmeli". Bu yuzden burada fan taramasi HIC
+        yapilmaz - yan taraflarda bosluk olsa bile oraya hedef atilmaz.
+        Sadece DAR bir on koniye bakilir:
+          * kapali  -> yerinde tutulur (mevcut konum hedef olarak yayinlanir)
+          * acik    -> duz ileri kisa hedef
+        Rampa modu bu asamada CALISTIRILMAZ: kapali bir kapi da "govdeye
+        dik duz yuzey" testini gecerdi ve arac kapiya SURULURDU."""
+        yari = float(self._p['arac_yari_genislik_m']) + float(self._p['guvenlik_payi_m'])
+        koni = math.radians(float(self._p['kayar_engel_koni_derece']))
+        adim = math.radians(max(1.0, float(self._p['fan_adimi_derece'])))
+        acik_esik = float(self._p['kayar_engel_acik_mesafesi_m'])
+        # *** OFFLINE TESTTE BULUNAN HATA (2026-09-06) ***: serbest mesafe
+        # normalde hedef ufkunda (maks_hedef + durma_payi = 2.6m)
+        # KIRPILIYOR. Acilma esigi 3.0m oldugu icin olculen deger esigi
+        # HICBIR ZAMAN asamazdi - kapi tamamen acik olsa bile arac sonsuza
+        # kadar beklerdi. Bu olcum icin kirpma esigin USTUNE tasinir.
+        # (Rampa gecis testinde birebir ayni hata yasanmisti.)
+        tavan = acik_esik + 1.0
+        # *** SAHADA BULUNAN TASARIM HATASI (2026-09-06) ***
+        # Ilk surum koni icindeki EN KISA mesafeyi aliyordu ("koninin
+        # tamami bos mu?"). Kayar engel icin bu YANLIS testtir: kapi
+        # cercevesi/diregi ya da yana kaymis panel koninin kenarina
+        # girdigi anda, ONDEKI gecit metrelerce acik olsa bile "kapali"
+        # deniyordu. Sahada olculen tam durum: tam onde 9.11m ortanca
+        # aciklik varken (±10 koni en yakin 4.75m) dugum on_serbest=2.05m
+        # deyip bekliyordu - kullanici "6'yi okuyor ama hareket etmiyor".
+        #
+        # DOGRU test "koni bos mu" degil, "ARAC BU GENISLIKTE GECEBILIYOR
+        # MU": her aday acida ARAC GENISLIGINDE bir koridor supurulur ve
+        # EN IYISI (en uzaga giden) alinir. Ayni olcumde duz giderken
+        # gecit 3.64m, -7 derecede 5.25m acik cikti - yani arac zaten
+        # gecebiliyordu.
+        #
+        # "Etrafindan dolasma" korumasi BOZULMAZ: acilar ±koni (25 derece)
+        # ile sinirli, yani arac ancak gecidi HIZALAMAK icin kucuk bir
+        # duzeltme yapabilir, engeli DOLASAMAZ.
+        # DUZ GITMEK VARSAYILAN: once theta=0 olculur, bir aday ancak
+        # BELIRGIN olcude (tercih payi) daha iyiyse secilir. Yoksa her sey
+        # esit oldugunda (ornegin onu tamamen bos bir sahne) donguye ilk
+        # giren aci (-koni) kazanip araci gereksiz yere yana kirdiriyordu -
+        # offline testte gorulen davranis buydu.
+        en_iyi_mesafe, _ = self._yon_degerlendir(px, py, 0.0, yari, tavan_ust=tavan)
+        en_iyi_mesafe = float(en_iyi_mesafe)
+        en_iyi_theta = 0.0
+        pay = float(self._p['kayar_engel_hizalama_payi_m'])
+        theta = -koni
+        while theta <= koni + 1e-9:
+            serbest, _ = self._yon_degerlendir(px, py, theta, yari, tavan_ust=tavan)
+            if serbest > en_iyi_mesafe + pay:
+                en_iyi_mesafe, en_iyi_theta = float(serbest), theta
+            theta += adim
+        en_kisa = en_iyi_mesafe  # (isim korundu: "gecilebilen en uzak mesafe")
+        durum.update({'mod': 'KAYAR_ENGEL', 'on_serbest': round(en_kisa, 2),
+                      'gecis_acisi': round(math.degrees(en_iyi_theta), 1),
+                      'acik_esik': acik_esik})
+
+        if en_kisa < acik_esik:
+            durum['mod'] = 'KAYAR_ENGEL_BEKLIYOR'
+            durum['sebep'] = 'kapi kapali - yerinde bekleniyor'
+            if not self._kayar_engel_bekliyor:
+                self._kayar_engel_bekliyor = True
+                self.get_logger().warn(
+                    'KAYAR ENGEL KAPALI (%.2fm) - arac YERINDE BEKLIYOR. '
+                    'Etrafindan dolasilmayacak; kapi acilinca duz gecilecek.'
+                    % en_kisa)
+            self._konumda_tut(odom, durum)
+            self._durum_yayinla(durum)
+            return
+
+        if self._kayar_engel_bekliyor:
+            self._kayar_engel_bekliyor = False
+            self.get_logger().warn(
+                'KAYAR ENGEL ACILDI (%.2fm serbest) - duz ilerleniyor.' % en_kisa)
+        d = min(float(self._p['kayar_engel_gecis_mesafesi_m']),
+                max(0.0, en_kisa - float(self._p['durma_payi_m'])))
+        if d < 0.5:
+            durum['sebep'] = 'acik ama guvenli mesafe cok kisa'
+            self._durum_yayinla(durum)
+            return
+        durum.update({'theta': round(math.degrees(en_iyi_theta), 1),
+                      'mesafe': round(d, 2)})
+        self._onceki_theta = en_iyi_theta
+        self._hedef_gonder(d, en_iyi_theta, yaw, odom, durum)
+
+    def _konumda_tut(self, odom, durum):
+        """Mevcut konumu hedef olarak yayinlar -> goal_manager_node bunu
+        aninda 'ulasildi' sayip yumusakca durur (tabela_etap_yoneticisi.
+        _gecici_dur ile AYNI desen).
+
+        Periyodik tekrarlanir: Nav2 kurtarma davranislari araci yerinden
+        oynatirsa tekrar sabitlensin. _hedef_gonder KULLANILMAZ, cunku
+        oradaki "degisim kucuk -> yayinlama" filtresi tam da bu sabit
+        hedefi engellerdi."""
+        simdi = time.monotonic()
+        if (simdi - self._kayar_engel_son_tutma) < float(
+                self._p['kayar_engel_tutma_araligi_s']):
+            return
+        self._kayar_engel_son_tutma = simdi
+        hedef = PoseStamped()
+        hedef.header.stamp = self.get_clock().now().to_msg()
+        hedef.header.frame_id = 'odom'
+        hedef.pose.position.x = float(odom.pose.pose.position.x)
+        hedef.pose.position.y = float(odom.pose.pose.position.y)
+        hedef.pose.orientation = odom.pose.pose.orientation
+        try:
+            self._goal_pub.publish(hedef)
+        except Exception:
+            pass
+        # Sonraki normal hedefin "degisim kucuk" filtresine takilmamasi icin
+        # son-hedef hafizasi temizlenir.
+        self._son_hedef_xy = None
+        durum['tutma'] = 'konum sabitlendi'
+
     def _normal_ilerle(self, px, py, yaw, odom, durum, fan_yari_derece, mod_adi):
         maks = float(self._p['maks_hedef_mesafesi_m'])
         min_hedef = float(self._p['min_hedef_mesafesi_m'])

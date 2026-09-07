@@ -375,6 +375,7 @@ class TufanGCS(QMainWindow):
         self.telemetri_motoru.lidar_durum_sinyali.connect(self.lidar_arayuz_guncelle)
         self.telemetri_motoru.mod_durum_sinyali.connect(self.mod_durum_guncelle)
         self.telemetri_motoru.hedef_mesafe_sinyali.connect(self.hedef_mesafe_guncelle)
+        self.telemetri_motoru.silah_fazi_sinyali.connect(self._silah_fazi_degisti)
         self.son_hedef_mesafe = None
         self.son_hedef_mesafe_zamani = 0.0
         # Gercek heartbeat'ler ilk kez tetiklenmeden once panel tasarim-zamani
@@ -771,8 +772,8 @@ class TufanGCS(QMainWindow):
         buton.setText("")
         buton.setIcon(self._arac_baslat_ikonu_olustur())
         buton.setIconSize(QSize(64, 64))
-        buton.setToolTip("ARACI BAŞLAT — Araç Jetson'a (192.168.1.22) bağlanıp "
-                         "sürüş yazılımını (tufan_mppi.launch.py) başlatır")
+        buton.setToolTip("ARAÇ YAZILIMI AÇ/KAPA — çalışmıyorsa başlatır, "
+                         "çalışıyorsa durdurur (araç Jetson 192.168.1.22)")
         buton.setObjectName("pushButton_aracBaslat")
         eklenecek_index = self.ui.verticalLayout_8.indexOf(self.ui.pushButton_pwmIzle)
         self.ui.verticalLayout_8.insertWidget(eklenecek_index, buton)
@@ -812,16 +813,37 @@ class TufanGCS(QMainWindow):
         ressam.end()
         return QIcon(pix)
 
+    def _arac_yazilimi_calisiyor_mu(self):
+        """Araç yazılımı ayakta mı? goal_manager_node'un heartbeat'i bunun
+        GERÇEK işareti (telemetri_sistemi.otonom_heartbeat_cb). Sadece
+        onay penceresinin metnini seçmek için kullanılır - ASIL karar
+        araç tarafında veriliyor (bkz. _arac_baslat_tetikle), çünkü
+        heartbeat gecikmeli/kayıp olabilir ve iki tarafın fikri ayrılırsa
+        araçtaki gerçek durum kazanmalı."""
+        tm = getattr(self, 'telemetri_motoru', None)
+        son = getattr(tm, 'son_otonom_zamani', None) if tm else None
+        if not son:
+            return False
+        return (time.time() - son) < 5.0
+
     def _arac_baslat_onayla(self):
         # Bu buton ARACIN TÜM sürüş/silah yazılım yığınını başlatıyor -
         # yanlışlıkla dokunmaya karşı (özellikle dokunmatik ekranda, eskiden
         # AYNI KONUMDA "ATEŞ" butonu vardı, refleksle dokunulabilir) basit
         # bir onay isteniyor.
-        cevap = QMessageBox.question(
-            self, "Araç Jetson'u Başlat",
-            "Araç Jetson'a (192.168.1.22) bağlanıp sürüş yazılımı\n"
-            "(tufan_mppi.launch.py) başlatılsın mı?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        calisiyor = self._arac_yazilimi_calisiyor_mu()
+        if calisiyor:
+            baslik, metin = ("Araç Yazılımını DURDUR",
+                             "Araç yazılımı ÇALIŞIYOR.\n\n"
+                             "Durdurulsun mu? (tufan_mppi.launch.py kapanır,\n"
+                             "araç otonom sürüş ve silah kontrolünü kaybeder)")
+        else:
+            baslik, metin = ("Araç Yazılımını BAŞLAT",
+                             "Araç yazılımı çalışmıyor görünüyor.\n\n"
+                             "Araç Jetson'a (192.168.1.22) bağlanıp\n"
+                             "tufan_mppi.launch.py başlatılsın mı?")
+        cevap = QMessageBox.question(self, baslik, metin,
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if cevap == QMessageBox.Yes:
             self._arac_baslat_tetikle()
 
@@ -832,7 +854,28 @@ class TufanGCS(QMainWindow):
         # DEGIL) cagriliyor - komut sabit (kullanici girdisi yok), shell
         # injection riski yok. tufan_ana_terminal tmux oturumu YOKSA
         # olusturuluyor, VARSA aynisi kullaniliyor (has-session kontrolü).
-        uzak_komut = (
+        # AÇ/KAPA (2026-09-07, kullanıcı isteği: "başlatma tuşuna
+        # bastığımda eğer kodlar çalışıyorsa kapatsın, çalışmıyorsa
+        # çalıştırsın"). Karar ARAÇ TARAFINDA veriliyor - tek bir ssh
+        # komutu hem kontrol edip hem uyguluyor. Böylece arayüzün
+        # (gecikmeli olabilen) heartbeat bilgisi ile araçtaki gerçek
+        # durum ayrışsa bile doğru iş yapılır ve GUI thread'i hiç
+        # bloke edilmez (Popen, .wait() YOK).
+        #
+        # *** SAHADA BULUNAN HATA (2026-09-07): buton HEP DURDURUYORDU ***
+        # Once desen '[r]os2 launch tufan_v2_ws' idi. Kose parantez
+        # numarasi pgrep'in KENDI kabugunu elemesi icin yeterli DEGILDI,
+        # cunku ayni komut satirinin ELSE DALINDA baslatma komutu DUZ
+        # METIN olarak duruyor ('... && ros2 launch tufan_v2_ws
+        # tufan_mppi.launch.py') ve desen ONUNLA eslesiyordu. Sonuc:
+        # kabuk her zaman "launch calisiyor" sanip DURDUR dalina giriyor,
+        # buton hicbir zaman baslatmiyordu (tmux'ta biriken ^C'ler).
+        # COZUM: gercek surecte VAR olan ama bu komutta OLMAYAN bir
+        # parcaya bak - gercek surecin komut satiri
+        # '/usr/bin/python3 /opt/ros/humble/bin/ros2 launch tufan_v2_ws ...'
+        # yani 'bin/ros2 launch' iceriyor; asagidaki metinde ise sadece
+        # 'ros2 launch' geciyor, 'bin/' YOK.
+        baslat = (
             "tmux has-session -t tufan_ana_terminal 2>/dev/null || "
             "tmux new-session -d -s tufan_ana_terminal; "
             "tmux send-keys -t tufan_ana_terminal "
@@ -840,9 +883,17 @@ class TufanGCS(QMainWindow):
             "source /opt/ros/humble/setup.bash && source install/setup.bash && "
             "ros2 launch tufan_v2_ws tufan_mppi.launch.py' Enter"
         )
+        durdur = "tmux send-keys -t tufan_ana_terminal C-c"
+        uzak_komut = (
+            "if pgrep -f 'bin/ros2 launch tufan_v2_ws' >/dev/null 2>&1; then "
+            + durdur + "; else " + baslat + "; fi"
+        )
         try:
             subprocess.Popen(["ssh", "-o", "ConnectTimeout=5", "192.168.1.22", uzak_komut])
-            self.log_yaz("🚀 Araç Jetson'a bağlanılıyor, sürüş yazılımı başlatılıyor...")
+            if self._arac_yazilimi_calisiyor_mu():
+                self.log_yaz("🛑 Araç yazılımı DURDURULUYOR...")
+            else:
+                self.log_yaz("🚀 Araç Jetson'a bağlanılıyor, sürüş yazılımı başlatılıyor...")
         except Exception as e:
             self.log_yaz(f"⚠️ Araç Jetson'a bağlanılamadı: {e}")
 
@@ -1507,6 +1558,19 @@ class TufanGCS(QMainWindow):
         self.ui.label_sistemYazi.setFont(font)
 
     def manuel_sec(self):
+        # Operatör MANUEL'e bastıysa ve araç tarafında silah fazı
+        # sürüyorsa fazı KES (bkz. telemetri_sistemi.silah_fazini_iptal_et).
+        #
+        # *** _silah_fazi_mod_degisimi BAYRAĞI ŞART ***: silah fazı
+        # BAŞLARKEN aracı MANUEL'e alan çağrı da buraya düşüyor ve o an
+        # telemetri_motoru.silah_fazi_aktif ZATEN True (silah_fazi_cb
+        # bayrağı sinyalden ÖNCE set ediyor). Bu koruma olmadan faz
+        # başlar başlamaz KENDİNİ İPTAL EDERDİ - kod incelemesinde
+        # yakalandı, sahaya çıkmadan önce.
+        tm = getattr(self, 'telemetri_motoru', None)
+        if (tm is not None and getattr(tm, 'silah_fazi_aktif', False)
+                and not getattr(self, '_silah_fazi_mod_degisimi', False)):
+            tm.silah_fazini_iptal_et()
         self.ui.pushButton_manuel.setStyleSheet(MOD_AKTIF)
         self.ui.pushButton_Otonom.setStyleSheet(MOD_PASIF)
         self.log_yaz("Sürüş Modu: MANUEL KONTROL AKTİF")
@@ -2241,6 +2305,41 @@ class TufanGCS(QMainWindow):
                 "acil durdurma kilidi açıldı, araç tekrar komut kabul ediyor.</b></span><br>"
             )
 
+    def _silah_fazi_degisti(self, aktif):
+        """9. tabela silah fazı (kullanıcı isteği, 2026-09-06:
+        "9 numarayı okuyunca silah otonoma geçsin, araç manuele").
+
+        Araç tarafı /surus_modu=MANUEL'i ZATEN doğrudan yayınlıyor, ama
+        arayüz de her turda kendi modunu yayınladığı için (bkz.
+        telemetri_sistemi.surekli_yayin_dongusu) burada arayüzün KENDİ
+        durumu da değişmezse bir sonraki turda OTONOM geri yazılır ve
+        değişiklik anında geri alınır - acil stop → MANUEL'de yaşanan
+        çakışmanın aynısı.
+
+        Faz bitince, faz BAŞLAMADAN ÖNCEKİ mod geri yüklenir: araç
+        OTONOM'da seyrederken silah fazına girdiyse görevine OTONOM
+        devam eder; zaten MANUEL'deyse MANUEL kalır (operatörün kararı
+        kendiliğinden değiştirilmez)."""
+        mod = getattr(getattr(self, 'telemetri_motoru', None), 'arac_modu', 'MANUEL')
+        if aktif:
+            self._silah_fazi_onceki_mod = mod
+            if mod != "MANUEL":
+                # Bu MANUEL geçişi FAZIN KENDİSİ tarafından yapılıyor -
+                # operatör isteği değil, o yüzden iptal tetiklenmemeli.
+                self._silah_fazi_mod_degisimi = True
+                try:
+                    self.manuel_sec()
+                finally:
+                    self._silah_fazi_mod_degisimi = False
+            self.log_yaz("🔫 SİLAH FAZI (9. tabela): SİLAH OTONOM, ARAÇ MANUEL'e alındı.")
+        else:
+            onceki = getattr(self, '_silah_fazi_onceki_mod', 'MANUEL')
+            if onceki == "OTONOM" and mod != "OTONOM":
+                self.otonom_sec()
+                self.log_yaz("🏁 Silah fazı bitti: araç OTONOM'a geri döndü.")
+            else:
+                self.log_yaz("🏁 Silah fazı bitti (araç MANUEL kalıyor).")
+
     def _panel_mod_toggle(self):
         # ARTIK FİZİKSEL BUTONA BAĞLI DEĞİL (2026-09-06, kullanıcı isteği:
         # sol buton FREN oldu, bkz. kontrol_paneli_node.py::fren_toggle).
@@ -2254,6 +2353,23 @@ class TufanGCS(QMainWindow):
         self.log_yaz("🎮 FİZİKSEL BUTON: sürüş modu değiştirildi.")
 
     def _panel_baglanti_degisti(self, bagli):
+        # *** KENAR TETIKLEME - CANLI OLCUMDE BULUNAN HATA (2026-09-07) ***
+        # kontrol_paneli_node bağlantı durumunu ~2 saniyede bir TEKRAR
+        # yayınlıyor (arayüz geç başlarsa sürüş kaynağını öğrensin diye
+        # 2026-09-06'da eklendi). Ama bu metot her tekrarda BAŞTAN
+        # çalışıyordu ve içindeki silah_manuel_moduna_al() her seferinde
+        # /silah_modu'na MANUEL yazıyordu. turret_node OTONOM'dan çıkınca
+        # PID'i ve hedef takibini SIFIRLIYOR, lazeri kapatıyor - yani
+        # silah otonom hedeflemedeyken 2 saniyede bir sıfırlanıyordu ve
+        # HEDEFE HİÇ KİLİTLENEMİYORDU. Ölçüm: 10 saniyede /silah_modu'na
+        # 67 OTONOM arasında 8 MANUEL karışıyordu.
+        # Çözüm: periyodik tekrar KALSIN (amacına hizmet ediyor) ama
+        # eylemler yalnızca durum GERÇEKTEN değiştiğinde çalışsın.
+        # İlk mesajda _panel_bagli_son None olduğu için değişim sayılır,
+        # yani geç başlayan arayüz yine doğru kaynağı öğrenir.
+        if bagli == getattr(self, '_panel_bagli_son', None):
+            return
+        self._panel_bagli_son = bagli
         dil = CEVIRILER.get(self.aktif_dil, CEVIRILER["Türkçe"])
         if bagli:
             self.log_yaz("🎮 Kontrol paneli Arduino bağlandı.")

@@ -3025,6 +3025,189 @@ kapı kapalı→bekle · **yanda geniş geçit varken bile bekle (kaçmıyor)** 
 etap kapalıyken normal davranış · kapı açık→düz geç · rampa
 tetiklenmiyor · etap kapanınca aynı yüzey yine rampa (regresyon).
 
+## SİLAH FAZI ARTIK 9. TABELA İLE (2026-09-06)
+
+Kullanıcı isteği: *"stop okuduğunda atış yapma mantığı zaten vardı, onu 9
+okuduğunda silah mantığı çalışsın ve otonom mesajı da gönderilsin"* +
+*"3 atış gerçekleştikten sonra ön kamerayı çalıştırsın ve silah modelini
+kapatsın"*.
+
+### Yeni akış
+| Tetik | Yapılan |
+|---|---|
+| **9. tabela** (3 ardışık kare) | Araç yerinde durur (`_gecici_dur`), `/otonom_surus_aktif=False`, `/turret_model_aktif=True`, `/silah_modu=OTONOM`, `/tabela_model_aktif=**False**` (GPU turret'e) |
+| **3 atış tamamlandı** (`/silah_hedef_vuruldu>=3`) | `/turret_model_aktif=False`, `/silah_modu=MANUEL`, `/tabela_model_aktif=**True**` (ön kamera geri), `/otonom_surus_aktif=True`, ileri hedef |
+| **10. tabela** | **Yedek güvence** — atışlar tamamlanmadan 10 görülürse silah yine kapatılır, araç yola devam eder (silah fazında kilitli kalmaz) |
+
+`Stop` ile tetikleme `STOP_ILE_SILAH_TETIKLE = False` ile kapatıldı (kod
+silinmedi, tek satırla geri açılır). Aynı parkurda hem Stop hem 9
+tetikleseydi silah fazı iki kez başlar ve 10'dan sonra tekrar açılırdı.
+
+### Çözülen tasarım çelişkisi
+İlk uygulamada 9. tabelada tabela modeli AÇIK bırakılmıştı, çünkü fazı
+10. tabela bitiriyordu — model kapatılırsa 10 hiç görülemezdi. Kullanıcı
+akışı düzeltti: fazı **3 atış** bitiriyor, ön kamera o an geri açılıyor,
+10. tabela ondan SONRA görülüyor. Böylece silah fazı boyunca GPU tamamen
+turret modelinde kalıyor.
+
+### KRİTİK BOŞLUK: silah fazında araç kaçardı
+`tabela_etap_yoneticisi` silah fazında `/otonom_surus_aktif=False`
+yayınlıyor — eski `serbest_yon_takipcisi` bunu dinleyip duruyordu. Ama
+yeni `on_bosluk_nokta_atici` aktivasyonunu `/surus_modu`'ndan alıyor,
+yani bu sinyali **umursamıyordu**: etap yöneticisinin `_gecici_dur()` ile
+sabitlediği konum 0.25 sn sonra yeni bir ileri hedefle eziliyor ve
+**araç ateş ederken ilerlemeye devam ediyordu.**
+
+Düzeltme: `/otonom_surus_aktif=False` artık `_aktif_mi()` içinde **VETO**
+(elle açmayı bile ezer). Sinyal hiç gelmediyse veto yok — düğüm tek
+başına da çalışabilir. Karşılığında `_hedef_vuruldu_cb` artık
+`/otonom_surus_aktif=True` yayınlıyor; yoksa araç ileri hedefi tamamlayıp
+parkurun geri kalanında bir daha hiç hedef almazdı.
+
+### Offline test (7/7 + 4/4 veto)
+tek kare 9 → hiçbir şey · 3 ardışık 9 → faz başlar · tekrar 9 → ikinci kez
+tetiklenmez · 3 atış → ön kamera açık + silah kapalı + otonom geri ·
+ardından 10 → tekrar çalışmaz · Stop → artık tetiklemez · sahte dizi
+(9,8,9,2,9) → tetiklemez. Veto: sinyal yokken üretir · faz sırasında
+üretmez · faz bitince üretir · vetoda elle açma bile ezilir.
+
+## TURRET TILT BACKLASH: 90 → 40 → 10 ADIM (2026-09-06)
+
+Kullanıcı isteği: *"silahın yukarı aşağı hareketinde 90 adım backlash
+vermiştim, onu 40'a düşür."* → ardından *"40'ı 10'a düşür."*
+Sahada kademeli olarak indirildi; her adımda karta yüklendi.
+
+Backlash (mekanik boşluk) telafisi **sadece turret firmware'inde**;
+`turret_node.py`'de böyle bir parametre YOK (ROS tarafında sadece
+`nisan_bias_x/y_px` boresight trim'i var). Yön değişiminde, gerçek
+pulse'tan önce telafi pulse'ları basılıyor (`backlashKontrolVeUygula`).
+
+### KAYNAK / FIRMWARE AYRIŞMASI (ikinci kez)
+Araçtaki kayıtlı sketch **60** yazıyordu, ama karta yüklü firmware'de
+**90** olduğu kullanıcı tarafından bildirildi — yani kaynak ile karttaki
+yazılım ayrışmıştı. **Aynı sorun sürüş Arduino'sunda da yaşanmıştı**
+(orada çalışan sketch git'te hiç yoktu, beş benzer `.ino` arasından
+bulunmuştu). Yükleme bu belirsizliği kesin çözdü: karttaki değer artık
+**40**, kaynak da 40.
+
+| | Önce | Sonra |
+|---|---|---|
+| `TILT_BACKLASH_ADIM` | 60 (kaynak) / 90 (kart) | **10** (önce 40, sonra 10) |
+| `PAN_BACKLASH_ADIM` | 40 | 40 (değişmedi) |
+
+### Yapılanlar
+- `arac_arduino_turret/arac_arduino_turret.ino` (arayüz tarafında yeni
+  çalışma kopyası) — TILT 40
+- Derlendi (Mega 2560): 4820 bayt (%1 flash), 400 bayt RAM (%4)
+- `avrdude -p atmega2560 -c wiring -P /dev/ttyACM0 -b 115200` ile yüklendi
+  ve **doğrulandı** (4820 bytes of flash verified)
+- Araçtaki HER İKİ sketch kopyası (`~/Desktop/tufanika2026/silah_ws/` ve
+  `~/Desktop/silah_ws/`) 40 olarak güncellendi — ayrışma tekrarlamasın
+- **Turret sketch'i repoya eklendi** (`arac_jetson/arduino_turret/`) —
+  sürüş sketch'i gibi bu da sürüm kontrolünde DEĞİLDİ
+
+### Sahada dikkat
+Firmware'in kendi tarihçe notu, **15 adımın yetersiz kaldığını** ve
+değerin bu yüzden büyütüldüğünü söylüyor. Güncel değer **10**, yani o
+denemenin de ALTINDA. Aşırı telafi (yön değişiminde ters yönde küçük
+sıçrama) bu sayede giderilir; ama yetersiz kalırsa *"bazen tam vuruyor,
+bazen yukarı çıkıp vuruyor"* belirtisi geri döner — o durumda değer
+kademeli artırılmalı.
+
+Son yükleme: 4844 bayt, `4844 bytes of flash verified`. Araçtaki her iki
+kaynak kopyası ve repo kopyası 10 ile senkron.
+
+## 2026-09-07: GÖREV SEKANSI, HIZ, CİHAZ İSİMLERİ
+
+### Silah fazı 9/10 tabelaya taşındı
+| Tetik | Yapılan |
+|---|---|
+| **9. tabela** | Silah modeli AÇILIR (her durumda) |
+| 9 + arayüz **OTONOM** | `/silah_modu=OTONOM`, `/surus_modu=MANUEL`, araç durur |
+| 9 + arayüz **MANUEL** | Model açık kalır ama silah **MANUEL** — taret kendiliğinden hareket etmez |
+| **3 atış tamamlandı** | Silah MANUEL, turret modeli kapalı, **ön kamera modeli açık**, araç **OTONOM**, +5 m hedef |
+| **10. tabela** | Yedek güvence (atışlar bitmeden görülürse silah kapatılır) |
+
+Model açılması ile silahın otonomlaşması **ayrı iki karar** (kullanıcı kuralı).
+`Stop` ile silah tetiklemesi kapatıldı (`STOP_ILE_SILAH_TETIKLE=False`).
+
+### Atış ritmi: 5 sn atış / 2 sn duraksama × 3
+`kilit_sonrasi_bekleme_s` 0.4 → **2.0**. Ama asıl hata `kilit_bekleme_s`'in
+**alt sınır** olarak yazılmasıydı: `_kilitli_mi = temel_kilit or bekleme`
+olduğu için hedef merkezde kaldığı sürece kilit **hiç bitmiyordu** →
+(1) lazer sönmüyordu, (2) atış sayacı yalnızca kilit bitiminde arttığı için
+3 tur **asla tamamlanmıyordu**. Süre artık **üst sınır**: dolunca kilit
+zorla biter, sayaç artar, duraksama başlar.
+
+Yeniden kilitlenme eşiği `hassas_epsilon_px` 0.8 → **2.0** (backlash 60 adım
+≈ 5.5 px olduğu için 0.8'e bir daha inilemiyordu, 2. ve 3. tur başlamıyordu).
+
+### Operatör iptali (güvenlik açığı kapatıldı)
+Silah fazında araç tarafı `/silah_modu`'nu 1 Hz OTONOM'a zorluyor, arayüz de
+kendi yayınını susturuyordu → **operatörün lazeri durdurma yolu yoktu**.
+Yeni `/silah_fazi_iptal` konusu: arayüzde MANUEL'e basmak fazı derhal keser.
+*Kod incelemesinde yakalanan hata:* faz BAŞLARKEN de araç MANUEL'e alındığı
+için iptal kendi kendini tetikliyordu — `_silah_fazi_mod_degisimi` bayrağı
+operatör isteğini fazın kendi hareketinden ayırıyor.
+
+### Kilitlenmeyi engelleyen kök neden
+`kontrol_paneli_node` bağlantı durumunu ~2 sn'de bir tekrarlıyor;
+`main._panel_baglanti_degisti` her tekrarda baştan çalışıp
+`silah_manuel_moduna_al()` ile `/silah_modu`'na **MANUEL** yazıyordu.
+Ölçüm: 10 saniyede 67 OTONOM arasına **8 MANUEL** karışıyordu; turret her
+seferinde OTONOM'dan çıkıp PID/hedef takibini sıfırlıyor, lazeri kapatıyordu.
+Çözüm: periyodik tekrar kalsın, **eylemler yalnızca durum değişiminde**.
+
+### Rampa etabı (8. tabela)
+`/rampa_etabi` (Bool, 1 Hz). Bayrak açıkken nokta atıcı fan taramasını ve
+engel kırpmasını atlar, 2 m düz hedef üretir — 2D LIDAR rampanın ön yüzünü
+gerçek duvar gibi ölçtüğü için normal mantık etrafından dolaşmaya çalışıyordu.
+Gövde eğilince mevcut TIRMANMA modu devralır.
+
+### Dik eğimde tam gaz — İKİ ŞART BİRDEN
+`surus_koprusu`: PWM tavanı 110 → **255**, ancak
+**(8. tabela doğrulandı) VE (IMU burun yukarı > 3°)** iken.
+Tek başına eğim yetmiyor: tümsek/sallanma 3°'yi kısa süre aşınca araç
+beklenmedik yerde tam gaza kalkıyordu ("bazen çok hızlı gidiyor").
+İnişte tavan yükseltilmez. Diferansiyel kinematik korunur (direksiyon çalışır).
+Geri alma: `ros2 param set /surus_koprusu rampa_etabi_gerekli false`
+
+### Stop → 3 sn dur → otonom devam
+Stop (3 ardışık kare) → mevcut konum hedef + `/otonom_surus_aktif=False`,
+3 sn sonra `True`. **İki mekanizma birden şart**: sadece "dur" hedefi
+yayınlamak yetmez, nokta atıcı 0.25 sn sonra yeni ileri hedef basıp aracı
+yürütür. Kalıcı acil-durdurma kilidi kullanılmaz (kendiliğinden devam etmeli).
+
+### udev: sabit cihaz isimleri
+LIDAR USB yeniden-numaralandırmada ttyUSB0 → ttyUSB1'e kayıyor ve
+`sllidar_node` olmayan portu okumaya devam ediyordu (`/scan` tamamen sustu —
+bugün dahil 3 kez yaşandı). `/etc/udev/rules.d/99-tufan.rules`:
+`/dev/tufan_lidar`, `/dev/tufan_surus_arduino`, `/dev/tufan_turret_arduino`
+(hepsi tekil seri numarasıyla). **Kameralar kullanıcı isteğiyle dahil
+edilmedi**; not: iki C270 **aynı** seri numarasını paylaşıyor
+(`200901010001`), ancak fiziksel USB port yoluyla ayrılabilirler.
+
+### Araç yazılımı butonu: aç/kapa
+Karar araç tarafında (`if pgrep ... then durdur else başlat`).
+*Sahada bulunan hata:* desen `'[r]os2 launch tufan_v2_ws'` iken kabuk
+**kendi komut satırındaki başlatma metnini** eşleştiriyordu (else dalında
+düz metin olarak duruyor) → buton **hep durduruyor, hiç başlatmıyordu**.
+Desen `'bin/ros2 launch tufan_v2_ws'` yapıldı: gerçek süreçte
+`/opt/ros/humble/bin/ros2` var, komut metninde `bin/` yok.
+*(Aynı tuzağa bu projede üçüncü kez düşüldü — `pkill`, buton, ve teşhis
+komutu. Uzak süreç sayarken desenin komutun KENDİSİNDE geçip geçmediği
+her seferinde kontrol edilmeli.)*
+
+### Turret nişan kalibrasyonu — DERS
+Gün boyu nişan altı kez değiştirildi ve atış **kötüleşti**. Kök neden:
+tüm ölçümler `/silah_modu` MANUEL'de takılıyken yapıldı, yani **taret hiç
+hareket etmiyordu**; gözlenen sapma otonom kilitlenmenin değil elle nişanın
+sonucuydu. Tüm değerler kalibre hâline döndürüldü
+(`nisan_bias_y_px=-14.3`, `x=8.3`, `ince_ayar 25/35`, `pid_kp=0.6`,
+`hassas_adim_kazanci=0.5`, TILT backlash **90**).
+**Kural: nişan trim'i ayarlamadan önce `/silah_modu`'nun gerçekten OTONOM
+olduğunu ve taretin hareket ettiğini doğrula.**
+
 ---
 *Bu doküman, `~/Desktop/tufan` altındaki kodun mevcut haline göre otomatik
 olarak (kod incelemesiyle) hazırlanmıştır.*

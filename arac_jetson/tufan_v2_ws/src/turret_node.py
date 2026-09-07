@@ -165,7 +165,52 @@ class TurretNode(Node):
         # cok daha genis bir aralikta HASSAS TEK-ADIM modu (kare basina en
         # fazla 1 fiziksel adim, artik 12800 pulses/rev mikro-adimla COK
         # ince) devreye giriyor - eski 8/15px degerleri cok dardi.
+        # HASSAS BOLGE KUCULTULDU (2026-09-06, kullanici: "hassas bolgenin
+        # boyutunu da kucultelim ki kagit hedefin USTUNDEYKEN hassas
+        # ayarlamaya gecsin, disarida baslatmasin").
+        # OLCUM: hedef_gercek_yaricap_cm=18 ve kamera_odak_px=296.92 ile
+        # hedefin 10m'deki GORUNTU yaricapi sadece 296.92*18/1000 = 5.3 px.
+        # Eski esik 25 px, yani hedef yaricapinin 4.7 KATI - hassas (yavas,
+        # tek-adim) mod nisan kagidin epey DISINDAYKEN basliyordu.
+        # 5.5 px ~ hedef yaricapi: artik nisan hedefin UZERINE girince
+        # hassas moda geciliyor.
+        # *** DIKKAT - MESAFEYE BAGLILIK ***: bu esik PIKSEL cinsinden
+        # SABIT, ama hedefin piksel boyutu mesafeyle degisir (10m'de 5.3px,
+        # 5m'de 10.7px, 3m'de 17.8px). 10m yarisma mesafesine gore
+        # ayarlandi. COK farkli bir mesafede calisilacaksa bu iki esik de
+        # _beklenen_hedef_yaricapi_px() ile olceklenmeli.
+        # =====================================================================
+        # *** 2026-09-06 NISAN AYARLARI GERI ALINDI - OKU ***
+        # O gun bu parametreler sahada tekrar tekrar degistirildi
+        # (bias -14.3 -> -17.3 -> -11.3 -> -18.8 -> -22.4 -> -25.1 -> -26.6,
+        # ince_ayar 25 -> 5.5, pid_kp 0.6 -> 1.0, hassas_adim_kazanci
+        # 0.5 -> 3.0) ve sonucta atis KOTULESTI ("silahin ilk kodlari atis
+        # icin daha iyiydi").
+        # KOK NEDEN: butun o olcumler sirasinda /silah_modu MANUEL'de
+        # TAKILIYDI - arayuz (telemetri_sistemi.surekli_yayin_dongusu) her
+        # turda araç surus modunu /silah_modu'na yaziyor ve etap
+        # yoneticisinin OTONOM komutunu eziyordu. turret_node'un TUM otonom
+        # hareket blogu 'if self._mod == OTONOM' kapisinin arkasinda, yani
+        # TARET HIC HAREKET ETMIYORDU. Gozlenen "yukari vuruyor / salinim"
+        # otonom kilitlenmenin degil ELLE nisanin sonucuydu; o verilerle
+        # yapilan her ayar gecersizdi.
+        # Tum degerler CALISAN kalibrasyona dondurulda. YENIDEN AYAR
+        # YAPILACAKSA: once /silah_modu'nun GERCEKTEN OTONOM oldugunu
+        # dogrula (ros2 topic echo /silah_modu), taretin HAREKET ETTIGINI
+        # gor, sonra olc.
+        # =====================================================================
         self.declare_parameter('ince_ayar_toleransi_px', 25.0)
+        # *** HISTEREZIS - SAHADA OGRENILEN DERS (2026-09-06) ***
+        # Giris esigi 25 -> 5.5 yapilirken bu CIKIS esigi de 35 -> 8.0'a
+        # cekilmisti (orani korumak icin). YANLISTI: kilit mantigi
+        # _hassas_mod'a BAGLI (_pozisyon_kilitli = _hassas_mod and
+        # |hata|<=kilit_kaybi_esigi), yani 8 px'i asan en kucuk salinim
+        # hassas modu -> kilidi -> 5 saniyelik kilit_bekleme_s sayacini
+        # DUSURUYOR. Sahada belirti: "5sn kilit vardi, simdi 2sn'de bir
+        # kapatip aciyor". Histerezisin AMACI tam da budur: GIRIS siki
+        # (nisan hedefin uzerine girince hassas moda gec), CIKIS GENIS
+        # (kucuk salinimda modu/kilidi BIRAKMA). Ikisini birlikte
+        # kucultmek histerezisi yok eder.
         self.declare_parameter('ince_ayar_kayip_toleransi_px', 35.0)
         # HASSAS SURUNME: bu esikten KUCUK hata icin (fiziksel adim
         # boyutunun cozemeyecegi kadar kucuk) hic komut gonderilmez - "yeterince
@@ -176,7 +221,24 @@ class TurretNode(Node):
         # secildi (asiri gitme riskini azaltmak icin); sahada px-basina-
         # gercek-adim orani olculup buna gore yukseltilebilir/dusurulebilir
         # (ros2 param set ile canli).
+        # 0.5 -> 3.0 (2026-09-06, kullanici: "hassas hizalamaya girdiginde
+        # motorlar neredeyse donmuyor"). HESAP:
+        #   1 px acisi  = atan(1/kamera_odak_px=296.92) = 0.193 derece
+        #   1 adim acisi= 360/12800 (TILT'te redüktör YOK)= 0.0281 derece
+        #   => 1 px ~ 6.9 ADIM
+        # Kazanc 0.5 iken her karede gereken duzeltmenin sadece %7'si
+        # uygulaniyordu; ustelik hassas bolge 25 -> 5.5 px'e daraltilinca
+        # hata da kuculdu (13 adim -> 3 adim) ve hareket gozle
+        # gorulemez hale geldi. 3.0 = tam duzeltmenin ~%44'u: gecikmeli
+        # bir dongude asma yapmadan hizli yakinsayan tipik bir oran.
+        # Asma olursa zaten _TERS_YON sicrama bastirmasi devrede.
         self.declare_parameter('hassas_adim_kazanci', 0.5)
+        # TESHIS (2026-09-06): [PARALAKS DEBUG] satirinin araligi. Salinim/
+        # yakinsama sorunlarini olcmek icin 0.0 yapilip KARE KARE veri
+        # alinabilir (ros2 param set, yeniden derleme gerekmez), is bitince
+        # 1.0'a dondurulur. Sabit 1.0 kodlanmisti - salinim frekansini
+        # olcmek icin cok kabaydi.
+        self.declare_parameter('debug_log_araligi_s', 1.0)
         # Tek bir HASSAS komutunda gonderilebilecek EN FAZLA adim sayisi -
         # kazanc yanlislikla cok yuksek girilse bile tek kare buyuk bir
         # sicrama yapmasin diye guvenlik tavani.
@@ -202,7 +264,14 @@ class TurretNode(Node):
         # gozlemlendi: kilit tam bittigi anda hemen o anki (henuz
         # durulmamis) hataya tepki verilmesi kucuk bir "sicrama" yapiyordu -
         # bu kisa ek bekleme, olcumun/hedefin durulmasina pay tanir.
-        self.declare_parameter('kilit_sonrasi_bekleme_s', 0.4)
+        # 0.4 -> 2.0 (2026-09-07, kullanici atis dizisi tarifi: "hedefe 3
+        # kere kilitlenmesi gerekiyor 5'er saniye ile: 5 sn atis, 2 sn
+        # duraksama, 5 sn atis, 2 sn duraksama, 5 sn atis").
+        # Yani DIZI = kilit_bekleme_s (5s, lazer ACIK) + bu bekleme (2s,
+        # lazer KAPALI) x 3 tur; ucuncu tur bitince tabela_etap_yoneticisi
+        # HEDEF_VURULDU_ESIGI=3'e ulasir ve silah MANUEL / surus OTONOM /
+        # tabela modeli ACIK yapilir (bkz. _hedef_vuruldu_cb).
+        self.declare_parameter('kilit_sonrasi_bekleme_s', 2.0)
         self.declare_parameter('nudge_araligi', 0.03)
         self.declare_parameter('komut_timeout', 0.5)
         self.declare_parameter('x_yonu_ters_mi', False)
@@ -219,6 +288,14 @@ class TurretNode(Node):
         # esiklerinin genisletilmesi (artik hedefe yakinken zaten HASSAS
         # tek-adim moduna geciliyor, KABA mod SADECE uzak/buyuk hatalarda
         # calisiyor).
+        # 0.6 -> 1.0 (2026-09-06, kullanici: "cok yavas kilitleniyor,
+        # hassas bolgeye gelene kadar biraz daha hizli olabilir"). Hiz
+        # esitligi: hiz = pid_min + min(|kp*hata+..|/pid_hata_doygunlugu,1)
+        # * (pid_max-pid_min). kp=0.6'da 50px hata -> hiz 55; kp=1.0'da
+        # ayni hata -> hiz 88. Hassas moda gecis esigi ayni anda 25 -> 5.5
+        # px'e cekildigi icin KABA mod artik hedefe cok daha yakina kadar
+        # (ve daha hizli) surdurulur; son yaklasmanin hassasiyeti
+        # DEGISMEDI (hassas_epsilon_px 0.8 aynen duruyor).
         self.declare_parameter('pid_kp', 0.6)
         self.declare_parameter('pid_ki', 0.0)
         self.declare_parameter('pid_kd', 0.05)
@@ -256,15 +333,42 @@ class TurretNode(Node):
         # sahada gozlemlenip (lazer hedefin ne kadar/hangi yone kaydigina
         # bakilarak) bu iki bias parametresiyle EMPIRIK olarak sifirlanir -
         # teorik hesaba (dx,dy) DOGRUDAN eklenir, ros2 param set ile canli
-        # ayarlanir. Ornek: lazer hedefin USTUNE vuruyorsa (goruntude hedef
-        # olmasi gerekenden daha AZ asagi kaydirilmis demektir) nisan_bias_y_px
-        # ARTIRILIR (referans daha da asagi kayar).
+        # ayarlanir.
+        #
+        # *** ISARET KURALI - BUYUK ADIMLI DENEYLE KESINLESTIRILDI ***
+        # (2026-09-06, backlash DOGRU degerdeyken/60):
+        #   nisan_bias_y_px AZALTILIR (daha NEGATIF) -> lazer ASAGI iner
+        #   nisan_bias_y_px ARTIRILIR (daha POZITIF) -> lazer YUKARI cikar
+        # Deney: -14.3'te 15cm yukari vuruyordu; +10px ile -4.3 yapildi ->
+        # "bayagi yukari cikti". Yon boylece tartismasiz belirlendi.
+        # Bu, dosyanin eski yorumundaki kuralin TERSI - eski yorum YANLISTI.
+        #
+        # *** ONEMLI TUZAK ***: ayni isaret daha once BACKLASH 10'dayken
+        # denenmis ve CELISKILI sonuc vermisti (hem -17.3 hem -11.3 "daha
+        # yukari"). Sebep: backlash yetersizken hata sabit bir ofset degil
+        # YON DEGISIMINE bagli histerezistir; sabit bir trim onu ne
+        # duzeltebilir ne de olcebilir. NISAN TRIM'INI AYARLAMADAN ONCE
+        # BACKLASH'IN DOGRU OLDUGUNDAN EMIN OL.
+        #
+        # Olcek: 1 px ~ 3.4 cm @ 10m (kamera_odak_px=296.92). Bias
+        # mesafeden BAGIMSIZ sabit bir ACISAL trim oldugu icin cm<->px
+        # donusumu TEST MESAFESINE gore yapilir.
         # GUNCELLEME: 10m'de TILT backlash telafisi (bkz. firmware) + DM556
         # akim ayari duzeltmesinden SONRA yeniden kalibre edildi (sahada
         # ikili arama ile: 6.8/8.8 arasi -> 7.8 -> 8.3 X icin dogrulandi,
         # Y tek denemede -14.3 ile tam oturdu).
-        self.declare_parameter('nisan_bias_x_px', 8.3)
-        self.declare_parameter('nisan_bias_y_px', -14.3)
+        self.declare_parameter('nisan_bias_x_px', 9.4)
+        # 2026-09-06: "lazer hep yukari vuruyor" sikayeti uzerine bias
+        # ONCE -17.3, SONRA -11.3 denendi; IKISINDE DE "daha yukari vurdu".
+        # SABIT bir nisan trim'i iki ZIT yonde birden kotulesemez - demek ki
+        # hata sabit bir ofset DEGIL, YON DEGISIMINE bagli histerezisti:
+        # TILT backlash 90 -> 40 -> 10'a dusurulmustu ve firmware'in kendi
+        # notu 15'in bile YETERSIZ kaldigini soyluyordu. Backlash 60'a geri
+        # alindi; bias da onunla birlikte kalibre edilmis degerine dondu.
+        # Olcek (ileride gerekirse): 1 px ~ 3.4 cm @ 10m, ARTIRMAK lazeri
+        # ASAGI indirir. Ama once backlash'in dogru oldugundan emin ol -
+        # trim sabit, backlash yone bagli; biri digerini telafi EDEMEZ.
+        self.declare_parameter('nisan_bias_y_px', -25.0)
         # GUVENLIK: TF02-Pro ara sira (yansima/multipath, checksum'dan gecen
         # ama fiziksel olarak imkansiz) COK yakin bir mesafe raporlayabiliyor
         # (sahada 6-36cm gibi degerler gorduk) - bu esigin ALTINDAKI ham
@@ -365,6 +469,7 @@ class TurretNode(Node):
         self._ince_ayar_kayip_tol = self.get_parameter('ince_ayar_kayip_toleransi_px').value
         self._hassas_epsilon = self.get_parameter('hassas_epsilon_px').value
         self._hassas_adim_kazanci = self.get_parameter('hassas_adim_kazanci').value
+        self._debug_log_araligi = self.get_parameter('debug_log_araligi_s').value
         self._hassas_maks_adim_burst = self.get_parameter('hassas_maks_adim_burst').value
         self._nudge_araligi = self.get_parameter('nudge_araligi').value
         self._timeout = self.get_parameter('komut_timeout').value
@@ -412,6 +517,7 @@ class TurretNode(Node):
             'ince_ayar_kayip_toleransi_px': '_ince_ayar_kayip_tol',
             'hassas_epsilon_px': '_hassas_epsilon',
             'hassas_adim_kazanci': '_hassas_adim_kazanci',
+            'debug_log_araligi_s': '_debug_log_araligi',
             'hassas_maks_adim_burst': '_hassas_maks_adim_burst',
             'kilit_kaybi_esigi_px': '_kilit_kaybi_esigi',
             'kilit_bekleme_s': '_kilit_bekleme_s',
@@ -1277,7 +1383,7 @@ class TurretNode(Node):
                                 cv2.putText(frame, 'NISAN NOKTASI', (int(referans_x) + 8, int(referans_y) + 14),
                                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
 
-                                if su_an - self._son_lidar_debug_log >= 1.0:
+                                if su_an - self._son_lidar_debug_log >= self._debug_log_araligi:
                                     self.get_logger().info(
                                         f'[PARALAKS DEBUG] tcx={tcx_f:.0f} tcy={tcy_f:.0f} '
                                         f'referans=({referans_x:.0f},{referans_y:.0f}) dx={dx:.1f} dy={dy:.1f} '
@@ -1334,7 +1440,15 @@ class TurretNode(Node):
                         hedef_surdurulebilir = self._canli_mi(self._hedef_son_gorulme_zamani, self._hedef_kayip_esigi)
                         temel_kilit = hedef_surdurulebilir and self._pozisyon_kilitli
 
-                        if temel_kilit and self._kilit_baslangic_zamani is None:
+                        # DURAKSAMA PENCERESI (2026-09-07): bir atis turu
+                        # bittikten sonra kilit_sonrasi_bekleme_s boyunca
+                        # YENI kilit baslatilmaz - kullanicinin tarif ettigi
+                        # "5 sn atis, 2 sn duraksama" ritmi budur.
+                        duraksamada = (
+                            self._kilit_bitis_zamani is not None
+                            and (su_an - self._kilit_bitis_zamani) < self._kilit_sonrasi_bekleme_s
+                        )
+                        if temel_kilit and self._kilit_baslangic_zamani is None and not duraksamada:
                             # Yeni bir kilit BASLADI - bekleme sayacini baslat.
                             self._kilit_baslangic_zamani = su_an
 
@@ -1352,16 +1466,34 @@ class TurretNode(Node):
                         # sifirlaniyordu, bu YUZUNDEN bekleme neredeyse hic
                         # calismiyordu (laser-kaynakli tespit kaybi TAM
                         # kayip sayiliyordu).
-                        kilit_bekleme_aktif = (
+                        # *** KILIT SURESI ARTIK UST SINIR (2026-09-07) ***
+                        # ONCEDEN: _kilitli_mi = temel_kilit or bekleme_aktif
+                        # yani hedef merkezde KALDIGI surece temel_kilit hep
+                        # True oluyordu ve kilit HIC BITMIYORDU. Sonuclari
+                        # sahada goruldu: (1) "lazeri aciyor ve kapatmiyor",
+                        # (2) basarili kilit sayaci SADECE kilit bitiminde
+                        # arttigi icin 3 turluk atis dizisi ASLA tamamlanmiyor
+                        # ve arac silah fazinda kilitli kaliyordu.
+                        # kilit_bekleme_s bir ALT sinir olarak yazilmisti;
+                        # kullanicinin istedigi ritim (5 sn atis / 2 sn
+                        # duraksama x3) icin UST sinir olmasi gerekiyor.
+                        sure_doldu = (
                             self._kilit_baslangic_zamani is not None
-                            and (su_an - self._kilit_baslangic_zamani) < self._kilit_bekleme_s
+                            and (su_an - self._kilit_baslangic_zamani) >= self._kilit_bekleme_s
+                        )
+                        kilit_bekleme_aktif = (
+                            self._kilit_baslangic_zamani is not None and not sure_doldu
                         )
                         onceki_kilitli_mi = self._kilitli_mi
-                        self._kilitli_mi = temel_kilit or kilit_bekleme_aktif
-                        if not kilit_bekleme_aktif and not temel_kilit:
-                            # Bekleme suresi bitti VE artik gercekten kilitli
-                            # degil - sayaci sifirla ki bir sonraki GERCEK
-                            # kilitte taze baslasin.
+                        if sure_doldu or duraksamada:
+                            # Sure doldu (ya da duraksamadayiz) -> kilit ZORLA
+                            # biter, lazer soner, sayac artar.
+                            self._kilitli_mi = False
+                        else:
+                            self._kilitli_mi = temel_kilit or kilit_bekleme_aktif
+                        if sure_doldu or (not kilit_bekleme_aktif and not temel_kilit):
+                            # Tur bitti - sayaci sifirla ki duraksamadan sonra
+                            # bir sonraki GERCEK kilitte taze baslasin.
                             self._kilit_baslangic_zamani = None
                         if onceki_kilitli_mi and not self._kilitli_mi:
                             # Kilit YENI bitti (5sn bekleme doldu) - sahada

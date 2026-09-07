@@ -313,6 +313,19 @@ class OnBoslukNoktaAtici(Node):
         # tutulursa gecidi hizalayamaz.
         self.declare_parameter('kayar_engel_hizalama_payi_m', 0.3)
 
+        # --- RAMPA ETABI (8. tabela, 2026-09-07) ---
+        # Kullanici: "8. tabelayi gordugunde onundeki engelden kacmamasi
+        # gerekiyor, dik egimi engel olarak goruyor ve kacmaya calisiyor."
+        # 2D LIDAR rampanin on yuzunu GERCEKTEN duvar gibi olcer - bu bir
+        # yanilsama degil, dogru bir olcumdur; yanlis olan "etrafindan
+        # dolas" cikarimidir. Bayrak acikken fan taramasi YAPILMAZ ve
+        # engel mesafesi hedefi KIRPMAZ: arac duz ilerler ve rampaya
+        # tirmanir. Govde egilmeye baslayinca zaten TIRMANMA modu devralir
+        # (bu kontrol egim modlarindan SONRA yapiliyor).
+        # GUVENLIK: hedef kisa tutulur (varsayilan 2m) - "engelleri yok
+        # say" davranisi SADECE bu etap boyunca ve SADECE duz ileri.
+        self.declare_parameter('rampa_etabi_hedef_mesafesi_m', 2.0)
+
         # --- Aktivasyon ---
         # OTOMATIK BASLATMA (2026-09-06, kullanici istegi: "otonoma
         # gectigimde nokta atma islemini otomatik olarak baslatacak kodu
@@ -336,7 +349,9 @@ class OnBoslukNoktaAtici(Node):
 
         self._aktif_elle = False
         self._aktif_gorev = False
+        self._gorev_sinyali_geldi = False
         self._kayar_engel_etabi = False
+        self._rampa_etabi = False
         self._kayar_engel_son_tutma = 0.0
         self._kayar_engel_bekliyor = False
         self._surus_modu = 'MANUEL'   # guvenli varsayilan (surus_koprusu.py ile ayni)
@@ -359,6 +374,7 @@ class OnBoslukNoktaAtici(Node):
         self.create_subscription(Bool, '/otonom_surus_aktif', self._gorev_aktif_cb, 10)
         self.create_subscription(String, '/surus_modu', self._surus_modu_cb, 10)
         self.create_subscription(Bool, '/kayar_engel_etabi', self._kayar_engel_cb, 10)
+        self.create_subscription(Bool, '/rampa_etabi', self._rampa_etabi_cb, 10)
         self.create_subscription(LaserScan, '/scan', self._scan_cb, 10)
         self.create_subscription(Odometry, '/odom', self._odom_cb, 10)
 
@@ -409,7 +425,7 @@ class OnBoslukNoktaAtici(Node):
             'rampa_yaklasma_payi_m', 'rampa_maks_yon_sapmasi_derece',
             'kayar_engel_koni_derece', 'kayar_engel_acik_mesafesi_m',
             'kayar_engel_tutma_araligi_s', 'kayar_engel_gecis_mesafesi_m',
-            'kayar_engel_hizalama_payi_m',
+            'kayar_engel_hizalama_payi_m', 'rampa_etabi_hedef_mesafesi_m',
             'surus_modu_ile_aktiflesir', 'surus_modu_bayatlik_s',
             'otonom_surus_ile_aktiflesir',
             'veri_bayatlik_esigi_s',
@@ -433,6 +449,7 @@ class OnBoslukNoktaAtici(Node):
 
     def _gorev_aktif_cb(self, msg: Bool):
         self._aktif_gorev = bool(msg.data)
+        self._gorev_sinyali_geldi = True
 
     def _kayar_engel_cb(self, msg: Bool):
         yeni = bool(msg.data)
@@ -444,6 +461,14 @@ class OnBoslukNoktaAtici(Node):
                 if yeni else 'KAPANDI - normal davranisa donuldu.'))
             if not yeni:
                 self._kayar_engel_bekliyor = False
+
+    def _rampa_etabi_cb(self, msg: Bool):
+        yeni = bool(msg.data)
+        if yeni != self._rampa_etabi:
+            self._rampa_etabi = yeni
+            self.get_logger().warn(
+                'RAMPA ETABI ' + ('ACIK - onundeki dik egimden KACILMAYACAK, '
+                'duz ilerlenecek.' if yeni else 'KAPANDI - normal davranisa donuldu.'))
 
     def _surus_modu_cb(self, msg: String):
         yeni = msg.data.strip().upper()
@@ -461,6 +486,16 @@ class OnBoslukNoktaAtici(Node):
 
     def _aktif_mi(self):
         """Dugum su an hedef uretmeli mi? (uc bagimsiz kaynak)"""
+        # 0) GOREV VETOSU (2026-09-06): tabela_etap_yoneticisi silah
+        # fazinda /otonom_surus_aktif=False yayinliyor. Bu, "simdi hedef
+        # URETME" demektir - arac ates ederken yerinde durmali.
+        # *** BU VETO OLMADAN ***: aktivasyon /surus_modu'ndan geldigi icin
+        # dugum silah fazinda da hedef uretmeye devam ederdi; etap
+        # yoneticisinin _gecici_dur() ile sabitledigi konum 0.25sn sonra
+        # yeni bir ileri hedefle ezilir ve arac ates sirasinda ilerlerdi.
+        # Sinyal HIC gelmediyse veto yok (dugum tek basina da calisabilir).
+        if self._gorev_sinyali_geldi and not self._aktif_gorev:
+            return False
         # 1) Elle acma - saha/tezgah testi icin, moddan BAGIMSIZ.
         if self._aktif_elle:
             return True
@@ -563,6 +598,13 @@ class OnBoslukNoktaAtici(Node):
                                 mod_adi='YAN_EGIM')
             return
 
+        # RAMPA ETABI (8. tabela) - egim modlarindan SONRA: arac zaten
+        # tirmanmaya basladiysa TIRMANMA modu devralmis olur; bu mod
+        # sadece rampaya YAKLASIRKEN (govde henuz duzken) gecerli.
+        if self._rampa_etabi:
+            self._rampa_etabinda_ilerle(yaw, odom, durum)
+            return
+
         # KAYAR ENGEL asamasi (6. tabela) - egim modlarindan SONRA kontrol
         # edilir: gercek bir egimde govde-egimi kaynakli sahte engeller
         # olusur, onlari "kapali kapi" sanmamak icin egim modlari oncelikli.
@@ -632,6 +674,20 @@ class OnBoslukNoktaAtici(Node):
         self._hedef_gonder(d, 0.0, yaw, odom, durum)
 
     # ---------------- mod: normal (fan puanlamasi) ----------------
+    def _rampa_etabinda_ilerle(self, yaw, odom, durum):
+        """8. tabela: onundeki dik egimden KACMA, duz ilerle.
+
+        Fan taramasi ve engel-kirpma KASITLI OLARAK atlanir - rampanin on
+        yuzu LIDAR'da gercek bir duvar gibi gorunur ve normal mantik onu
+        dolasmaya calisir (kullanicinin bildirdigi davranis). Burada
+        sadece kisa, duz bir hedef uretilir; govde egilince TIRMANMA modu
+        devralir."""
+        d = float(self._p['rampa_etabi_hedef_mesafesi_m'])
+        durum.update({'mod': 'RAMPA_ETABI', 'theta': 0.0, 'mesafe': round(d, 2),
+                      'not': 'engel kirpmasi YOK - duz tirmanis'})
+        self._onceki_theta = 0.0
+        self._hedef_gonder(d, 0.0, yaw, odom, durum)
+
     def _kayar_engel_isle(self, px, py, yaw, odom, durum):
         """6. tabela asamasi: ONDEKI engel bir KAPI'dir, etrafindan
         dolasilmaz.

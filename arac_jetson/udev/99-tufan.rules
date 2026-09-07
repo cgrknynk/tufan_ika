@@ -1,0 +1,14 @@
+# TUFAN IKA - SABIT CIHAZ ISIMLERI (2026-09-07)
+# Sorun: USB yeniden-numaralandirmasinda LIDAR /dev/ttyUSB0 -> ttyUSB1'e
+# kayiyor ve sllidar_node olmayan bir portu okumaya devam ediyordu
+# (sahada 3 kez yasandi, en son bugun - /scan tamamen sustu).
+# Bu kurallar seri cihazlara DEGISMEZ bir isim verir.
+#
+# KAMERALAR KASITLI OLARAK DAHIL EDILMEDI (kullanici karari, 2026-09-07):
+# "kameralara udev simdilik uygulama". Gerekirse iki C270'in AYNI seri
+# numarasini paylastigi (200901010001) ve bu yuzden ancak FIZIKSEL USB
+# PORT yoluyla ayirt edilebilecekleri unutulmamali.
+
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{serial}=="484c9fb8a813ec11b9def4ef7a109228", SYMLINK+="tufan_lidar"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2341", ATTRS{idProduct}=="0043", ATTRS{serial}=="03536373332351B0B270", SYMLINK+="tufan_surus_arduino"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2341", ATTRS{idProduct}=="0042", ATTRS{serial}=="1453230353235190F1B0", SYMLINK+="tufan_turret_arduino"

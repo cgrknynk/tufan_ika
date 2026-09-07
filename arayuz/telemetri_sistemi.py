@@ -72,6 +72,9 @@ class TelemetriThread(QThread):
     wifi_durum_sinyali = pyqtSignal(int, str)  # (yuzde, kaynak: "UBIQUITI" veya "WIFI")
     # Silah/turret TF02-Pro lidar'inin hedefe olan mesafesi (metre).
     hedef_mesafe_sinyali = pyqtSignal(float)
+    # SİLAH FAZI (2026-09-06): araç tarafındaki tabela_etap_yoneticisi
+    # 9. tabelada True yayınlar. Bu sürede ARAÇ MANUEL, SİLAH OTONOM olur.
+    silah_fazi_sinyali = pyqtSignal(bool)
     
     log_sinyali = pyqtSignal(str)
 
@@ -91,6 +94,10 @@ class TelemetriThread(QThread):
         # (sadece None olmadığında) AttributeError'a düşüyordu - canlı
         # tekrarlanarak doğrulandı (`yon_pid_pub` için de aynı hata çıktı).
         self.silah_modu_pub = None
+        # Silah fazı aktifken arayüz /silah_modu yayınlamayı BIRAKIR -
+        # aksi halde her turda araç modunu (MANUEL) yazıp araç tarafının
+        # OTONOM komutunu ezer ve taret hiç hareket etmez (sahada ölçüldü).
+        self.silah_fazi_aktif = False
         self.turret_cmd_pub = None
         self.silah_ates_pub = None
         self.yon_pid_pub = None
@@ -159,6 +166,8 @@ class TelemetriThread(QThread):
         # gecikme geregi oldugundan ayni izole surus_node'da yayinlaniyor. ---
         self.joystick_hedefi = "ARAC"  # "ARAC" veya "SILAH"
         self.silah_modu_pub = self.surus_node.create_publisher(String, '/silah_modu', 10)
+        # Operatorun silah fazini kesebilmesi icin (bkz. main.manuel_sec).
+        self.silah_iptal_pub = self.surus_node.create_publisher(Bool, '/silah_fazi_iptal', 10)
         # DUZELTME (2026-09-05, canlı bildirildi: "joystick bile çok geç
         # gidiyor" - crash_rapor_son.txt/[STALL] izleyicisi kanıtladı):
         # turret_cmd_pub varsayılan RELIABLE QoS ile GUI thread'inde
@@ -232,6 +241,7 @@ class TelemetriThread(QThread):
             # yeterli bir esik (RTK ozel durumu ayri, NTRIP/RTK panelinde).
             self.node.create_subscription(GPSRAW, '/mavros/gpsstatus/gps1/raw', self.gps_raw_cb, 10)
         self.node.create_subscription(Float32, '/turret_hedef_mesafe', self.hedef_mesafe_cb, 10)
+        self.node.create_subscription(Bool, '/silah_fazi_aktif', self.silah_fazi_cb, 10)
         self.son_lidar_zamani = 0.0
         self.anlik_lidar_durumu = None
         # HIZ CANLILIK KONTROLU (2026-09-01, kullanıcı isteği: "hız verisi
@@ -475,6 +485,16 @@ class TelemetriThread(QThread):
             self.anlik_sag_pwm = 0.0
             self.anlik_palet_yayinla()
 
+    def silah_fazi_cb(self, msg):
+        """Araç tarafı silah fazına girdi/çıktı (9. tabela). Faz boyunca
+        arayüz /silah_modu yayınlamayı bırakır (bkz. surekli_yayin_dongusu)
+        ve main.py sürüş modunu MANUEL'e alır (bkz. _silah_fazi_degisti)."""
+        yeni = bool(msg.data)
+        if yeni == self.silah_fazi_aktif:
+            return
+        self.silah_fazi_aktif = yeni
+        self.silah_fazi_sinyali.emit(yeni)
+
     def surekli_yayin_dongusu(self):
         if self.mod_pub is None:
             return
@@ -493,7 +513,12 @@ class TelemetriThread(QThread):
         # PID/hedef takibi sıfırlanır, bkz. o dosyadaki _mod_cb). mod_pub
         # gibi her turda tekrar yayınlanır (ucuz, String) - turret_node.py
         # bu topic'i görmezse manuel komutları yok sayar.
-        if self.silah_modu_pub is not None:
+        # SİLAH FAZINDA SUSUYORUZ: o sırada silah modunun tek sahibi araç
+        # tarafındaki tabela_etap_yoneticisi'dir (o da 1 Hz tekrarlıyor).
+        # Bu koşul olmadan aşağıdaki satır, araç MANUEL olduğu için
+        # /silah_modu'na sürekli MANUEL yazıp silahı otonoma HİÇ
+        # geçirmiyordu - "9'u okuyor ama taret dönmüyor" sorununun kök nedeni.
+        if self.silah_modu_pub is not None and not self.silah_fazi_aktif:
             self.silah_modu_pub.publish(String(data=self.arac_modu))
 
         # --- OTONOM/MANUEL MOD DURUMU ---
@@ -629,13 +654,25 @@ class TelemetriThread(QThread):
         # uyumluluk icin no-op birakildi.
         self.joystick_hedefi = hedef
 
+    def silah_fazini_iptal_et(self):
+        """Operatör MANUEL'e bastı - araç tarafındaki silah fazını kes.
+        Faz boyunca /silah_modu'nu araç tarafı 1 Hz ile OTONOM'a zorladığı
+        için buradan MANUEL yayınlamak İŞE YARAMAZ; ayrı bir iptal
+        konusu gerekiyor (sahada ölçüldü)."""
+        if getattr(self, 'silah_iptal_pub', None) is not None:
+            self.silah_iptal_pub.publish(Bool(data=True))
+            self.log_yaz("🛑 Silah fazı iptal komutu gönderildi (MANUEL seçildi).")
+
     def silah_manuel_moduna_al(self):
         # turret_node.py manuel turret komutlarini + manuel atesi ancak
         # /silah_modu == "MANUEL" iken kabul eder. Eskiden bu sadece
         # "HEDEF: SILAH"a gecince yayinlaniyordu; kontrol panelinde sag
         # joystick her zaman silahi kontrol ettiginden acilista + her
         # surekli_yayin_dongusu turunda yayinlanir.
-        if self.silah_modu_pub is not None:
+        # SILAH FAZINDA SUSMA (2026-09-07): faz aktifken silahin modunu
+        # araç tarafı yönetir; buradan MANUEL yazmak otonom hedeflemeyi
+        # sıfırlar (bkz. _panel_baglanti_degisti'deki kök neden notu).
+        if self.silah_modu_pub is not None and not self.silah_fazi_aktif:
             self.silah_modu_pub.publish(String(data="MANUEL"))
 
     def joystick_turret_gonder(self, x, y):

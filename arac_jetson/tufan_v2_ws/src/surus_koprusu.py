@@ -27,8 +27,11 @@ import time
 
 import rclpy
 from rclpy.node import Node
+import math
+
 from geometry_msgs.msg import Twist
-from std_msgs.msg import Float32MultiArray, String
+from nav_msgs.msg import Odometry
+from std_msgs.msg import Bool, Float32MultiArray, String
 
 
 class SurusKoprusu(Node):
@@ -48,12 +51,50 @@ class SurusKoprusu(Node):
         # sonrasi gonderilen gercek PWM'in ust siniri (duvara carpma sonrasi
         # dusuruldu - once 255'ti).
         self.declare_parameter('max_pwm', 110.0)
+        # DIK EGIMDE TAM GAZ (2026-09-07, kullanici istegi: "dik egimde
+        # hizi otonomdayken fule cek, duz yolda normal suanki hizla
+        # gitsin"). Yukaridaki max_pwm (110) duz yol seyir tavani -
+        # rampaya tirmanmak icin yetersiz kalabiliyor. Govde yukari
+        # egildiginde tavan gecici olarak egim_max_pwm'e cikarilir;
+        # min_pwm ve diferansiyel kinematik AYNEN korunur, sadece UST
+        # SINIR degisir (yani direksiyon/donus yetenegi bozulmaz).
+        #
+        # SADECE TIRMANISTA: burun ASAGI iken (inis) tavan YUKSELTILMEZ -
+        # inise tam gazla girmek tehlikelidir. Esik, projenin diger
+        # egim mantiklariyla (egim_costmap_ayarlayici.py,
+        # on_bosluk_nokta_atici.py) AYNI: 3 derece.
+        #
+        # *** IKI SART BIRDEN (2026-09-07, kullanici: "otonomda bazen cok
+        # hizli gidiyor; SADECE 8. tabelayi gordugunde VE imu yukari
+        # aciya geldiginde hiz artsin") ***
+        # Tek basina egim esigi YETMEZ: parkurdaki tumsek/cukur ya da
+        # govde sallanmasi 3 dereceyi kisa sureligine asabiliyor ve arac
+        # beklenmedik yerde tam gaza kalkiyordu. Artik tam gaz icin
+        # /rampa_etabi (8. tabela dogrulanmis) DE gerekli - yani hiz
+        # artisi yalnizca gercekten rampa asamasindayken mumkun.
+        # rampa_etabi_gerekli=False yapilirsa eski (sadece egim)
+        # davranisa donulur.
+        self.declare_parameter('egim_max_pwm', 255.0)
+        self.declare_parameter('egim_esigi_derece', 3.0)
+        # Esikte gidip gelmeyi onlemek icin: egim esigin ALTINA dustukten
+        # sonra tam gaz bu kadar saniye daha surer (rampa tepesindeki
+        # kisa duzlukte gaz kesilip arac takilmasin).
+        self.declare_parameter('egim_histerezis_s', 1.5)
+        self.declare_parameter('rampa_etabi_gerekli', True)
 
         self._iz_genisligi = self.get_parameter('iz_genisligi').value
         self._maks_hiz = self.get_parameter('maks_hiz_ms').value
         self._timeout = self.get_parameter('komut_timeout').value
         self._min_pwm = self.get_parameter('min_pwm').value
         self._max_pwm = self.get_parameter('max_pwm').value
+        self._egim_max_pwm = self.get_parameter('egim_max_pwm').value
+        self._egim_esigi = self.get_parameter('egim_esigi_derece').value
+        self._egim_histerezis = self.get_parameter('egim_histerezis_s').value
+        self._egim_derece = 0.0          # + = burun YUKARI (tirmanis)
+        self._son_egim_zamani = None     # esigin ustunde gorulen son an
+        self._egim_gazi_acik = False     # log tekrarini onlemek icin
+        self._rampa_etabi_gerekli = self.get_parameter('rampa_etabi_gerekli').value
+        self._rampa_etabi = False        # 8. tabela dogrulandi mi
 
         # Guvenli varsayilan: arayuzden mod bilgisi gelene kadar MANUEL kabul et
         # (bilinmeyen durumda otonom surusu asla varsayma).
@@ -64,6 +105,8 @@ class SurusKoprusu(Node):
 
         self.create_subscription(String, '/surus_modu', self._mod_cb, 10)
         self.create_subscription(Twist, '/cmd_vel_gated', self._otonom_cb, 10)
+        self.create_subscription(Odometry, '/odom', self._odom_cb, 10)
+        self.create_subscription(Bool, '/rampa_etabi', self._rampa_etabi_cb, 10)
 
         self._palet_pub = self.create_publisher(Float32MultiArray, '/palet_hizlari', 10)
 
@@ -85,6 +128,42 @@ class SurusKoprusu(Node):
     def _otonom_cb(self, msg: Twist):
         self._otonom_twist = msg
         self._otonom_zaman = time.time()
+
+    def _odom_cb(self, msg: Odometry):
+        """Govde ileri ekseninin DUNYA-z bileseni -> tirmanis acisi.
+
+        Euler (roll/pitch) cikarmak yerine donme matrisinin 3. satiri
+        kullanilir: bu projede pitch ISARET konvansiyonu defalarca sorun
+        cikardi, bu yontem konvansiyondan BAGIMSIZ olarak dogrudur
+        (ayni yaklasim on_bosluk_nokta_atici.py'de de kullanildi)."""
+        q = msg.pose.pose.orientation
+        fz = 2.0 * (q.x * q.z - q.w * q.y)   # ileri eksenin dunya-z bileseni
+        fz = max(-1.0, min(1.0, fz))
+        self._egim_derece = math.degrees(math.asin(fz))
+        if self._egim_derece > self._egim_esigi:
+            self._son_egim_zamani = time.time()
+
+    def _rampa_etabi_cb(self, msg: Bool):
+        self._rampa_etabi = bool(msg.data)
+
+    def _guncel_max_pwm(self):
+        """Tam gaz SADECE (8. tabela) VE (burun yukari) iken."""
+        egim_var = (
+            self._son_egim_zamani is not None
+            and (time.time() - self._son_egim_zamani) < self._egim_histerezis
+        )
+        tirmaniyor = egim_var and (self._rampa_etabi or not self._rampa_etabi_gerekli)
+        if tirmaniyor != self._egim_gazi_acik:
+            self._egim_gazi_acik = tirmaniyor
+            if tirmaniyor:
+                self.get_logger().warn(
+                    'RAMPA ETABI + DIK EGIM (%.1f derece) - TAM GAZ: '
+                    'PWM tavani %.0f -> %.0f'
+                    % (self._egim_derece, self._max_pwm, self._egim_max_pwm))
+            else:
+                self.get_logger().info(
+                    'Egim bitti - normal seyir tavanina donuldu (%.0f)' % self._max_pwm)
+        return self._egim_max_pwm if tirmaniyor else self._max_pwm
 
     def _canli_mi(self, zaman):
         return zaman is not None and (time.time() - zaman) < self._timeout
@@ -117,19 +196,22 @@ class SurusKoprusu(Node):
         # sifir kalir - arac durmasi gerektiginde gercekten durmali.
         # NOT: ani/guclu kalkis darbesi (kisa sureli kalkis_pwm) kaldirildi -
         # motor zaten min_pwm seviyesinde donuyor, ayrica bir darbeye gerek yok.
-        sol_pwm = self._deadzone_uygula(sol_ham)
-        sag_pwm = self._deadzone_uygula(sag_ham)
+        tavan = self._guncel_max_pwm()
+        sol_pwm = self._deadzone_uygula(sol_ham, tavan)
+        sag_pwm = self._deadzone_uygula(sag_ham, tavan)
 
         msg = Float32MultiArray()
         msg.data = [float(sol_pwm), float(sag_pwm)]
         self._palet_pub.publish(msg)
 
-    def _deadzone_uygula(self, ham_pwm):
+    def _deadzone_uygula(self, ham_pwm, tavan=None):
         if abs(ham_pwm) < 1e-6:
             return 0.0
+        if tavan is None:
+            tavan = self._max_pwm
         isaret = 1.0 if ham_pwm > 0 else -1.0
         oran = min(abs(ham_pwm) / 255.0, 1.0)
-        olcekli = self._min_pwm + oran * (self._max_pwm - self._min_pwm)
+        olcekli = self._min_pwm + oran * (tavan - self._min_pwm)
         return isaret * olcekli
 
 

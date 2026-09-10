@@ -41,7 +41,7 @@ kendini onarir. Asagidaki degerler son uretilen halidir.
                 <type>UDPv4</type>
                 <interfaceWhiteList>
                     <address>192.168.1.20</address>  <!-- enP8p1s0 -->
-                    <address>192.168.216.150</address>  <!-- wlP1p1s0 -->
+                    <address>172.22.234.150</address>  <!-- wlP1p1s0 -->
                     <address>127.0.0.1</address>
                 </interfaceWhiteList>
             </transport_descriptor>

@@ -104,6 +104,38 @@ class TelemetriThread(QThread):
         self.farlar_pub = None
         self.ros2_bagli = False
 
+        # --- SAF PYTHON DURUMU (ROS'a HIC ihtiyaci yok) ---
+        # 2026-09-10: bunlar eskiden rclpy kurulumundan SONRA atanıyordu.
+        # Kurulum artik run()'a (worker thread'e) tasindigi icin burada,
+        # KOSULSUZ tanimlanmalari sart - main.py bunlari nesne kurulur
+        # kurulmaz okuyor (or. _buton_baglantilarini_kur -> pwm_ust_sinir).
+        self.arac_modu = "MANUEL"
+        self.surus_kaynagi = "KLAVYE"
+        self.anlik_sol_pwm = 0.0
+        self.anlik_sag_pwm = 0.0
+        self.pwm_alt_sinir = 85.0
+        self.pwm_ust_sinir = 255.0
+        self.sol_hiz_kademesi = 85.0
+        self.sag_hiz_kademesi = 85.0
+        self.manuel_hazir = False
+        self.son_komut_zamani = time.time()
+        self.guvenlik_zaman_asimi = 0.8
+        self.son_telemetri_zamani = 0.0
+        self.son_nabiz_zamani = time.time()
+        self.son_lidar_zamani = 0.0
+        self.anlik_lidar_durumu = None
+        self.son_hiz_zamani = 0.0
+        self.anlik_hiz_canli = None
+        self.son_imu_zamani = 0.0
+        self.anlik_imu_durumu = None
+        self.son_otonom_zamani = 0.0
+        self.son_gps_zamani = 0.0
+        self.son_gps_fix_type = 0
+        self.anlik_gps_durumu = None
+        self.anlik_mod_durumu = None
+        self._wifi_thread_calisiyor = False
+        self._surus_thread_calisiyor = False
+
         if rclpy is None or Node is None or String is None or Float32 is None or Bool is None or Int32 is None or Float32MultiArray is None:
             self.log_sinyali.emit("⚠️ ROS2 bulunamadığı için telemetri yayıncısı devre dışı bırakıldı.")
             # DÜZELTME (2026-09-01, canlı bildirildi: "VS Code terminalinden
@@ -131,192 +163,23 @@ class TelemetriThread(QThread):
             self.manuel_hazir = False
             return
 
-        if not rclpy.ok():
-            rclpy.init()
-
-        # --- GUVENLIK KRITIK: surus komutlari (cmd/mod/palet) icin AYRI,
-        # MINIMAL bir node + kendi izole thread'i/executor'u. Asagidaki
-        # self.node'da (9 telemetri aboneligiyle) AYNI node'da tutulunca,
-        # DDS kesif/eslesme mekanizmasi periyodik olarak (~3sn'de bir,
-        # gercek donanimla canli olculdu) tikaniyor ve /palet_hizlari
-        # yayini kesintiye ugruyordu - "geliyor gidiyor" sikayeti buradan
-        # kaynaklaniyordu (WiFi/ag DEGIL - izole testlerle elendi). 300kg'lik
-        # aracin sürüş komutu ASLA baska hicbir seye bagimli/gecikmeli
-        # olmamali, bu yuzden kendi kucucuk node'unda tamamen izole.
-        self.surus_node = Node('tufan_yer_istasyonu_surus')
-        self.cmd_pub = self.surus_node.create_publisher(String, '/arac_komut', 10)
-        self.mod_pub = self.surus_node.create_publisher(String, '/surus_modu', 10)
-        # BEST_EFFORT: /palet_hizlari surekli (10Hz) tekrar yayinlanan bir
-        # kontrol sinyali - kaybolan tek bir ornegin onemi yok, 0.1sn sonra
-        # yenisi geliyor zaten. Varsayilan RELIABLE QoS'un yeniden
-        # gonderim/onay (ack/retransmit) mekanizmasi, bu aglar uzerinde
-        # periyodik birkac saniyelik tikanmalara sebep oluyordu (canli
-        # olculdu). BEST_EFFORT bu overhead'i tamamen ortadan kaldirir.
-        palet_qos = QoSProfile(
-            reliability=QoSReliabilityPolicy.BEST_EFFORT,
-            history=QoSHistoryPolicy.KEEP_LAST,
-            depth=1,
-        )
-        self.palet_pub = self.surus_node.create_publisher(Float32MultiArray, '/palet_hizlari', palet_qos)
-        self.surus_node.create_timer(0.1, self.surekli_yayin_dongusu)
-
-        # --- GECICI: yarismadan once araç ve silah icin AYRI joystick
-        # olacak; simdilik TEK joystick, "Joystick Hedefi" ile arac/silah
-        # arasinda elle secilerek paylasiliyor. Ayni sürus-kritik/dusuk
-        # gecikme geregi oldugundan ayni izole surus_node'da yayinlaniyor. ---
-        self.joystick_hedefi = "ARAC"  # "ARAC" veya "SILAH"
-        self.silah_modu_pub = self.surus_node.create_publisher(String, '/silah_modu', 10)
-        # Operatorun silah fazini kesebilmesi icin (bkz. main.manuel_sec).
-        self.silah_iptal_pub = self.surus_node.create_publisher(Bool, '/silah_fazi_iptal', 10)
-        # DUZELTME (2026-09-05, canlı bildirildi: "joystick bile çok geç
-        # gidiyor" - crash_rapor_son.txt/[STALL] izleyicisi kanıtladı):
-        # turret_cmd_pub varsayılan RELIABLE QoS ile GUI thread'inde
-        # SENKRON publish() çağrılıyordu (bkz. main.py _panel_turret_geldi
-        # -> joystick_turret_gonder). Bu ağın RELIABLE ack/retransmit
-        # mekanizması /palet_hizlari'nda daha önce tespit edilenle AYNI
-        # şekilde tıkanıyor - publish() 15+ saniye BLOKE oldu, TEK bir Qt
-        # slot GUI thread'ini bloke edince kuyruktaki TÜM diğer sinyaller
-        # (joystick sürüş güncellemeleri DAHİL) da aynı süre bekletiliyordu
-        # - kullanıcının "joystick bile çok geç gidiyor" şikayetinin gerçek
-        # nedeni buydu. turret_manuel_cmd sürekli (joystick poll hızında)
-        # yeniden yayınlanan bir kontrol sinyali - kaybolan tek bir örneğin
-        # önemi yok. UYUMLULUK İÇİN araç tarafındaki turret_node.py'nin
-        # aboneliği de AYNI ANDA BEST_EFFORT'a alındı (yayıncı BEST_EFFORT
-        # iken abone RELIABLE beklerse DDS sessizce eşleşmez).
-        turret_qos = QoSProfile(
-            reliability=QoSReliabilityPolicy.BEST_EFFORT,
-            history=QoSHistoryPolicy.KEEP_LAST,
-            depth=1,
-        )
-        self.turret_cmd_pub = self.surus_node.create_publisher(Twist, '/turret_manuel_cmd', turret_qos)
-        self.silah_ates_pub = self.surus_node.create_publisher(Bool, '/silah_ates_manuel', 10)
-
-        # --- YENİ: Düz gidişte otomatik yön düzeltme (araç tarafı gyro-PID)
-        # AÇ/KAPA anahtarı - araçtaki arduino_motor_kontrol.py varsayılan
-        # AÇIK başlıyor, kullanıcı sahada beklenmedik davranış görürse tek
-        # tıkla kapatabilsin diye (bkz. main.py _yon_pid_butonu_ekle). ---
-        self.yon_pid_pub = self.surus_node.create_publisher(Bool, '/yon_pid_aktif', 10)
-
-        # --- FARLAR (2026-09-01, kullanıcı isteği): F tuşuna basınca AÇIK/
-        # KAPALI arasında geçiş yapıp /farlar topic'ine (Bool) yayınlanıyor -
-        # araç tarafındaki farlar/GPIO-röle düğümü bunu dinleyip fiziksel
-        # farları sürecek (bkz. main.py keyPressEvent, farlar_ayarla). ---
-        self.farlar_pub = self.surus_node.create_publisher(Bool, '/farlar', 10)
-
-        # --- Genel telemetri/gosterge dugumu (SADECE abonelikler - gecikmesi
-        # sürüşü ASLA etkilemez, ayri node'da oldugu icin) ---
-        self.node = Node('tufan_yer_istasyonu')
-
-        # NOT: /arac_hiz, /arac_batarya, /lidar_durum topic'lerinin aractaki
-        # gercek karsiligi yok (canli dogrulandi) -- hicbir zaman veri gelmiyordu,
-        # panel hep varsayilan/son deger gosteriyordu. Hiz artik gercek /odom'dan
-        # (konum_birlestirici.py'nin yayinladigi, twist.linear.x) okunuyor.
-        self.node.create_subscription(Float32, '/arac_hiz', self.hiz_cb, 10)
-        self.node.create_subscription(Int32, '/arac_batarya', self.batarya_cb, 10)
-        self.node.create_subscription(Bool, '/lidar_durum', self.lidar_cb, 10)
-        if Odometry is not None:
-            self.node.create_subscription(Odometry, '/odom', self.odom_cb, 10)
-        if LaserScan is not None:
-            self.node.create_subscription(LaserScan, '/scan', self.scan_heartbeat_cb, 10)
-        if Bool is not None:
-            self.node.create_subscription(Bool, '/arduino_baglanti_durumu', self.motor_durum_cb, 10)
-        if Imu is not None:
-            self.node.create_subscription(Imu, '/imu/data', self.imu_heartbeat_cb, 10)
-        if Int32 is not None:
-            self.node.create_subscription(Int32, '/goal_manager_heartbeat', self.otonom_heartbeat_cb, 10)
-        if Int32 is not None:
-            # ETAP göstergesi (dashboard'da label_etapNo) - Designer'da
-            # sabit "8" yazıyordu, etap_sinyali TANIMLIYDI ama hiç emit
-            # edilmiyordu (gps_durum_sinyali ile AYNI durum). Artık
-            # tabela_etap_yoneticisi.py'nin (araç) yayınladığı gerçek
-            # tespit edilen etap numarasına bağlı.
-            self.node.create_subscription(Int32, '/guncel_etap', self.guncel_etap_cb, 10)
-        if GPSRAW is not None:
-            # GNSS gercekten aktif mi - konum_birlestirici.py'de zaten
-            # dogrulanmis AYNI kaynak (fix_type: 0=yok,1=fixsiz,2=2D,3=3D,
-            # 4=DGPS,5=RTK Float,6=RTK Fixed). "ETKİN" esigi olarak 3D fix
-            # (>=3) kullaniliyor - konum_birlestirici.py'nin kendi
-            # gps_heading_min_fix_type varsayilaniyla (3) TUTARLI, RTK'siz de
-            # (sadece 3D fix) GNSS'in temelde calistigini gostermek icin
-            # yeterli bir esik (RTK ozel durumu ayri, NTRIP/RTK panelinde).
-            self.node.create_subscription(GPSRAW, '/mavros/gpsstatus/gps1/raw', self.gps_raw_cb, 10)
-        self.node.create_subscription(Float32, '/turret_hedef_mesafe', self.hedef_mesafe_cb, 10)
-        self.node.create_subscription(Bool, '/silah_fazi_aktif', self.silah_fazi_cb, 10)
-        self.son_lidar_zamani = 0.0
-        self.anlik_lidar_durumu = None
-        # HIZ CANLILIK KONTROLU (2026-09-01, kullanıcı isteği: "hız verisi
-        # gelmiyorken her zaman 0 yazsın") - eskiden hiz_cb/odom_cb SADECE
-        # yeni veri geldiğinde hiz_sinyali yayınlıyordu; veri kesilince
-        # (araç Jetson kapandı/bağlantı gitti) ekranda EN SON gelen değer
-        # SONSUZA KADAR asılı kalıyordu (ör. "3.2 m/s" araç durduktan/
-        # bağlantı kesildikten SONRA bile öylece duruyordu - yanıltıcı).
-        # Diğer heartbeat'lerle (lidar/imu/gps, hemen altta/yukarıda) AYNI
-        # desen: surekli_yayin_dongusu (0.1sn) tazelik kontrolü yapıp veri
-        # durunca BİR KEZ "0.0 m/s" yayınlıyor (bkz. aşağıda).
-        self.son_hiz_zamani = 0.0
-        self.anlik_hiz_canli = None
-        self.son_imu_zamani = 0.0
-        self.anlik_imu_durumu = None
-        self.son_otonom_zamani = 0.0
-        self.son_gps_zamani = 0.0
-        self.son_gps_fix_type = 0
-        self.anlik_gps_durumu = None
-        self.manuel_hazir = False
-        self.anlik_mod_durumu = None
-        self.ros2_bagli = True
-        
-        self.arac_modu = "MANUEL"
-        self.surus_kaynagi = "KLAVYE"  # "KLAVYE" veya "JOYSTICK" - ayni anda tek kaynak yazsin diye
-        self.anlik_sol_pwm = 0.0
-        self.anlik_sag_pwm = 0.0
-
-        # PWM araligi: aracin motorlari 85'in altinda fiziksel olarak
-        # donmuyor (gercek donanimda dogrulandi), bu yuzden ALT SINIR sabit.
-        # UST SINIR ayarlar ekranindaki kutudan (kolay surus icin) canli
-        # degistirilebilir, varsayilan 255 (tam guc).
-        self.pwm_alt_sinir = 85.0
-        self.pwm_ust_sinir = 255.0
-
-        self.sol_hiz_kademesi = 85.0
-        self.sag_hiz_kademesi = 85.0
-        
-        self.son_komut_zamani = time.time()
-        self.guvenlik_zaman_asimi = 0.8  # Süre uzatıldı. Basılı tutarken kesilmeleri önler. 
-        
-        # --- YENİ EKLENEN: SİSTEM MERKEZİ WATCHDOG TAKİBİ ---
-        self.son_telemetri_zamani = 0.0  # İlk açılışta çevrimdışı (PASİF) başlasın
-        # ----------------------------------------------------
-
-        # 2026-09-04, kullanıcı: "arayüzden veri bazen çok geç gidiyor,
-        # arayüzü kapat aç yapınca düzeliyor" - ntrip_rtk_sistemi.py'de
-        # DAHA ÖNCE bulunan "zombi thread" deseniyle AYNI kök neden
-        # şüphesi: DDS/rclpy bağlantısı sessizce bozulabiliyor, thread
-        # isRunning()=True kalmaya devam ediyor, tek çare tüm uygulamayı
-        # kapatıp açmaktı. son_telemetri_zamani SADECE araçtan veri
-        # GELİNCE güncelleniyor (araç bağlı değilken de doğal olarak
-        # bayatlar - "zombi" ile "araç kapalı" ayırt edilemez). Bu yeni
-        # nabız ise run()'daki spin döngüsünün HER TURUNDA (veri gelse de
-        # gelmese de) güncelleniyor - main.py'deki bekçi bunu kullanıyor
-        # (bkz. _telemetri_bekci_kontrol, NTRIP'teki AYNI desen).
-        self.son_nabiz_zamani = time.time()
-
-        # UBIQUITI LINK KALITESI: ROS'tan gelen bir sey degil, arac Jetson'a
-        # periyodik ping atarak olculuyor (bkz. _wifi_kontrol). ONEMLI: bu
-        # ROS2 timer'i (create_timer) DEGIL, ayri bir thread - ping
-        # bloklayici olabilir, ROS2 executor'inin İÇİNDE calistirilirsa
-        # /palet_hizlari dahil TUM yayin/abonelik durabilir (daha once
-        # ayni sebeple nmcli icin canli olcumle dogrulanmis bir sorundu).
-        self._wifi_thread_calisiyor = True
-        threading.Thread(target=self._wifi_kontrol_dongusu, daemon=True).start()
-
-        # Surus spin thread'i EN SONDA baslatiliyor - yukaridaki TUM durum
-        # degiskenleri (arac_modu, surus_kaynagi, anlik_sol_pwm vb.) hazir
-        # olmadan surekli_yayin_dongusu (0.1sn'de bir tetiklenir) calisirsa
-        # AttributeError ile cokuyordu (yaris durumu, canli tespit edildi).
-        self._surus_thread_calisiyor = True
-        threading.Thread(target=self._surus_spin_dongusu, daemon=True).start()
-
-        self.log_yaz("✅ Telemetri ve Bağımsız Palet Sistemi (Fiziksel Eşleşmeli) Başlatıldı.")
+        # ROS2 KURULUMU ARTIK BURADA DEGIL - bkz. _ros_kur() / run().
+        #
+        # 2026-09-10, KOK NEDEN DUZELTMESI: bu blok (rclpy.init + 2 node +
+        # ~10 publisher + ~14 subscription) GUI THREAD'INDE calisiyordu.
+        # __init__ bir QThread nesnesinin YAPICISI - run() gibi worker
+        # thread'de DEGIL, cagiran thread'de (main.py::__init__ -> GUI)
+        # calisir. DDS kesfi yavasladiginda pencere aciliyor ama BOS
+        # kaliyor ve yanit vermiyordu; masaustu "force quit" oneriyordu.
+        # Canli yigin izi (SIGABRT + faulthandler):
+        #     rclpy/node.py:1376 create_subscription
+        #     telemetri_sistemi.py:214 __init__      <- GUI THREAD
+        #     main.py:364 _telemetri_baglantilari_kur
+        # Bu, FastDDS beyaz listesi duzeltilerek BIR KEZ hafifletilmisti
+        # ama yapisal sebep duruyordu ve donma tekrarladi. Artik TUM rclpy
+        # isi run()'da, yani QThread'in KENDI thread'inde yapiliyor -
+        # DDS ne kadar yavas olursa olsun arayuz ACILIR ve YANIT VERIR;
+        # telemetri hazir olunca kendiliginde baglanir (ros2_bagli).
 
     def hiz_cb(self, msg):
         self.son_telemetri_zamani = time.time() # Veri geldi, kalp atışı güncellendi!
@@ -823,7 +686,206 @@ class TelemetriThread(QThread):
         self.cmd_pub.publish(msg)
         self.anlik_palet_yayinla()
 
+    def _ros_kur(self):
+        """TUM rclpy kurulumu - SADECE run() icinden, worker thread'de.
+
+        GUI thread'inde CAGIRILMAMALI (bkz. __init__'teki 2026-09-10 notu).
+        Basarisiz olursa arayuz calismaya devam eder, sadece telemetri/
+        surus devre disi kalir (ros2_bagli=False)."""
+        if self.ros2_bagli:
+            return True
+        if rclpy is None or Node is None:
+            return False
+        try:
+            if not rclpy.ok():
+                rclpy.init()
+
+            # --- GUVENLIK KRITIK: surus komutlari (cmd/mod/palet) icin AYRI,
+            # MINIMAL bir node + kendi izole thread'i/executor'u. Asagidaki
+            # self.node'da (9 telemetri aboneligiyle) AYNI node'da tutulunca,
+            # DDS kesif/eslesme mekanizmasi periyodik olarak (~3sn'de bir,
+            # gercek donanimla canli olculdu) tikaniyor ve /palet_hizlari
+            # yayini kesintiye ugruyordu - "geliyor gidiyor" sikayeti buradan
+            # kaynaklaniyordu (WiFi/ag DEGIL - izole testlerle elendi). 300kg'lik
+            # aracin sürüş komutu ASLA baska hicbir seye bagimli/gecikmeli
+            # olmamali, bu yuzden kendi kucucuk node'unda tamamen izole.
+            self.surus_node = Node('tufan_yer_istasyonu_surus')
+            self.cmd_pub = self.surus_node.create_publisher(String, '/arac_komut', 10)
+            self.mod_pub = self.surus_node.create_publisher(String, '/surus_modu', 10)
+            # BEST_EFFORT: /palet_hizlari surekli (10Hz) tekrar yayinlanan bir
+            # kontrol sinyali - kaybolan tek bir ornegin onemi yok, 0.1sn sonra
+            # yenisi geliyor zaten. Varsayilan RELIABLE QoS'un yeniden
+            # gonderim/onay (ack/retransmit) mekanizmasi, bu aglar uzerinde
+            # periyodik birkac saniyelik tikanmalara sebep oluyordu (canli
+            # olculdu). BEST_EFFORT bu overhead'i tamamen ortadan kaldirir.
+            palet_qos = QoSProfile(
+                reliability=QoSReliabilityPolicy.BEST_EFFORT,
+                history=QoSHistoryPolicy.KEEP_LAST,
+                depth=1,
+            )
+            self.palet_pub = self.surus_node.create_publisher(Float32MultiArray, '/palet_hizlari', palet_qos)
+            self.surus_node.create_timer(0.1, self.surekli_yayin_dongusu)
+
+            # --- GECICI: yarismadan once araç ve silah icin AYRI joystick
+            # olacak; simdilik TEK joystick, "Joystick Hedefi" ile arac/silah
+            # arasinda elle secilerek paylasiliyor. Ayni sürus-kritik/dusuk
+            # gecikme geregi oldugundan ayni izole surus_node'da yayinlaniyor. ---
+            self.joystick_hedefi = "ARAC"  # "ARAC" veya "SILAH"
+            self.silah_modu_pub = self.surus_node.create_publisher(String, '/silah_modu', 10)
+            # Operatorun silah fazini kesebilmesi icin (bkz. main.manuel_sec).
+            self.silah_iptal_pub = self.surus_node.create_publisher(Bool, '/silah_fazi_iptal', 10)
+            # DUZELTME (2026-09-05, canlı bildirildi: "joystick bile çok geç
+            # gidiyor" - crash_rapor_son.txt/[STALL] izleyicisi kanıtladı):
+            # turret_cmd_pub varsayılan RELIABLE QoS ile GUI thread'inde
+            # SENKRON publish() çağrılıyordu (bkz. main.py _panel_turret_geldi
+            # -> joystick_turret_gonder). Bu ağın RELIABLE ack/retransmit
+            # mekanizması /palet_hizlari'nda daha önce tespit edilenle AYNI
+            # şekilde tıkanıyor - publish() 15+ saniye BLOKE oldu, TEK bir Qt
+            # slot GUI thread'ini bloke edince kuyruktaki TÜM diğer sinyaller
+            # (joystick sürüş güncellemeleri DAHİL) da aynı süre bekletiliyordu
+            # - kullanıcının "joystick bile çok geç gidiyor" şikayetinin gerçek
+            # nedeni buydu. turret_manuel_cmd sürekli (joystick poll hızında)
+            # yeniden yayınlanan bir kontrol sinyali - kaybolan tek bir örneğin
+            # önemi yok. UYUMLULUK İÇİN araç tarafındaki turret_node.py'nin
+            # aboneliği de AYNI ANDA BEST_EFFORT'a alındı (yayıncı BEST_EFFORT
+            # iken abone RELIABLE beklerse DDS sessizce eşleşmez).
+            turret_qos = QoSProfile(
+                reliability=QoSReliabilityPolicy.BEST_EFFORT,
+                history=QoSHistoryPolicy.KEEP_LAST,
+                depth=1,
+            )
+            self.turret_cmd_pub = self.surus_node.create_publisher(Twist, '/turret_manuel_cmd', turret_qos)
+            self.silah_ates_pub = self.surus_node.create_publisher(Bool, '/silah_ates_manuel', 10)
+
+            # --- YENİ: Düz gidişte otomatik yön düzeltme (araç tarafı gyro-PID)
+            # AÇ/KAPA anahtarı - araçtaki arduino_motor_kontrol.py varsayılan
+            # AÇIK başlıyor, kullanıcı sahada beklenmedik davranış görürse tek
+            # tıkla kapatabilsin diye (bkz. main.py _yon_pid_butonu_ekle). ---
+            self.yon_pid_pub = self.surus_node.create_publisher(Bool, '/yon_pid_aktif', 10)
+
+            # --- FARLAR (2026-09-01, kullanıcı isteği): F tuşuna basınca AÇIK/
+            # KAPALI arasında geçiş yapıp /farlar topic'ine (Bool) yayınlanıyor -
+            # araç tarafındaki farlar/GPIO-röle düğümü bunu dinleyip fiziksel
+            # farları sürecek (bkz. main.py keyPressEvent, farlar_ayarla). ---
+            self.farlar_pub = self.surus_node.create_publisher(Bool, '/farlar', 10)
+
+            # --- Genel telemetri/gosterge dugumu (SADECE abonelikler - gecikmesi
+            # sürüşü ASLA etkilemez, ayri node'da oldugu icin) ---
+            self.node = Node('tufan_yer_istasyonu')
+
+            # NOT: /arac_hiz, /arac_batarya, /lidar_durum topic'lerinin aractaki
+            # gercek karsiligi yok (canli dogrulandi) -- hicbir zaman veri gelmiyordu,
+            # panel hep varsayilan/son deger gosteriyordu. Hiz artik gercek /odom'dan
+            # (konum_birlestirici.py'nin yayinladigi, twist.linear.x) okunuyor.
+            self.node.create_subscription(Float32, '/arac_hiz', self.hiz_cb, 10)
+            self.node.create_subscription(Int32, '/arac_batarya', self.batarya_cb, 10)
+            self.node.create_subscription(Bool, '/lidar_durum', self.lidar_cb, 10)
+            if Odometry is not None:
+                self.node.create_subscription(Odometry, '/odom', self.odom_cb, 10)
+            if LaserScan is not None:
+                self.node.create_subscription(LaserScan, '/scan', self.scan_heartbeat_cb, 10)
+            if Bool is not None:
+                self.node.create_subscription(Bool, '/arduino_baglanti_durumu', self.motor_durum_cb, 10)
+            if Imu is not None:
+                self.node.create_subscription(Imu, '/imu/data', self.imu_heartbeat_cb, 10)
+            if Int32 is not None:
+                self.node.create_subscription(Int32, '/goal_manager_heartbeat', self.otonom_heartbeat_cb, 10)
+            if Int32 is not None:
+                # ETAP göstergesi (dashboard'da label_etapNo) - Designer'da
+                # sabit "8" yazıyordu, etap_sinyali TANIMLIYDI ama hiç emit
+                # edilmiyordu (gps_durum_sinyali ile AYNI durum). Artık
+                # tabela_etap_yoneticisi.py'nin (araç) yayınladığı gerçek
+                # tespit edilen etap numarasına bağlı.
+                self.node.create_subscription(Int32, '/guncel_etap', self.guncel_etap_cb, 10)
+            if GPSRAW is not None:
+                # GNSS gercekten aktif mi - konum_birlestirici.py'de zaten
+                # dogrulanmis AYNI kaynak (fix_type: 0=yok,1=fixsiz,2=2D,3=3D,
+                # 4=DGPS,5=RTK Float,6=RTK Fixed). "ETKİN" esigi olarak 3D fix
+                # (>=3) kullaniliyor - konum_birlestirici.py'nin kendi
+                # gps_heading_min_fix_type varsayilaniyla (3) TUTARLI, RTK'siz de
+                # (sadece 3D fix) GNSS'in temelde calistigini gostermek icin
+                # yeterli bir esik (RTK ozel durumu ayri, NTRIP/RTK panelinde).
+                self.node.create_subscription(GPSRAW, '/mavros/gpsstatus/gps1/raw', self.gps_raw_cb, 10)
+            self.node.create_subscription(Float32, '/turret_hedef_mesafe', self.hedef_mesafe_cb, 10)
+            self.node.create_subscription(Bool, '/silah_fazi_aktif', self.silah_fazi_cb, 10)
+            # HIZ CANLILIK KONTROLU (2026-09-01, kullanıcı isteği: "hız verisi
+            # gelmiyorken her zaman 0 yazsın") - eskiden hiz_cb/odom_cb SADECE
+            # yeni veri geldiğinde hiz_sinyali yayınlıyordu; veri kesilince
+            # (araç Jetson kapandı/bağlantı gitti) ekranda EN SON gelen değer
+            # SONSUZA KADAR asılı kalıyordu (ör. "3.2 m/s" araç durduktan/
+            # bağlantı kesildikten SONRA bile öylece duruyordu - yanıltıcı).
+            # Diğer heartbeat'lerle (lidar/imu/gps, hemen altta/yukarıda) AYNI
+            # desen: surekli_yayin_dongusu (0.1sn) tazelik kontrolü yapıp veri
+            # durunca BİR KEZ "0.0 m/s" yayınlıyor (bkz. aşağıda).
+            self.ros2_bagli = True
+        
+            self.surus_kaynagi = "KLAVYE"  # "KLAVYE" veya "JOYSTICK" - ayni anda tek kaynak yazsin diye
+
+            # PWM araligi: aracin motorlari 85'in altinda fiziksel olarak
+            # donmuyor (gercek donanimda dogrulandi), bu yuzden ALT SINIR sabit.
+            # UST SINIR ayarlar ekranindaki kutudan (kolay surus icin) canli
+            # degistirilebilir, varsayilan 255 (tam guc).
+
+        
+            self.guvenlik_zaman_asimi = 0.8  # Süre uzatıldı. Basılı tutarken kesilmeleri önler. 
+        
+            # --- YENİ EKLENEN: SİSTEM MERKEZİ WATCHDOG TAKİBİ ---
+            self.son_telemetri_zamani = 0.0  # İlk açılışta çevrimdışı (PASİF) başlasın
+            # ----------------------------------------------------
+
+            # 2026-09-04, kullanıcı: "arayüzden veri bazen çok geç gidiyor,
+            # arayüzü kapat aç yapınca düzeliyor" - ntrip_rtk_sistemi.py'de
+            # DAHA ÖNCE bulunan "zombi thread" deseniyle AYNI kök neden
+            # şüphesi: DDS/rclpy bağlantısı sessizce bozulabiliyor, thread
+            # isRunning()=True kalmaya devam ediyor, tek çare tüm uygulamayı
+            # kapatıp açmaktı. son_telemetri_zamani SADECE araçtan veri
+            # GELİNCE güncelleniyor (araç bağlı değilken de doğal olarak
+            # bayatlar - "zombi" ile "araç kapalı" ayırt edilemez). Bu yeni
+            # nabız ise run()'daki spin döngüsünün HER TURUNDA (veri gelse de
+            # gelmese de) güncelleniyor - main.py'deki bekçi bunu kullanıyor
+            # (bkz. _telemetri_bekci_kontrol, NTRIP'teki AYNI desen).
+
+            # UBIQUITI LINK KALITESI: ROS'tan gelen bir sey degil, arac Jetson'a
+            # periyodik ping atarak olculuyor (bkz. _wifi_kontrol). ONEMLI: bu
+            # ROS2 timer'i (create_timer) DEGIL, ayri bir thread - ping
+            # bloklayici olabilir, ROS2 executor'inin İÇİNDE calistirilirsa
+            # /palet_hizlari dahil TUM yayin/abonelik durabilir (daha once
+            # ayni sebeple nmcli icin canli olcumle dogrulanmis bir sorundu).
+            self._wifi_thread_calisiyor = True
+            threading.Thread(target=self._wifi_kontrol_dongusu, daemon=True).start()
+
+            # Surus spin thread'i EN SONDA baslatiliyor - yukaridaki TUM durum
+            # degiskenleri (arac_modu, surus_kaynagi, anlik_sol_pwm vb.) hazir
+            # olmadan surekli_yayin_dongusu (0.1sn'de bir tetiklenir) calisirsa
+            # AttributeError ile cokuyordu (yaris durumu, canli tespit edildi).
+            self._surus_thread_calisiyor = True
+            threading.Thread(target=self._surus_spin_dongusu, daemon=True).start()
+
+            self.log_yaz("✅ Telemetri ve Bağımsız Palet Sistemi (Fiziksel Eşleşmeli) Başlatıldı.")
+            # NOT: arac_modu / pwm_ust_sinir / son_*_zamani gibi SAF
+            # DURUM degiskenleri BURADAN KALDIRILDI - artik __init__'te
+            # (GUI thread'inde, aninda) atanıyorlar. Burada tekrar
+            # atansalardi, kullanicinin ROS hazir olmadan yaptigi ayar
+            # (or. Ayarlar ekranindan PWM ust siniri) kurulum bitince
+            # SESSIZCE varsayilana geri doner ve arac yanlis hizda giderdi.
+        except Exception as e:
+            # Kurulum patlarsa arayuz AYAKTA kalmali - sadece telemetri yok.
+            self.ros2_bagli = False
+            try:
+                self.log_sinyali.emit(
+                    "⚠️ ROS2 telemetri kurulumu başarısız: %s "
+                    "(arayüz çalışmaya devam ediyor)" % e)
+            except Exception:
+                pass
+            return False
+        return True
+
     def run(self):
+        # ROS2 KURULUMU BURADA (worker thread'de) - bkz. _ros_kur().
+        # Eskiden __init__ (GUI thread'i) kurar, run() sadece spin ederdi;
+        # DDS yavasladiginda arayuz aciliyor ama donuyordu.
+        if not self._ros_kur():
+            return
         if self.node is None:
             return
         # KENDI OZEL EXECUTOR: rclpy.spin(node) paylasilan GLOBAL executor'i

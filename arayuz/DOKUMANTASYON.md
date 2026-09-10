@@ -3541,6 +3541,60 @@ Dosya yazılamazsa açılış engellenmiyor, mevcut haliyle devam ediliyor.
 > liste düzeltildiği için şu an hızlı, ama ağ yavaşladığında yine
 > donduracak. Kalıcı çözüm ROS kurulumunu `run()`'a taşımak.
 
+### Arayüz donması - KÖK NEDEN düzeltmesi (2026-09-10, ikinci tur)
+
+FastDDS beyaz liste düzeltmesi donmayı bir kez hafifletti ama **tekrarladı**
+— çünkü asıl sebep yapısaldı.
+
+**`TelemetriThread.__init__` GUI thread'inde çalışıyordu.** `__init__` bir
+QThread nesnesinin *yapıcısıdır*; `run()` gibi worker thread'de değil,
+**çağıran** thread'de (main.py `__init__` → GUI) çalışır. İçinde
+`rclpy.init()` + 2 node + ~10 publisher + ~14 subscription vardı. DDS keşfi
+yavaşladığında pencere açılıyor ama boş kalıyor ve yanıt vermiyordu.
+
+Artık tüm `rclpy` kurulumu `_ros_kur()` içinde ve **`run()`'dan**, yani
+QThread'in kendi thread'inden çağrılıyor. Yapısal doğrulama (AST ile):
+`__init__` içinde **0** ROS çağrısı, `_ros_kur` içinde 25. Kurulum
+patlarsa arayüz ayakta kalır, sadece telemetri devre dışı olur.
+
+> Saf durum değişkenleri (`arac_modu`, `pwm_ust_sinir`, `son_*_zamani`…)
+> `__init__`'e **koşulsuz** taşındı; `_ros_kur` içindeki 21 tekrar atama
+> kaldırıldı. Yoksa kullanıcının ROS hazır olmadan yaptığı ayar (ör. PWM
+> üst sınırı) kurulum bitince sessizce varsayılana dönerdi.
+
+**STALL izleyicisinin ölçtüğü diğer iki tıkanma** (log artık tamponsuz
+olduğu için ilk kez görülebildi — 32 kayıt):
+
+| Kez | Yer | Düzeltme |
+|---|---|---|
+| 20 | `terminal_widget._ekrani_guncelle` | debounce 100 → **250 ms** |
+| 3 | `main.py::_panel_bekci_kontrol` → `subprocess.call` | **Popen** (non-blocking), sonuç sonraki turda |
+
+`subprocess.call` GUI thread'ini blokluyordu — bu dosyanın kendi kuralının
+("GUI thread'ini ASLA bloklama") ihlaliydi.
+
+*Ölçülen sonuç:* PERF slot aralığı **ort 28 ms / en kötü 58-62 ms**
+(beklenen 66 ms'nin altında), 90 sn'de 30 STALL → 60 sn'de **1**.
+Terminal widget ve subprocess takılma listesinden tamamen çıktı.
+
+### Temiz başlatma: FastDDS paylaşımlı bellek artıkları (2026-09-10)
+
+Araçta `/dev/shm`'de **200 adet** artık `fastrtps_*` dosyası birikmişti
+(gün boyu force-kill/yeniden başlatmalardan). Belirti:
+`RTPS_TRANSPORT_SHM Error: Failed init_port fastrtps_portNNNNN:
+open_and_lock_file failed`. Temiz başlatma sırası:
+
+```bash
+tmux send-keys -t tufan_ana_terminal C-c     # yığını durdur
+rm -f /dev/shm/fastrtps_*                    # ROS KAPALIYKEN temizle
+tmux send-keys -t tufan_ana_terminal '...ros2 launch...' Enter
+```
+
+*Aynı oturumda sağlık bekçisi canlı doğrulandı:* `/scan_raw` akarken
+`/scan` sustu, bekçi 56.9 sn sonra `scan_front_filter`'ı SIGTERM ile
+sonlandırdı, `respawn=True` geri getirdi, `/scan` 14.7 Hz'e döndü —
+**elle müdahale olmadan**.
+
 ---
 *Bu doküman, `~/Desktop/tufan` altındaki kodun mevcut haline göre otomatik
 olarak (kod incelemesiyle) hazırlanmıştır.*

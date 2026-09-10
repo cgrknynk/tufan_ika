@@ -495,13 +495,32 @@ class TufanGCS(QMainWindow):
         # joystick'i yayınlıyor, yenisini başlatmaya çalışmak boşuna
         # (tekil-çalışma kilidi zaten engeller). Sadece GERÇEKTEN hiç node
         # yoksa yeniden başlat.
-        try:
-            if subprocess.call(["pgrep", "-f", "kontrol_paneli_node.py"],
-                               stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL) == 0:
-                return  # başka bir örnek çalışıyor, sistem fonksiyonel
-        except Exception:
-            pass
+        # DÜZELTME (2026-09-10): burada subprocess.call KULLANILIYORDU -
+        # GUI THREAD'İNİ BLOKLAYAN senkron bir çağrı. Yüklü Jetson'da
+        # fork+pgrep yüzlerce ms sürebiliyor ve bu bekçi periyodik
+        # çalıştığı için arayüz düzenli olarak takılıyordu. STALL
+        # izleyicisi bunu canlı yakaladı:
+        #     main.py:499 _panel_bekci_kontrol -> subprocess.py:345 call
+        # Bu dosyanın kendi kuralı "GUI thread'ini ASLA bloklama" (bkz.
+        # _arac_baslat_tetikle'deki Popen notu) - burada ihlal edilmişti.
+        # Artık Popen (non-blocking): sonuç BİR SONRAKİ bekçi turunda
+        # okunuyor. Bekçi zaten periyodik, bir tur gecikme zararsız.
+        _kontrol = getattr(self, '_panel_pgrep_sureci', None)
+        if _kontrol is not None:
+            _sonuc = _kontrol.poll()
+            if _sonuc is None:
+                return          # önceki kontrol hâlâ sürüyor, bekle
+            self._panel_pgrep_sureci = None
+            if _sonuc == 0:
+                return          # başka bir örnek çalışıyor, sistem fonksiyonel
+        else:
+            try:
+                self._panel_pgrep_sureci = subprocess.Popen(
+                    ["pgrep", "-f", "kontrol_paneli_node.py"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                self._panel_pgrep_sureci = None
+            return              # kararı bir sonraki turda ver
         self.log_yaz("⚠️ Kontrol paneli süreci durmuş - yeniden başlatılıyor.")
         self._kontrol_paneli_baslat()
 

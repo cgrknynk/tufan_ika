@@ -46,7 +46,13 @@ BASLANGIC_DIZINI = "~/Desktop/tufan_v2_ws"
 # kamerayı da geciktiriyordu. Terminal metni video değil - 100ms (10Hz)
 # okumak için zaten fazlasıyla akıcı, kameraya daha az sıklıkta "araya
 # giriyor".
-GECIKMELI_RENDER_MS = 100
+# 2026-09-10: 100 -> 250 ms. STALL izleyicisi GUI takilmalarinin
+# COGUNLUGUNU (32 kayittan 20'sini) bu widget'in cizimine bagladi -
+# arac launch'i saniyede yuzlerce satir uretiyor ve her debounce
+# turunda QTextEdit yeniden yaziliyor. Terminal metni icin 4Hz
+# fazlasiyla akici; kamera/telemetri ile ayni event loop'u paylastigi
+# icin buradaki her ms dogrudan onlardan calinıyor.
+GECIKMELI_RENDER_MS = 250
 
 
 def _hedef_host_belirle():

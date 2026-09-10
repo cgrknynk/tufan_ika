@@ -1,3 +1,4 @@
+import os
 import sys
 import json
 import math
@@ -75,6 +76,22 @@ from uydu_harita_widget import UyduHaritaWidget
 # ==============================================================================
 # 1. ROS 2 ARKA PLAN MOTORU (Orijinal Çalışan QThread + Thread-Safe Nav2)
 # ==============================================================================
+
+# --- HAFIF MOD (2026-09-10, kullanici istegi: "sadece komutlari gonderen ve
+# goruntuyu ceken bir yapi olusturalim, lidar ve imu verisi cekmeyelim") ---
+# Arayuz gun boyu donuyordu. GUI thread'ini tikayan is olcuLDU (STALL
+# izleyicisi): en agir kalemler BUYUK ROS mesajlari ve onlarin ciziMI -
+# /scan (LaserScan, 10Hz, binlerce nokta), /imu/data, /local_costmap
+# (OccupancyGrid) ve /plan + /local_plan (Path). Bunlarin hepsi SADECE
+# gorsellestirme icin; komut gondermek ve kamera goruntusu icin GEREKSIZ.
+#
+# Bu mod ACIKKEN o abonelikler HIC KURULMAZ (mesaj gelmez, callback
+# calismaz, radar/harita cizimi tetiklenmez). Komut yayincilari, kamera
+# UDP akisi ve kucuk durum topic'leri AYNEN calisir.
+#
+# GERI ACMAK icin tek adim:  TUFAN_HAFIF_MOD=0 ./calistir.sh
+HAFIF_MOD = os.environ.get("TUFAN_HAFIF_MOD", "1") == "1"
+
 class Ros2GcsMotoru(QThread):
     lidar_sinyal = pyqtSignal(list)
     imu_sinyal = pyqtSignal(float, float, float)
@@ -179,7 +196,8 @@ class Ros2GcsMotoru(QThread):
         )
 
         # Orijinal Çalışan Abonelikler
-        self.lidar_sub = self.node.create_subscription(LaserScan, '/scan', self.scan_callback, lidar_qos)
+        if not HAFIF_MOD:   # bkz. HAFIF_MOD notu - LaserScan 10Hz, en agir kalem
+            self.lidar_sub = self.node.create_subscription(LaserScan, '/scan', self.scan_callback, lidar_qos)
         # Uydu harita ekrani + Taktik LiDAR GNSS yazisi icin gercek GNSS konumu.
         # DUZELTME (2026-09-01, canli bulundu): "/fix" hicbir zaman yayinlanmiyor
         # (Publisher count: 0, canli dogrulandi - "GNSS: sinyal yok" hep
@@ -228,7 +246,8 @@ class Ros2GcsMotoru(QThread):
         # DÜZELTME: bno055 sürücüsü '/bno055/imu' diye bir topic YAYINLAMIYOR
         # (canlı doğrulandı) - füzyonlu/kalibreli veri gerçekte '/imu/data'da.
         # Eski topic adında hiç publisher olmadığı için IMU hiçbir zaman veri almıyordu.
-        self.imu_sub = self.node.create_subscription(Imu, '/imu/data', self.imu_callback, imu_qos)
+        if not HAFIF_MOD:   # bkz. HAFIF_MOD notu
+            self.imu_sub = self.node.create_subscription(Imu, '/imu/data', self.imu_callback, imu_qos)
         # Rota (plan) cizgilerini arac-goreceli cevirmek icin gercek konum -
         # bkz. global_plan_callback/local_plan_callback ve _dunya_to_arac.
         if Odometry is not None:
@@ -236,7 +255,7 @@ class Ros2GcsMotoru(QThread):
 
         # costmap_callback artik tf_buffer KULLANMIYOR (bkz. asagidaki not) -
         # bu yuzden tf_buffer kapaliyken bile guvenle acilabilir.
-        if OccupancyGrid is not None:
+        if OccupancyGrid is not None and not HAFIF_MOD:   # costmap: buyuk mesaj
             costmap_qos = QoSProfile(
                 reliability=QoSReliabilityPolicy.RELIABLE,
                 durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
@@ -262,8 +281,9 @@ class Ros2GcsMotoru(QThread):
         # Nav2 Abonelikleri (nav2_msgs kurulu değilse bu kısım atlanır, Lidar/IMU etkilenmez)
         if ActionClient and NavigateToPose and Path:
             self.nav_to_pose_client = ActionClient(self.node, NavigateToPose, 'navigate_to_pose')
-            self.global_plan_sub = self.node.create_subscription(Path, '/plan', self.global_plan_callback, nav2_qos)
-            self.local_plan_sub = self.node.create_subscription(Path, '/local_plan', self.local_plan_callback, nav2_qos)
+            if not HAFIF_MOD:   # Path mesajlari buyuk, sadece gorsellestirme
+                self.global_plan_sub = self.node.create_subscription(Path, '/plan', self.global_plan_callback, nav2_qos)
+                self.local_plan_sub = self.node.create_subscription(Path, '/local_plan', self.local_plan_callback, nav2_qos)
             if String is not None:
                 # Kullanici istegi (2026-08-31): rota tamamlaninca (varsa
                 # basarisiz da olsa) mavi rota cizgisi ekranda SONSUZA KADAR

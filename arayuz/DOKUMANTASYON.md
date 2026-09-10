@@ -3595,6 +3595,57 @@ tmux send-keys -t tufan_ana_terminal '...ros2 launch...' Enter
 sonlandırdı, `respawn=True` geri getirdi, `/scan` 14.7 Hz'e döndü —
 **elle müdahale olmadan**.
 
+### HAFİF MOD — sadece komut + görüntü (2026-09-10)
+
+*Kullanıcı isteği:* "şu anlık sadece komutları gönderen ve görüntüyü çeken
+bir yapı oluşturalım, lidar ve imu verisi çekmeyelim."
+
+Kod **silinmedi**, tek anahtara bağlandı. Varsayılan **açık**:
+
+```bash
+./calistir.sh                      # HAFİF MOD (varsayılan)
+TUFAN_HAFIF_MOD=0 ./calistir.sh    # tam telemetri geri gelir
+```
+
+**Kapananlar** (hepsi büyük ROS mesajı + GUI çizimi, sadece görselleştirme):
+
+| Dosya | Topic |
+|---|---|
+| `telemetri_sistemi.py` | `/odom`, `/scan`, `/imu/data`, `/mavros/gpsstatus/gps1/raw` |
+| `harita_sistemi.py` | `/scan`, `/imu/data`, `/local_costmap/costmap`, `/plan`, `/local_plan` |
+| `terminal_widget.py` | SSH terminali **otomatik bağlanmıyor** |
+
+**Dokunulmayanlar:** 9 komut yayıncısının **hiçbiri** (`/arac_komut`,
+`/surus_modu`, `/palet_hizlari`, `/silah_modu`, `/silah_fazi_iptal`,
+`/turret_manuel_cmd`, `/silah_ates_manuel`, `/yon_pid_aktif`, `/farlar`),
+kamera UDP akışı, küçük durum topic'leri (`/guncel_etap`,
+`/silah_fazi_aktif`, `/arduino_baglanti_durumu`) ve ayrı process'teki
+kontrol paneli (acil stop dahil). Araç **kumanda edilebilir** ve
+**görüntü gelir**.
+
+**SSH terminali neden dahil:** LIDAR/IMU kapatıldıktan *sonra* ölçüldü —
+GUI takılmalarının **tamamı** (26/26) bu widget'in çizimine kalmıştı. Araç
+launch'ı saniyede yüzlerce satır üretiyor ve her render'da QTextEdit'in
+görünen ekranı baştan yazılıyor. Debounce'u 250→500 ms yapmak **yetmedi**:
+maliyet sıklıkta değil, her render'ın kendisinde. Terminal kaybolmadı,
+`yeniden_baglan()` ile elle açılıyor.
+
+*Ölçüm (90 sn, yerleşik durum):*
+
+| | Önce | Sonra |
+|---|---|---|
+| STALL | 30 | **6** |
+| PERF ortalama | 76–95 ms | **39–46 ms** (beklenen 66 ms altı) |
+| CPU | %108 | **%80** |
+| Kamera | akıyor | **akıyor (610 KB/s)** |
+
+Kalan 6 takılma dağınık (`log_yaz`, `video_ekrana_bas`, `radar_cizimi`) —
+baskın kaynak yok.
+
+> **Yakalanan hata:** `yeniden_baglan` düzenlemesi ilk denemede yanlışlıkla
+> `__init__`'in çağrısını `elle=True` yapmıştı — koruma tam ters çalışıyor,
+> terminal yine bağlanıyordu. SSH sürecinin varlığı ölçülerek yakalandı.
+
 ---
 *Bu doküman, `~/Desktop/tufan` altındaki kodun mevcut haline göre otomatik
 olarak (kod incelemesiyle) hazırlanmıştır.*

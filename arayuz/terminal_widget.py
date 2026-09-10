@@ -52,7 +52,14 @@ BASLANGIC_DIZINI = "~/Desktop/tufan_v2_ws"
 # turunda QTextEdit yeniden yaziliyor. Terminal metni icin 4Hz
 # fazlasiyla akici; kamera/telemetri ile ayni event loop'u paylastigi
 # icin buradaki her ms dogrudan onlardan calinıyor.
-GECIKMELI_RENDER_MS = 250
+# HAFIF MOD (2026-09-10): LIDAR/IMU kapatildiktan SONRA olculdu - GUI
+# takilmalarinin neredeyse TAMAMI (71 kayit) bu widget'in cizimine
+# kaldi. Arac launch'i saniyede yuzlerce satir uretiyor ve her debounce
+# turunda QTextEdit yeniden yaziliyor. Hafif modda 500ms: terminal metni
+# icin 2Hz hala okunabilir, ama kamera/komut ile paylasilan event
+# loop'tan calinan sure YARIYA iniyor.
+HAFIF_MOD = os.environ.get("TUFAN_HAFIF_MOD", "1") == "1"
+GECIKMELI_RENDER_MS = 500 if HAFIF_MOD else 250
 
 
 def _hedef_host_belirle():
@@ -195,12 +202,34 @@ class SshTerminalWidget(QTextEdit):
         self._render_istegi.connect(self._render_istegi_isle)
         self._baglanti_koptu_sinyali.connect(self._baglanti_koptu_isle)
 
-        self._baslat()
+        self._baslat()   # HAFIF MOD'da otomatik baglanmaz (bkz. _baslat)
 
     # ------------------------------------------------------------------ #
     # Baglanti kurma / kapama
     # ------------------------------------------------------------------ #
-    def _baslat(self):
+    def _baslat(self, elle=False):
+        """SSH/tmux baglantisini kurar.
+
+        HAFIF MOD (2026-09-10): otomatik baglanma KAPALI. Olcum: LIDAR/IMU
+        kapatildiktan SONRA GUI takilmalarinin TAMAMI (26/26) bu widget'in
+        cizimine kaldi - arac launch'i saniyede yuzlerce satir uretiyor ve
+        her render'da QTextEdit'in gorunen ekrani bastan yaziliyor.
+        Kullanici istegi "sadece komutlari gonderen ve goruntuyu ceken bir
+        yapi" oldugundan terminal (bir teshis araci) elle acilana kadar
+        baglanmiyor. Debounce'u 500ms'ye cikarmak YETMEDI - maliyet
+        SIKLIKTA degil her render'in KENDISINDE.
+
+        elle=True ile (yeniden_baglan) her zaman baglanir - yani terminal
+        KAYBOLMADI, sadece kendiliginden acilmiyor.
+        GERI ACMAK: TUFAN_HAFIF_MOD=0 ./calistir.sh
+        """
+        if HAFIF_MOD and not elle:
+            self._ekrana_sistem_mesaji(
+                "\n[HAFİF MOD] SSH terminali otomatik bağlanmadı - GUI\n"
+                "donmalarının kaynağı buydu (ölçüldü). Bağlanmak için\n"
+                "yeniden_baglan() çağırın ya da TUFAN_HAFIF_MOD=0 ile açın.\n"
+                "Araç komutları ve kamera görüntüsü ETKİLENMEZ.\n")
+            return
         # Her (yeniden) baglantida TAZE karar - agin o anki durumu onceki
         # baglantidan farkli olabilir (bkz. UBIQUITI_HEDEF_IP yorumu).
         aktif_host = self.host if self.host is not None else _hedef_host_belirle()
@@ -287,8 +316,9 @@ class SshTerminalWidget(QTextEdit):
         self._okuma_thread.start()
 
     def yeniden_baglan(self):
+        # elle=True: HAFIF MOD'da bile baglanir (bkz. _baslat).
         self.baglantiyi_kapat()
-        self._baslat()
+        self._baslat(elle=True)
 
     def baglantiyi_kapat(self):
         # okuma thread'i kendi select() timeout'unda (en fazla 0.2sn) bu

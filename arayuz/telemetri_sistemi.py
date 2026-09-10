@@ -1,3 +1,4 @@
+import os
 import time
 import subprocess
 import threading
@@ -53,6 +54,17 @@ UBIQUITI_LINK_HEDEF_IP = "192.168.1.22"
 # IP, bkz. import) hala erişilebilir olabilir (nitekim terminal zaten bu IP
 # ile SSH kuruyor). Ubiquiti kopukken WiFi'ye otomatik düşülür, gösterge
 # hangi linkin gerçekte kullanıldığını da bildirir (bkz. main.py wifi_arayuz_guncelle).
+
+
+# --- HAFIF MOD (2026-09-10) - bkz. harita_sistemi.py'deki ayrintili not.
+# Kullanici: "sadece komutlari gonderen ve goruntuyu ceken bir yapi
+# olusturalim, lidar ve imu verisi cekmeyelim".
+# BU MODDA DA KAPANMAYANLAR (kasitli): TUM komut yayincilari (surus, mod,
+# silah, fren, acil stop), kucuk durum topic'leri (/surus_modu,
+# /guncel_etap, /silah_fazi_aktif, /arduino_baglanti_durumu) ve kamera
+# UDP akisi. Yani arac KUMANDA EDILEBILIR ve GORUNTU gelir; sadece agir
+# sensor gorsellestirmesi susar.
+HAFIF_MOD = os.environ.get("TUFAN_HAFIF_MOD", "1") == "1"
 
 class TelemetriThread(QThread):
     # --- PyQt5 SİNYALLERİ ---
@@ -780,14 +792,15 @@ class TelemetriThread(QThread):
             self.node.create_subscription(Float32, '/arac_hiz', self.hiz_cb, 10)
             self.node.create_subscription(Int32, '/arac_batarya', self.batarya_cb, 10)
             self.node.create_subscription(Bool, '/lidar_durum', self.lidar_cb, 10)
-            if Odometry is not None:
+            if Odometry is not None and not HAFIF_MOD:
                 self.node.create_subscription(Odometry, '/odom', self.odom_cb, 10)
-            if LaserScan is not None:
+            if LaserScan is not None and not HAFIF_MOD:   # LaserScan 10Hz - agir
                 self.node.create_subscription(LaserScan, '/scan', self.scan_heartbeat_cb, 10)
             if Bool is not None:
                 self.node.create_subscription(Bool, '/arduino_baglanti_durumu', self.motor_durum_cb, 10)
             if Imu is not None:
-                self.node.create_subscription(Imu, '/imu/data', self.imu_heartbeat_cb, 10)
+                if not HAFIF_MOD:   # Imu - bkz. HAFIF_MOD
+                    self.node.create_subscription(Imu, '/imu/data', self.imu_heartbeat_cb, 10)
             if Int32 is not None:
                 self.node.create_subscription(Int32, '/goal_manager_heartbeat', self.otonom_heartbeat_cb, 10)
             if Int32 is not None:
@@ -805,7 +818,8 @@ class TelemetriThread(QThread):
                 # gps_heading_min_fix_type varsayilaniyla (3) TUTARLI, RTK'siz de
                 # (sadece 3D fix) GNSS'in temelde calistigini gostermek icin
                 # yeterli bir esik (RTK ozel durumu ayri, NTRIP/RTK panelinde).
-                self.node.create_subscription(GPSRAW, '/mavros/gpsstatus/gps1/raw', self.gps_raw_cb, 10)
+                if not HAFIF_MOD:   # GPSRAW - bkz. HAFIF_MOD
+                    self.node.create_subscription(GPSRAW, '/mavros/gpsstatus/gps1/raw', self.gps_raw_cb, 10)
             self.node.create_subscription(Float32, '/turret_hedef_mesafe', self.hedef_mesafe_cb, 10)
             self.node.create_subscription(Bool, '/silah_fazi_aktif', self.silah_fazi_cb, 10)
             # HIZ CANLILIK KONTROLU (2026-09-01, kullanıcı isteği: "hız verisi

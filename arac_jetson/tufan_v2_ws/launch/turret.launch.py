@@ -61,6 +61,12 @@ def generate_launch_description():
             'video_target_ip': video_target_ip,
             'video_target_port': video_target_port,
         }],
+        # OTOMATIK RESPAWN (2026-09-09): silah kamerasi/taret gorev
+        # kritik. Sureç olurse ya da saglik_bekcisi 'ayakta ama
+        # sessiz' diye oldururse launch geri getirir (bkz.
+        # tufan_mppi.launch.py'deki OTOMATIK RESPAWN notu).
+        respawn=True,
+        respawn_delay=3.0,
     )
 
     return LaunchDescription([

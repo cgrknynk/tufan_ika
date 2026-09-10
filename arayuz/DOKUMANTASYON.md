@@ -1428,7 +1428,7 @@ artık **ayrı** joystick'lerde, paylaşım/hedef seçimi kalktı.
 |---|---|---|
 | Sol joystick | A3, A4 | Aracı sür → tank karışımı → `/palet_hizlari` |
 | Sağ joystick | A0, A1 | Silah (turret) pan/tilt → `/turret_manuel_cmd` |
-| Potansiyometre | A5 | PWM üst sınırı (85–255) **canlı** |
+| Potansiyometre | A5 | PWM üst sınırı (85–255) **canlı** + manuel silah adım sayısı (2–100, `/silah_adim_sayisi`) |
 | Sol toggle switch | D4 | GND'ye alınca ACİL STOP (`EMERGENCY_STOP_CMD`); bırakınca **otomatik** `DEVAM_CMD` |
 | Sağ toggle switch | D5 | GND'ye alınca silah ateş (`/silah_ates_manuel` = true, 50ms tekrarlı) |
 | Sol buton | D9 | Her basışta Manuel ↔ Otonom |
@@ -3207,6 +3207,339 @@ sonucuydu. Tüm değerler kalibre hâline döndürüldü
 `hassas_adim_kazanci=0.5`, TILT backlash **90**).
 **Kural: nişan trim'i ayarlamadan önce `/silah_modu`'nun gerçekten OTONOM
 olduğunu ve taretin hareket ettiğini doğrula.**
+
+### Manuel silah hızı: aynı pot, ikinci çıktı (2026-09-09)
+
+*İstek:* "manuelde silah hızını ayarlamak için aracı ayarlayan pot ile aynı
+yap; pot 0'dayken **2 adım**, pot 1023'te **100 adım** atsın, ama aracın hız
+ayarını bozma, aynı kalsın."
+
+**Araç hız haritası HİÇ DEĞİŞMEDİ.** `kontrol_paneli_sistemi.py`'deki pot
+okuma → EMA → `PWM_ALT + (ham/1023)·(PWM_UST−PWM_ALT)` zinciri ve throttle
+(`POT_MIN_DEGISIM=2`, `POT_MIN_ARALIK_S=0.12`) olduğu gibi duruyor; o dosyaya
+**tek satır dokunulmadı**. Adım sayısı, aynı haritanın *çıktısından* geri
+çözülüyor — böylece ikinci bir okuma/yayın yolu (ikinci throttle, ikinci EMA,
+kayabilecek ikinci kaynak) açılmıyor:
+
+    ham/1023 = (pwm − PWM_ALT) / (PWM_UST − PWM_ALT)
+    adim     = 2 + oran · 98            # SILAH_ADIM_MIN=2, SILAH_ADIM_MAX=100
+
+| Katman | Dosya | Ne yapar |
+|---|---|---|
+| Yer ist. | `kontrol_paneli_node.py` | `pot_geldi()` → `_pot_adim_sayisi()` → `/silah_adim_sayisi` (Int32). `tick()` içinde ~2 sn'de bir **tekrar yayınlar** (turret_node sonra başlarsa varsayılanda kalmasın diye). |
+| Araç | `turret_node.py` | `/silah_adim_sayisi` aboneliği → `_manuel_adim_sayisi` (2..100 arası kırpılır, varsayılan 20). |
+| Araç | `turret_node._manuel_heartbeat()` | MANUEL'de yön varsa `_coklu_adim_gonder(yon, _manuel_adim_sayisi)`, yön yoksa `'x'`. |
+
+**Neden çoklu-adım protokolü ('b'+yön+N), sürekli mod (yön+hız) değil:**
+firmware'in sürekli modu en yavaş ayarda bile TILT'te ~5000 µs/adım, yani
+50 ms'lik heartbeat başına ~10 adım atıyor — **2 adımlık hassas sürünme
+sürekli modla fiziksel olarak mümkün değil**. Çoklu-adım ise otonom hassas
+takipte zaten sahada kullanılan, denenmiş yol. Firmware `cokluAdimAt` sürekli
+mod aktifse önce `hepsiniDurdur()` çağırıyor, bu yüzden iki protokol
+birbirine karışmıyor. **Arduino'ya dokunulmadı, yeniden yükleme gerekmedi.**
+
+Etkin hız (20 Hz heartbeat): pot dipte **40 adım/sn** (hassas nişan), pot
+tepede **2000 adım/sn** (hızlı tarama).
+
+*Doğrulama:* offline test 14/14 geçti (araç PWM haritası altın değerlerle
+korunuyor: ham 0/256/512/767/1023 → 85/128/170/212/255; adım uçları 2 ve 100;
+adım 0..1023 boyunca monoton). Canlı: `/silah_adim_sayisi` yayında,
+`ros2 node info /turret_node` aboneliği gösteriyor, manuel yön komutu
+sonrası turret_node ayakta ve hatasız.
+
+### Terminal hedef host seçimi: 3 deneme (2026-09-09)
+
+`terminal_widget._hedef_host_belirle()` **tek** başarısız ping'den sonra
+`VARSAYILAN_HOST = 10.40.64.43`'e düşüyordu — araç 192.168.1.22'de olmasına
+rağmen "10 ile başlayan IP" deneniyordu. Artık `192.168.1.22`'ye **3 kez**
+ping denenir, hepsi başarısızsa yedek IP'ye geçilir ve hangi hattın
+seçildiği stdout'a yazılır.
+
+### ACİL STOP artık SİLAHI da durduruyor (2026-09-09)
+
+*Sahada bulundu:* "acil stop kapalıyken silah hareket ediyor."
+
+**Eski tasarım bunu KASITLI yapıyordu** — koddaki not: *"Silah (turret + ateş)
+KASITLI OLARAK etkilenmez, acil stop 'araçtaki motorlara giden kodlar'
+içindir."* Operatör açısından bu kabul edilemez: acil stopta taret dönmeye ve
+lazer yanmaya devam ediyordu. Karar geri alındı.
+
+**Dört katman (savunma derinliği):**
+
+| # | Yer | Ne yapar |
+|---|---|---|
+| 1 | `kontrol_paneli_sistemi.py` (panel thread) | D4 GND'deyken `turret_sinyali`'ni **sıfır** yayınlar (susmaz — araç heartbeat'i son komutu tekrarlıyor, susmak taretı son yönde döner bırakırdı) |
+| 2 | `kontrol_paneli_node.turret_geldi()` / `_ates_yayinla()` | Acil stopta taret komutu sıfırlanır, ateş anahtarı fiziksel olarak AÇIK olsa bile `/silah_ates_manuel` **False** yayınlanır |
+| 3 | `kontrol_paneli_node.tick()` | Acil stop sürerken **her tur** sıfır taret + ateş kapalı; `/arac_komut`'a `EMERGENCY_STOP_CMD` **~2 sn'de bir tekrar** |
+| 4 | `turret_node.py` (araç) | `/arac_komut` aboneliği → `_acil_stop`; kapı **dört gönderim fonksiyonunun İÇİNDE** |
+
+**Kapının yeri neden fonksiyonların içi:** `_komut_gonder` (→ `'x'`),
+`_coklu_adim_gonder` (→ hiç darbe üretmez), `_tek_adim_gonder` (onu çağırır) ve
+`_lazer_gonder` (→ `'k'`). Böylece otonom takip, manuel heartbeat, hassas
+sürünme ve ateş **tek noktadan** kesiliyor — yarın yeni bir çağrı yolu eklense
+bile kapı açık kalmıyor. Çağıran tarafları tek tek gezmek gerekmedi.
+
+**Neden `/arac_komut`:** `arduino_motor_kontrol`'ün zaten kullandığı,
+arayüz donsa/kapansa bile araca ulaşan, sahada denenmiş kanal. Yeni topic
+açmak ikinci bir kayıp-mesaj yüzeyi olurdu.
+
+**2 sn'lik tekrar + kenar koruması:** turret_node acil stop *sırasında*
+yeniden başlarsa kilidi en geç 2 sn içinde öğrensin diye komut tekrarlanıyor.
+Tekrarın log/seri-port spam'i yapmaması için `arduino_motor_kontrol.
+_komut_callback`'e **kenar koruması** eklendi (zaten kilitliyse sessizce
+döner) — canlıda 25 tekrar → **1 log satırı**.
+
+**Ateş yeniden kurulmalı:** acil stop `ates_manuel_aktif`'i False'a çeker;
+DEVAM'dan sonra ateş anahtarı fiziksel olarak açık kalsa bile lazer
+kendiliğinden yanmaz, operatörün anahtarı kapatıp açması gerekir. Bu,
+"DEVAM'da otonoma geri dönülmez" kuralıyla aynı bilinçli-yeniden-kurma
+felsefesi.
+
+*Doğrulama:* offline 17/17 geçti (normal akış / acil stopta yutma / DEVAM
+sonrası serbest kalma / `'x'` ve `'k'` komutlarının kapıdan geçmesi).
+Canlı: `EMERGENCY_STOP_CMD` → `[turret_node]: ACIL STOP -> taret hareketi ve
+lazer KESILDI`, `DEVAM_CMD` → `[turret_node]: DEVAM -> taret kilidi acildi`,
+`arduino_motor_kontrol` 25 tekrarda tek log. Fiziksel anahtar o an açık
+olduğu için yer istasyonunun 2 sn'lik tekrarı da canlıda gözlendi.
+
+### Arka kamera + kameraların BENZERSİZ KİMLİKLE açılması (2026-09-09)
+
+**Arka kamera neden yayın yapmıyordu:** arıza değil. `arka_kamera_node`
+`tufan_mppi.launch.py` içinde **tanımlı** ama 2026-09-01'de kullanıcı isteğiyle
+(*"arka kamerayı şimdilik kullanmayalım"*) `LaunchDescription` listesinden
+**çıkarılmıştı** — yani node hiç başlamıyor, 5002'ye hiç paket gitmiyordu.
+Listeye geri eklendi.
+
+> ⚠️ Üç kamera birlikte çalışınca 2026-09-01'de USB izokron bant genişliği
+> tükenmişti (`No space left on device`). Üçü de MJPG'ye geçirilerek
+> çözülmüştü; arka kamera geri açıldığına göre **üçünün de aktığı canlı
+> doğrulanmalıdır**.
+
+**Kameralar artık benzersiz kimlikle açılıyor** (kullanıcı isteği: *"kodlar
+çalıştığında id'ye göre veya benzersiz kimliğe göre açılsın"*). Üç node'da da
+(`arka_kamera_node.py`, `tabela_node.py`, `turret_node.py`) aynı çözümleyici:
+
+| Sıra | Kimlik | Ne zaman seçilir |
+|---|---|---|
+| 1 | `/dev/v4l/by-id/...` | Seri numarası **tüm sistemde TEK** ise (C922 böyle) |
+| 2 | `/dev/v4l/by-path/...` | Fiziksel USB port yolu — seri no paylaşılmışsa (iki C270'in seri numarası Logitech tarafından **aynı**) |
+| 3 | `/dev/videoN` | Son çare (eski davranış) |
+
+`cv2.VideoCapture`'a artık **kararlı yol string'i** veriliyor, index değil.
+Bu ayrıca "bul sonra aç" arasındaki **yarışı** da kapatıyor: numara o aralıkta
+kayarsa eskiden yanlış kamera açılıyordu (sahada görülmüştü — tabela modeli
+arka kameraya bağlanmıştı). Yol açılamazsa index'e **iki aşamalı** düşülür
+(`_kamerayi_ac`), yani OpenCV sürümü string yolu desteklemese bile kamera
+açılmadan kalmaz.
+
+**Giderilen gizli hata:** eskiden USB port ipucu tutmazsa çözümleyici `None`
+dönüp sabit `camera_index`'e düşüyordu — port kayması (yorumlarda *zaten*
+kayıtlı: `1-2.2.3 → 1-2.2.4`) = yanlış kamera ya da hiç kamera. Artık **tek
+aday** varsa belirsizlik yoktur, port ipucu kaymış olsa bile doğru kamera
+bulunur. Birden fazla aday varsa ve ipucu hiçbirine uymuyorsa **bilerek**
+`None` döner — yanlış kamerayı açmaktansa açmamak.
+
+*Doğrulama:* `arac_jetson/testler/test_kamera_kimlik.py` — sahte bir `/sys` +
+`/dev` ağacı kurup 5 senaryoyu test eder (paylaşılan seri → by-path, tek seri
+→ by-id, metadata düğümünün elenmesi, port kayması, ayırt edilemezlik, kararlı
+yol yokluğunda index yedeği). **13/13 geçti**; test edilen kod `arka_kamera_
+node.py`'nin İÇİNDEN çıkarıldı, üç node'daki kopyalar MD5 olarak birebir aynı.
+**Araç Jetson'ı kapalı olduğu için CANLI doğrulama yapılamadı — açılınca
+üç kamera akışı da kontrol edilecek.**
+
+### "Veri Kaydet" butonu: SADECE kamera görüntüsü (2026-09-09)
+
+*İstek:* "veri kaydet butonuna basınca sadece kamera görüntülerini kaydetsin."
+
+**Buton neden hiç çalışmıyordu:** `main.py::veri_kaydet_tetikle`,
+`kamera_motoru.kayit_durumu_degistir()` çağırıyordu ama `KameraThread`'de
+**öyle bir metot yoktu**. Sıra şöyleydi: yazı "KAYDI DURDUR" olarak değişiyor,
+renk kırmızıya dönüyor, `kayit_yapiyor_mu = True` oluyor — *sonra*
+`AttributeError`. Yani buton "kayıt yapıyorum" görünüyor, diske **tek kare**
+yazmıyordu. `hasattr(self, 'kamera_motoru')` kontrolü de yanıltıcıydı:
+**nesne** vardı, eksik olan **metottu**.
+
+**Nasıl çalışıyor:**
+
+| Katman | Ne yapar |
+|---|---|
+| `main.py::veri_kaydet_tetikle` | `kayit_durumu_degistir(True/False)` çağırır, dönen **klasör yolunu loga yazar**, `try/except` ile sarar (metot bir gün yine kaybolursa buton sessizce yalan söylemesin) |
+| `KameraThread.kayit_durumu_degistir` | Sadece **bayrak** çevirir + klasör adını üretir. Gerçek dosya açma/kapama `run()`'ın kendi thread'inde olur — OpenCV `VideoWriter` thread'ler arası paylaşılmaz |
+| `KameraThread.run` | Başlat/bitir geçişleri **döngü başında** (kare akmasa bile), kare yazımı soket döngüsünde |
+
+- **Sadece görüntü:** üç kamera üç ayrı dosyaya — `on_kamera.avi`,
+  `silah_kamerasi.avi`, `arka_kamera.avi`. Telemetri, log, harita, hiçbir
+  başka veri bu klasöre yazılmaz.
+- **Konum:** `~/Desktop/tufan/kayitlar/<YYYYAAGG_SSDDSS>/` — her basış yeni
+  zaman damgalı klasör, eski kayıtların üzerine **asla** yazılmaz.
+- **Kodek:** MJPG/.avi. Kaynak akış zaten MJPEG olduğu için en uyumlu seçim,
+  Jetson'da ek kodek paketi gerektirmez.
+- **FPS ÖLÇÜLÜR, sabit yazılmaz:** ilk ~12 kare (ya da 2 sn) tamponlanır,
+  gerçek kare aralığından fps hesaplanır, writer o fps ile açılır ve tampon
+  boşaltılır. Sabit değer yazsaydık kayıt hızlı/yavaş oynardı — üç kameranın
+  kare hızı aynı değil (arka 15, ön/silah model hızına bağlı).
+- **Tek çözme:** kare artık bir kez BGR'ye çözülüp hem ekrana (QImage) hem
+  kayda veriliyor; kayıt için ikinci bir `imdecode` yapılmıyor.
+- **Temiz kapanış:** kayıt açıkken arayüz kapanırsa `finally` bloğu
+  `_kayit_bitir()` çağırır — `release()` edilmemiş bir .avi indekssiz ve
+  oynatılamaz kalırdı.
+- **Çözünürlük değişimi:** kamera yeniden açılıp boyut değişirse kare
+  writer'ın boyutuna ölçeklenir (sessizce bozuk dosya oluşmaz).
+
+> ⚠️ `pushButton_simdiYedekle` ("Şimdi Yedekle") **aynı** kaydediciyi
+> çağırıyor (bu, değişiklikten önce de böyleydi). İkisi birlikte kullanılırsa
+> son basılan buton kaydı yönetir. Ayrılması gerekirse ayrı bir kaydedici
+> örneği gerekir.
+
+*Doğrulama:* `arac_jetson/testler/test_kamera_kayit.py` — gerçek
+`kamera_sistemi.py` kodunu kullanır, sadece kayıt kökünü geçici dizine
+yönlendirir. **26/26 geçti**: klasör adının basış anında dönmesi, dizinin ilk
+karede oluşması, üç writer'ın açılması, tamponun boşaltılması, 30/30 karenin
+yazılması, dosyaların OpenCV ile **tekrar okunabilmesi** (kare sayısı + ilk
+kare), fps'in üst sınıra kırpılması, klasörde .avi dışında dosya olmaması,
+idempotentlik, ikinci basışın yeni klasör açması, çözünürlük değişiminde
+kırılmama. Arayüz yeniden başlatıldı, üç kamera dinleyicisi (5000/5001/5002)
+canlı.
+
+### Takılma (stall) tespiti ve gaz takviyesi (2026-09-09)
+
+*Saha bildirimi:* "araç otonom giderken sürekli durup kalkıyor ve suya
+girdiğinde araç ilerlemiyor, suya girmeden duruyor."
+
+**Kök neden:** düz zeminde `PWM = min_pwm + oran·(max_pwm − min_pwm)` =
+`90 + oran·20` — motorun **toplam 20 birimlik** yetkisi var. Kuru zeminde
+yetiyor, suda direnç çok daha yüksek olduğu için 110 PWM aracı hareket
+ettiremiyor. Karada da tam stall sınırında gezindiği için hareket/durma
+nöbetleşiyor.
+
+**Neden `max_pwm` büyütülmedi:** kullanıcı düz yolda mevcut hızı istiyor
+("düz yolda normal şuanki hızla gitsin") ve daha önce "bazen çok hızlı
+gidiyor" demişti. Seyir tavanı **aynen** korunuyor; takviye sadece "komut
+var ama araç ilerlemiyor" anında, `_takviyeyi_guncelle` ile kademeli
+devreye giriyor ve araç hareket eder etmez geri çekiliyor. Su, çamur, çim,
+küçük engel — hepsi tek mekanizmayla çözülüyor.
+
+| Durum | Davranış |
+|---|---|
+| Komut var, araç gidiyor | takviye yok |
+| Komut var, 1.2 sn hareketsiz | saniyede 70 PWM tırmanır (255'e kadar) |
+| Araç kurtuldu | 1.5 sn'de kademeli geri çekilir |
+| **Komut yok** | takviye **anında sıfır** |
+| **İnişte** (< −3°) | takviye **kapalı** |
+
+`/odom` durağanken tam `0.0` veriyor (canlı ölçüldü) — tespit güvenilir.
+Yerinde dönüşü takılma sanmasın diye açısal hız da hesaba katılıyor.
+
+**İki emniyet kilidi.** *Komut yokken asla gaz vermez* — Stop tabelası,
+rampa beklemesi, görev vetosu hepsi komutu sıfırlıyor. *İnişte takviye
+yok* — bunu `test_egim_gaz.py` yakaladı: inişte PWM 110 yerine 145 çıktı,
+testin kendi mesajı "inişte de tam gaz verildi - TEHLİKELİ" dedi. Lazer
+odometrisi özelliksiz zeminde yanılıp "hareket yok" derse takviye yokuş
+aşağı tam gaz verirdi.
+
+### Sağlık bekçisi + otomatik respawn (2026-09-09)
+
+9 Eylül'de yaşanan arızaların **hiçbiri çökme değildi** — hepsi sessiz
+susma: LIDAR'ın CP2102N adaptörü tek açılışta **6 kez** koptu (dmesg
+`-19`/ENODEV), `sllidar_node` ölü fd'yi tutmaya devam etti (süreç ayakta,
+%CPU normal, log yok, `/scan_raw` tamamen sustu); silah kamerası
+`cap.read()`'te sürekli `False` döndü (ağ payı ölçüldü: 19 KB/s = sıfır).
+
+Böyle bir durumda launch'ın `respawn`'ı **devreye girmez**, çünkü süreç
+ölmüyor. Çözüm iki parçalı:
+
+1. **`respawn=True`** — kritik düğümlerde (lidar, scan filtresi, tabela,
+   turret, motor sürücü, sürüş köprüsü, etap yöneticisi, nokta atıcı,
+   konum birleştirici, rf2o, arka kamera). Ölen/öldürülen süreç geri gelir.
+2. **`saglik_bekcisi.py`** — `/scan_raw` ve `/scan` akışlarını izler,
+   susan düğümü SIGTERM ile sonlandırır, böylece (1) çalışır.
+   `/saglik_durumu` (JSON) yayınlar.
+
+Tasarım kuralları: **başlangıç payı** 75 sn (yığın ~60 sn'de açılıyor,
+o sırada sessizlik haklı); **hiç veri gelmediyse** sessizlik payın
+bittiği andan sayılır (yoksa uzun eşik işlevsiz kalır ve cihaz sökülüyse
+boşuna öldürür — offline test bunu yakaladı); **soğuma süresi** 25 sn;
+**pkill deseni köşeli parantezli** (`[s]llidar_node`) + kendi PID'ini
+eleme. *Canlı doğrulandı:* `pkill` ile öldürülen turret ve arka kamera
+düğümlerini respawn kendiliğinden geri getirdi.
+
+### Kameralar: benzersiz kimlik + üçünün aynı anda çalışması (2026-09-09/10)
+
+**Kimlik:** üç node da aynı çözümleyiciyi kullanıyor —
+`/dev/v4l/by-id` (seri no tüm sistemde TEKSE, C922 böyle) →
+`/dev/v4l/by-path` (fiziksel USB portu; iki C270'in seri numarası
+Logitech tarafından **aynı**: 200901010001) → `/dev/videoN` (son çare,
+**isim doğrulamasıyla**). `cv2.VideoCapture`'a kararlı yol string'i
+veriliyor; bu "bul sonra aç" yarışını da kapatıyor.
+
+**Üç kamera aynı anda — kök neden FPS, çözünürlük DEĞİL.** Çekirdek
+kanıtı: `usb 1-2.2.3: Not enough bandwidth for altsetting 4`. UVC izokron
+rezervasyonu **kare hızıyla** orantılı. Çözünürlük düşürmek işe yaramadı
+(320x240, hatta 160x120 bile aynı hatayı verdi). Kullanıcı kabloları da
+yeniden düzenledi: silah (C922) ve ön kamera doğrudan Jetson tarafında,
+görüntü **işlemeyen** arka kamera hub'da.
+
+| Kamera | Port | fps |
+|---|---|---|
+| Silah (C922) | `1-2.1` | 15 |
+| Ön/tabela (C270) | `1-2.3` | 15 |
+| Arka (C270) | `1-2.2.3` hub | 5 |
+
+*Akış başına doğrulandı* (aggregate'ten çıkarım YAPILMADI — 9 Eylül'de o
+hata yapılıp "üçü de akıyor" sanılmıştı, oysa silah kamerası ölüydü):
+arka **108.6 KB/s**, silah **518.7 KB/s**, ön ~620–720 KB/s.
+
+**Kendini toparlama:** `cap.read()` arka arkaya 45 kez `False` dönerse
+(~3 sn) düğüm kamerayı bırakıp benzersiz kimlikle yeniden açıyor
+(`_kamerayi_yeniden_ac`) — OpenCV bu durumu hiç loglamıyor.
+
+### "Veri Kaydet" butonu: sadece kamera görüntüsü (2026-09-09)
+
+`main.py::veri_kaydet_tetikle`, `kamera_motoru.kayit_durumu_degistir()`
+çağırıyordu ama `KameraThread`'de **öyle bir metot yoktu** — buton yazı ve
+rengini değiştirip `AttributeError` alıyordu, diske tek kare yazmıyordu.
+Artık üç kamera üç ayrı `.avi` dosyasına yazılıyor
+(`~/Desktop/tufan/kayitlar/<zaman damgası>/`), MJPG kodek, **FPS ölçülerek**
+belirleniyor (sabit yazsak kayıt hızlı/yavaş oynardı). Kare bir kez BGR'ye
+çözülüp hem ekrana hem kayda veriliyor.
+
+### Arayüz donması: FastDDS arabirim beyaz listesi (2026-09-10)
+
+*Saha bildirimi:* "arayüz donuyor, açamıyorum" → "ekran gelmiyor ama force
+quit geliyor".
+
+**Teşhis nasıl alındı:** süreç SIGKILL ile ölüyordu (çıkış kodu 137 - force
+quit) ve `calistir.sh` çıktıyı `tee`'ye **borulayarak blok-tamponluyordu**;
+SIGKILL tamponu boşaltamadığı için 90 saniyelik tüm Python çıktısı her
+seferinde kayboluyordu. Logda sadece Qt'nin C++ tarafından gelen QFont
+uyarıları kalıyordu — günlerce teşhis çıkmamasının sebebi buydu.
+`calistir.sh` artık `python3 -u` kullanıyor. Ardından donmuş sürece
+`SIGABRT` gönderilip `faulthandler` ile tüm thread'lerin yığını alındı:
+
+```
+Current thread (GUI):
+  rclpy/node.py:1376 create_subscription
+  telemetri_sistemi.py:214 __init__          <- GUI THREAD'İNDE
+  main.py:364 _telemetri_baglantilari_kur
+```
+
+**Kök neden:** `fastdds_gercek_arabirimler.xml` beyaz listesi eski WiFi
+IP'sini (`10.40.64.44`) taşıyordu; gerçek adres DHCP ile
+`192.168.216.150` olmuştu. Fast-DDS **olmayan** bir arabirime bağlanmaya
+çalışıp GUI thread'ini çekirdek seviyesinde bloke etti (aynı dosyanın
+kendi notundaki `sock_alloc_send_pskb` imzası). Pencere açılıyor ama boş
+kalıyor ve yanıt vermiyordu.
+
+**Çözüm:** liste artık `main.py::_dds_profilini_guncelle` ile **her
+açılışta canlı IP'lerden yeniden üretiliyor** — sanal arabirimler
+(docker0, l4tbr0, usb*, can*, veth*, tun/tap) dışarıda. Elle güncelleme
+talimatı XML'de zaten yazıyordu ve yine kaçırıldı; bu yüzden otomatikleşti.
+Dosya yazılamazsa açılış engellenmiyor, mevcut haliyle devam ediliyor.
+
+> **Kalan mimari borç:** `TelemetriThread.__init__` ROS düğümünü ve ~22
+> abonelik/yayıncıyı **GUI thread'inde** kuruyor (`run()` değil). Beyaz
+> liste düzeltildiği için şu an hızlı, ama ağ yavaşladığında yine
+> donduracak. Kalıcı çözüm ROS kurulumunu `run()`'a taşımak.
 
 ---
 *Bu doküman, `~/Desktop/tufan` altındaki kodun mevcut haline göre otomatik

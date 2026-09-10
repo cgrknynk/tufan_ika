@@ -20,6 +20,19 @@ def _lidar_portunu_otomatik_bul():
     hicbir takili cihazla (2x Arduino Uno, 2x CubeOrange) CAKISMIYOR, bu
     yuzden VID:PID GUVENILIR bir birincil kimlik. Eslesme yoksa (or.
     kablo cikarilmis) launch varsayilanina (/dev/ttyUSB0) DUSER."""
+    # 2026-09-09: ONCE udev SEMBOLU denenir. Bu fonksiyon launch dosyasi
+    # AYRISTIRILIRKEN (bir kez, en basta) calisiyor - donen deger sabit bir
+    # metin olarak node'a gidiyor. VID:PID taramasi o ANIN gercegini
+    # donduruyordu; adaptor sonradan koparsa/kayarsa (9 Eylul'de 6 kez
+    # oldu, ttyUSB0<->ttyUSB1) node ESKI porta yaziliyordu. /dev/tufan_lidar
+    # ise cekirdek tarafindan ACILMA aninda cozuluyor, yani port kaymasi
+    # tamamen ONEMSIZ hale geliyor (udev kurali: arac_jetson/udev/
+    # 99-tufan.rules, VID:PID ile eslesir - seri no sarti KALDIRILDI cunku
+    # hizli yeniden-numaralandirmada eslesmiyordu).
+    import os as _os
+    if _os.path.exists('/dev/tufan_lidar'):
+        return '/dev/tufan_lidar'
+
     import serial.tools.list_ports
     LIDAR_VID_PID = (0x10C4, 0xEA60)
     for p in serial.tools.list_ports.comports():
@@ -129,6 +142,18 @@ def generate_launch_description():
         }],
         remappings=[('scan', 'scan_raw')],
         output='screen',
+        # --- OTOMATIK RESPAWN (2026-09-09) ---
+        # 9 Eylul'de yasananlar: LIDAR'in USB adaptoru 6 KEZ koptu
+        # (dmesg -19/ENODEV), sllidar_node OLU fd'yi tutup SESSIZCE
+        # yayin kesti; silah kamerasi cap.read()'te surekli False
+        # dondu. Hicbiri COKMEDI - bu yuzden launch de bir sey
+        # yapmadi ve her seferinde ELLE yeniden baslatmak gerekti.
+        # respawn: sureç OLURSE/OLDURULURSE launch onu geri getirir.
+        # 'Ayakta ama sessiz' durumu icin saglik_bekcisi.py sureci
+        # OLDURUR, boylece respawn devreye girer (ikisi birlikte
+        # calisir - biri olmadan digeri yetersiz).
+        respawn=True,
+        respawn_delay=3.0,
     )
 
     # 4b. Scan on-koni filtresi: LIDAR govdesindeki 3D baski sadece onu acik
@@ -187,6 +212,8 @@ def generate_launch_description():
         # yok sayilir (math.isfinite kontrolu) - risksiz. Gecerli-yakin
         # (114) SAHTE ENGEL riski tasir - oncelik bu citada.
         parameters=[{'acik_esik_derece': 33.0, 'use_sim_time': use_sim_time}],
+        respawn=True,
+        respawn_delay=3.0,
     )
 
     # 4b2. Scan-matcher icin GENIS ACILI filtre (OTONOM ODOMETRI DUZELTMESI):
@@ -251,6 +278,8 @@ def generate_launch_description():
             'freq': 10.0,
             'use_sim_time': use_sim_time,
         }],
+        respawn=True,
+        respawn_delay=3.0,
     )
 
     # 5. Konum birlestirici: robot_localization/EKF denendi ama ilginc bir
@@ -296,6 +325,8 @@ def generate_launch_description():
             'gps_correct_min_fix_type': 99,   # KAPALI (eski: 5)
             'gps_heading_min_fix_type': 99,   # KAPALI (eski: 3)
         }],
+        respawn=True,
+        respawn_delay=3.0,
     )
 
     # 7. Nav2 navigasyon yigini (controller/planner/smoother/behavior/bt_navigator/
@@ -435,6 +466,8 @@ def generate_launch_description():
         executable='surus_koprusu.py',
         name='surus_koprusu',
         output='screen',
+        respawn=True,
+        respawn_delay=3.0,
     )
 
     # 10. Arduino motor surucusu - /palet_hizlari'i dinleyip seri port uzerinden
@@ -448,6 +481,11 @@ def generate_launch_description():
         cmd=['python3', arduino_script_path],
         name='arduino_motor_kontrol_uydusu',
         output='screen',
+        # ExecuteProcess de respawn destekler - motor surucusu OLURSE
+        # arac komut alamaz hale gelir, geri gelmesi SART (bkz. lidar_node
+        # ustundeki OTOMATIK RESPAWN notu).
+        respawn=True,
+        respawn_delay=3.0,
     )
 
     # 11. Tabela (trafik levhasi) algilama - ayri bir kameradan surekli YOLO
@@ -473,6 +511,8 @@ def generate_launch_description():
             'video_target_ip': tabela_video_target_ip,
             'video_target_port': tabela_video_target_port,
         }],
+        respawn=True,
+        respawn_delay=3.0,
     )
 
     # 12. GOREV SEKANSI KARAR DUGUMU (2026-08-31, kullanici istegi - TAM
@@ -486,6 +526,8 @@ def generate_launch_description():
         executable='tabela_etap_yoneticisi.py',
         name='tabela_etap_yoneticisi',
         output='screen',
+        respawn=True,
+        respawn_delay=3.0,
     )
 
     # 13. Egim/rampa gecislerinde LIDAR'in zemini engel sanmasini onler -
@@ -516,10 +558,18 @@ def generate_launch_description():
         name='arka_kamera_node',
         output='screen',
         parameters=[{
+            # camera_index artik SADECE YEDEK: node once benzersiz kimlikle
+            # acmayi dener (/dev/v4l/by-id -> /dev/v4l/by-path), bkz.
+            # arka_kamera_node.py::_kamera_kaynagi_bul.
             'camera_index': 4,
+            'kamera_arama_ismi': 'C270',
+            'kamera_usb_port': '1-2.2.3',
+            'kamera_fps': 5,
             'video_target_ip': '192.168.1.20',
             'video_target_port': 5002,
         }],
+        respawn=True,
+        respawn_delay=3.0,
     )
 
     # 14b. Serbest yon takipcisi (gap-following) - haritasiz/bilinmeyen
@@ -613,6 +663,32 @@ def generate_launch_description():
         executable='on_bosluk_nokta_atici.py',
         name='on_bosluk_nokta_atici',
         output='screen',
+        respawn=True,
+        respawn_delay=3.0,
+    )
+
+    # 18. SAGLIK BEKCISI (2026-09-09) - "ayakta ama sessiz" dugumleri
+    #     tespit edip SIGTERM ile sonlandirir; yukaridaki respawn=True
+    #     onlari geri getirir. 9 Eylul'de LIDAR adaptoru TEK acilista 6 KEZ
+    #     koptu ve sllidar_node her seferinde OLU fd ile ayakta kalip
+    #     SESSIZCE sustu (log yok, %CPU normal) - respawn tek basina bu
+    #     durumda ISE YARAMIYOR, cunku sureç olmuyor. Bkz. saglik_bekcisi.py
+    #     dosyasinin basindaki ayrintili not.
+    saglik_bekcisi_node = Node(
+        package='tufan_v2_ws',
+        executable='saglik_bekcisi.py',
+        name='saglik_bekcisi',
+        output='screen',
+        parameters=[{
+            # Yigin ~60sn'de aciliyor (TensorRT motorlari + Nav2 lifecycle);
+            # bu sure boyunca topic'ler HAKLI olarak sessiz - pay bundan
+            # UZUN olmali, yoksa bekci acilisi hic tamamlanmaz.
+            'baslangic_payi_s': 75.0,
+            'kontrol_araligi_s': 2.0,
+            'etkin': True,
+        }],
+        respawn=True,
+        respawn_delay=5.0,
     )
 
     return LaunchDescription([
@@ -636,9 +712,35 @@ def generate_launch_description():
         surus_koprusu_node,
         motor_driver_node,
         tabela_node,
+        # ARKA KAMERA GERI ACILDI (2026-09-09, kullanici: "arka kamerayi
+        # kontrol et yayin yapiyor mu diye"). 2026-09-01'de KASITLI olarak
+        # bu listeden cikarilmisti ("simdilik kullanmayalim") - yani
+        # node hic BASLAMIYORDU, dolayisiyla 5002'ye HIC yayin gitmiyordu.
+        # UC kameranin USB izokron bant genisligini tuketme riski
+        # (2026-09-01'de "No space left on device") ucunun de MJPG'ye
+        # gecirilmesiyle giderilmisti - geri acarken UCUNUN DE aktigi
+        # CANLI dogrulanmalidir.        # 2026-09-09 TEKRAR KAPATILDI - CANLI OLCUMLE kanitlandi: arka
+        # kamera acikken SILAH kamerasi (C922) hic yayin yapamiyor.
+        # Olcum: 3 kamera=1160 KB/s, arka kapali=499, silah kapali=521
+        # -> silah payi 19 KB/s, yani cap.read() surekli False donuyor
+        # (klasik UVC izokron bant genisligi tukenmesi; OpenCV bunu
+        # SESSIZCE yapar, log YOK - 2026-09-01'de de ayni sekilde
+        # bulunmustu). Ucu de MJPG olmasi YETMIYOR. Kullanici onayiyla
+        # ("gerekirse arka kamerayi durdur") arka kamera yine listeden
+        # cikarildi - silah kamerasi GOREV KRITIK.
+        # 2026-09-10 GERI ACILDI - bant genisligi COZULDU. Cekirdek
+        # kaniti "Not enough bandwidth for altsetting 4" idi; rezervasyon
+        # KARE HIZI ile orantili oldugu icin cozum FPS dusurmek oldu
+        # (cozunurluk dusurmek ISE YARAMADI - 160x120 bile ayni hatayi
+        # verdi). Ayrica kullanici kablolari yeniden duzenledi: silah
+        # (C922) ve on kamera dogrudan Jetson tarafinda (1-2.1 / 1-2.3),
+        # goruntu ISLEMEYEN arka kamera hub'da (1-2.2.3) ve DUSUK fps'te.
+        # Canli dogrulandi: silah 15 + on 15 + arka 5 -> UCU DE calisiyor.
+        arka_kamera_node,
         tabela_etap_yoneticisi_node,
         egim_costmap_ayarlayici_node,
         on_bosluk_nokta_atici_node,
+        saglik_bekcisi_node,
         turret_launch,
         cube_orange_mavros_launch,
     ])

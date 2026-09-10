@@ -307,6 +307,13 @@ class ArduinoMotorKontrol(Node):
     def _komut_callback(self, msg):
         komut = msg.data.strip()
         if komut == "EMERGENCY_STOP_CMD":
+            # KENAR KORUMASI (2026-09-09): yer istasyonu acil stop aktifken
+            # bu komutu ~2 sn'de bir TEKRARLIYOR (araç tarafında yeniden
+            # başlayan bir node kilidi kaçırmasın diye, bkz. turret_node
+            # _arac_komut_cb). Zaten kilitliyken log yazmak/porta yazmak
+            # gereksiz - sadece DURUM DEĞİŞİMİNDE iş yapılır.
+            if self._kilitli:
+                return
             self._kilitli = True
             self.get_logger().warn("🛑 ACİL DURDURMA KİLİTLENDİ - /palet_hizlari komutları 'DEVAM_CMD' gelene kadar YOK SAYILACAK")
             if self.arduino and self.arduino.is_open:

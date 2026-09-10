@@ -535,11 +535,24 @@ class KontrolPaneliThread(QThread):
                         # --- ACIL STOP YEREL KALKANI ---
                         # D4 GND'deyken araca HICBIR surus komutu gitmesin
                         # (arayuz tarafi kilit + 0.8sn watchdog'a EK katman).
-                        # Silah (turret + ates) KASITLI OLARAK etkilenmez -
-                        # acil stop "araçtaki motorlara giden kodlar" icindir.
+                        #
+                        # 2026-09-09 DEGISTI: silah da (turret hareketi)
+                        # ARTIK acil stop'a dahil. Eski tasarim silahi
+                        # KASITLI olarak disarida birakiyordu ("acil stop
+                        # araçtaki motorlara giden kodlar icindir"); sahada
+                        # "acil stop kapaliyken silah hareket ediyor" olarak
+                        # bulundu ve operator icin kabul edilemez oldugu
+                        # icin kaldirildi. Ates (sag toggle) sinyali yine
+                        # gonderilir ama node onu acil stopta yutar
+                        # (bkz. kontrol_paneli_node._ates_yayinla) - boylece
+                        # anahtarin GERCEK konumu kaybolmaz.
                         if not sol_toggle.aktif:
                             self.surus_sinyali.emit(sol_oran, sag_oran)
-                        self.turret_sinyali.emit(gx, gy)
+                            self.turret_sinyali.emit(gx, gy)
+                        else:
+                            # Susmak YETMEZ: arac tarafi son komutu
+                            # heartbeat ile tekrarliyor - SIFIR gonder.
+                            self.turret_sinyali.emit(0.0, 0.0)
 
                         # --- POTANSIYOMETRE -> PWM UST SINIRI ---
                         ham_pot = analog["A5"]

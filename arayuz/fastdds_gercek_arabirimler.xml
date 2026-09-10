@@ -19,6 +19,19 @@ birakiliyor, hangisi CALISIYORSA ROS2 onu kullanabilsin diye.
 
 ONEMLI: <address> alanlari SU ANKI (DHCP/statik) IP'ler - biri degisirse
 bu dosya da guncellenmeli.
+
+2026-09-10 - TAM BU SORUN YASANDI: WiFi IP'si 10.40.64.44'ten
+192.168.216.150'ye degismisti ama bu dosya ESKI adresi listeliyordu.
+Sonuc: FastDDS OLMAYAN bir arabirime baglanmaya calisti ve GUI thread'i
+rclpy create_subscription icinde KILITLENDI - pencere aciliyor ama BOS
+kaliyor ve yanit vermiyordu ("ekran gelmiyor ama force quit geliyor").
+Yigin izi kaniti (SIGABRT + faulthandler):
+    rclpy/node.py:1376 create_subscription
+    telemetri_sistemi.py:214 __init__      <- GUI THREAD'INDE
+    main.py:364 _telemetri_baglantilari_kur
+Bu liste artik main.py tarafindan ACILISTA CANLI IP'lerden yeniden
+uretiliyor (bkz. main.py::_dds_profilini_guncelle) - DHCP degisse bile
+kendini onarir. Asagidaki degerler son uretilen halidir.
 -->
 <dds xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
     <profiles>
@@ -27,8 +40,8 @@ bu dosya da guncellenmeli.
                 <transport_id>gercek_arabirimler_udp</transport_id>
                 <type>UDPv4</type>
                 <interfaceWhiteList>
-                    <address>10.40.64.44</address>
-                    <address>192.168.1.20</address>
+                    <address>192.168.1.20</address>  <!-- enP8p1s0 -->
+                    <address>192.168.216.150</address>  <!-- wlP1p1s0 -->
                     <address>127.0.0.1</address>
                 </interfaceWhiteList>
             </transport_descriptor>

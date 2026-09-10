@@ -58,7 +58,7 @@ import time
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
-from std_msgs.msg import String, Bool, Float32MultiArray
+from std_msgs.msg import String, Bool, Float32MultiArray, Int32
 from geometry_msgs.msg import Twist
 
 from PyQt5.QtCore import QCoreApplication, QTimer
@@ -75,6 +75,21 @@ GUVENLIK_ZAMAN_ASIMI_S = 0.8
 FREN_KILIT_S = 3.5
 # Sürüş komutu yayın hızı (arayüzdeki surekli_yayin_dongusu ile aynı).
 YAYIN_ARALIGI_S = 0.1
+
+# --- MANUEL SILAH ADIM SAYISI (2026-09-09, kullanici istegi: "manuelde
+# silah hizini ayarlamak icin arac hizini ayarlayan pot ile ayni yap, pot
+# 0'dayken 2 adim atsin, pot 1023'te iken 100 adim atsin, ama aracin hiz
+# ayarini bozma ayni kalsin").
+#
+# ONEMLI - ARAC HIZ HARITASI HIC DEGISMEDI: pot okuma/EMA/PWM haritasi
+# (kontrol_paneli_sistemi.py, ham -> 85..255) OLDUGU GIBI DURUYOR. Adim
+# sayisi o haritanin CIKTISINDAN geri cozuluyor:
+#     pwm = PWM_ALT + (ham/1023) * (PWM_UST - PWM_ALT)
+#  => ham/1023 = (pwm - PWM_ALT) / (PWM_UST - PWM_ALT)
+# Yani ayni ham pot degerine BAGIMLI, ikinci bir okuma/yayin yolu ACMADAN
+# (tek kaynak, tek throttle) adim sayisi turetiliyor.
+SILAH_ADIM_MIN = 2      # pot 0    -> 2 adim   (hassas nisan)
+SILAH_ADIM_MAX = 100    # pot 1023 -> 100 adim (hizli tarama)
 
 
 class KontrolPaneliNode(Node):
@@ -108,6 +123,13 @@ class KontrolPaneliNode(Node):
         # (acil stop ile ayni desen) - arayuz donsa/kapansa bile fren
         # kumanda edilebilir. 3 saniyelik motor calisma suresini ARDUINO
         # sayar; buradan sadece HEDEF DURUM gonderilir.
+        # MANUEL SILAH ADIM SAYISI (bkz. SILAH_ADIM_MIN/MAX): turret_node
+        # MANUEL modda her heartbeat'te bu kadar adimlik "coklu adim" darbesi
+        # gonderir - silahin manuel hareket hizi boylece surus potundan
+        # ayarlanir. Surus PWM'i bu topic'ten ETKILENMEZ.
+        self.silah_adim_pub = self.create_publisher(Int32, '/silah_adim_sayisi', 10)
+        self.silah_adim_sayisi = SILAH_ADIM_MIN
+
         self.fren_pub = self.create_publisher(Bool, '/fren_komut', 10)
         self.fren_acik = False
         self._fren_son_komut = 0.0
@@ -195,6 +217,15 @@ class KontrolPaneliNode(Node):
         self.anlik_sag_pwm = self._pwm_olcekle(sag_oran)
 
     def turret_geldi(self, x, y):
+        # ACİL STOP SİLAHI DA DURDURUR (2026-09-09, sahada bulundu:
+        # "acil stop kapalıyken silah hareket ediyor"). ESKİ tasarım silahı
+        # KASITLI olarak acil stop'un dışında bırakıyordu ("acil stop araca
+        # giden motor komutları içindir") - operatör için bu kabul edilemez.
+        # Komutu YUTMAK yetmez, SIFIR yayınlamak gerekir: araç tarafındaki
+        # heartbeat son komutu tekrarlıyor, susarsak taret son yönde
+        # dönmeye devam ederdi.
+        if self.acil_stop_aktif:
+            x = y = 0.0
         msg = Twist()
         msg.linear.x = float(x)
         msg.linear.y = float(y)
@@ -224,7 +255,9 @@ class KontrolPaneliNode(Node):
 
     def _ates_yayinla(self):
         try:
-            self.ates_pub.publish(Bool(data=bool(self.ates_manuel_aktif)))
+            # ACİL STOP: anahtar hâlâ AÇIK konumda olsa bile lazer yanmaz.
+            acik = bool(self.ates_manuel_aktif) and not self.acil_stop_aktif
+            self.ates_pub.publish(Bool(data=acik))
         except Exception:
             pass
 
@@ -272,6 +305,10 @@ class KontrolPaneliNode(Node):
             msg.data = "EMERGENCY_STOP_CMD"
             self.anlik_sol_pwm = 0.0
             self.anlik_sag_pwm = 0.0
+            # SİLAHI DA ANINDA SUSTUR (bkz. turret_geldi'deki not).
+            self.ates_manuel_aktif = False
+            self.turret_geldi(0.0, 0.0)
+            self._ates_yayinla()
             self.get_logger().warn(
                 'ACİL STOP (fiziksel anahtar) -> araca gönderildi + '
                 'sürüş modu MANUEL\'e çekiliyor (otonomi durur)')
@@ -314,6 +351,22 @@ class KontrolPaneliNode(Node):
 
     def pot_geldi(self, pwm_degeri):
         self.pwm_ust_sinir = float(_kirp(pwm_degeri, PWM_ALT, PWM_UST))
+        # AYNI pot degerinden manuel silah adim sayisi (arac hizina
+        # DOKUNMADAN - bkz. SILAH_ADIM_MIN/MAX basligindaki not).
+        self.silah_adim_sayisi = self._pot_adim_sayisi(self.pwm_ust_sinir)
+        self._silah_adim_yayinla()
+
+    def _pot_adim_sayisi(self, pwm):
+        aralik = float(PWM_UST - PWM_ALT)
+        oran = 0.0 if aralik <= 0 else (float(pwm) - PWM_ALT) / aralik
+        oran = min(max(oran, 0.0), 1.0)
+        return int(round(SILAH_ADIM_MIN + oran * (SILAH_ADIM_MAX - SILAH_ADIM_MIN)))
+
+    def _silah_adim_yayinla(self):
+        try:
+            self.silah_adim_pub.publish(Int32(data=int(self.silah_adim_sayisi)))
+        except Exception:
+            pass
 
     def _pwm_olcekle(self, oran):
         # telemetri_sistemi.py::_pwm_olcekle ile BİREBİR aynı formül.
@@ -353,6 +406,11 @@ class KontrolPaneliNode(Node):
         self._durum_sayac = getattr(self, '_durum_sayac', 0) + 1
         if self._durum_sayac % 20 == 0 and getattr(self, 'panel_bagli', False):
             self.durum_yayinla({'tip': 'baglanti', 'bagli': True})
+        # SILAH ADIM SAYISINI DA PERIYODIK TEKRARLA: turret_node bu node'dan
+        # SONRA baslamis olabilir; pot oynatilmadikca yeni bir yayin
+        # olmayacagi icin varsayilan degerde kalirdi.
+        if self._durum_sayac % 20 == 0:
+            self._silah_adim_yayinla()
 
         # ACİL STOP AKTİFKEN MANUEL'İ SÜREKLİ TEKRARLA: arayüz donmuş ya da
         # kapanmışsa bile son sözü acil stop söylesin. Arayüz sağlıklıysa
@@ -365,6 +423,20 @@ class KontrolPaneliNode(Node):
                 self.mod_pub.publish(String(data='MANUEL'))
             except Exception:
                 pass
+            # SİLAH: sıfır taret komutu + ateş kapalı, HER TUR (100ms).
+            # Arayüzdeki ekran butonları da /turret_manuel_cmd ve
+            # /silah_manuel yayınlayabiliyor; son sözü acil stop söylesin.
+            self.turret_geldi(0.0, 0.0)
+            self._ates_yayinla()
+            # /arac_komut'u ~2 sn'de bir TEKRARLA: araç tarafındaki
+            # turret_node (veya arduino_motor_kontrol) acil stop SIRASINDA
+            # yeniden başlarsa kilidi kaçırmasın. Alıcılar kenar-korumalı
+            # olduğu için tekrar zararsız (log spam'i yok).
+            if self._durum_sayac % 20 == 0:
+                try:
+                    self.komut_pub.publish(String(data='EMERGENCY_STOP_CMD'))
+                except Exception:
+                    pass
 
         # SİLAH ATEŞ HEARTBEAT'İ (bkz. ates_degisti). Mod kontrolünden
         # ÖNCE, çünkü ateş kararı araç tarafına ait (turret_node.py OTONOM

@@ -6,6 +6,24 @@ from std_msgs.msg import String, Bool, Int32
 from nav_msgs.msg import Odometry
 import tabela_etap_yoneticisi as T
 rclpy.init()
+def _siraya_getir(n, hedef):
+    """Sirali durum makinesini 'hedef' tabelasina kadar yurutur.
+    (Sirali kabul 2026-09-07'de eklendi; testler artik dogrudan 9
+    gonderemiyor - once 1..8 ve Stop gecilmeli.)"""
+    import time as _t
+    from std_msgs.msg import String as _S
+    import tabela_etap_yoneticisi as _T
+    for c in _T.BEKLENEN_SIRA:
+        if c == hedef:
+            break
+        if c == 'Stop':
+            for _ in range(_T.STOP_DOGRULAMA_ADEDI):
+                n._tespit_cb(_S(data='Stop:0.95'))
+        else:
+            for _ in range(_T.STOP_DOGRULAMA_ADEDI):
+                n._tespit_cb(_S(data='%s:0.9' % c))
+        _t.sleep(1.05)
+
 cls=[c for _,c in inspect.getmembers(T,inspect.isclass) if c.__module__==T.__name__][0]
 n=cls()
 k={'turret':[], 'silah':[], 'tabela':[], 'otonom':[], 'faz':[], 'surus':[], 'goal':[]}
@@ -24,7 +42,9 @@ def temizle():
     for v in k.values(): v.clear()
 
 print("== ARAYUZ OTONOM iken 9. tabela ==")
-n._surus_modu='OTONOM'; temizle()
+n._surus_modu='OTONOM'
+_siraya_getir(n, 'Nine')
+temizle()
 for i in range(3): n._tespit_cb(String(data='Nine:0.93'))
 print(f"  /silah_modu        = {k['silah']}          (OTONOM olmali)")
 print(f"  /surus_modu        = {k['surus']}          (MANUEL olmali)")

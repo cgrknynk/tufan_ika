@@ -325,6 +325,9 @@ class OnBoslukNoktaAtici(Node):
         # GUVENLIK: hedef kisa tutulur (varsayilan 2m) - "engelleri yok
         # say" davranisi SADECE bu etap boyunca ve SADECE duz ileri.
         self.declare_parameter('rampa_etabi_hedef_mesafesi_m', 2.0)
+        # SU ETABI (2026-09-09): rampa ile AYNI mantik - LIDAR kor, duz
+        # ilerle. Hedef mesafesi rampadakiyle ayni tutuldu.
+        self.declare_parameter('su_etabi_hedef_mesafesi_m', 2.0)
 
         # --- Aktivasyon ---
         # OTOMATIK BASLATMA (2026-09-06, kullanici istegi: "otonoma
@@ -352,6 +355,7 @@ class OnBoslukNoktaAtici(Node):
         self._gorev_sinyali_geldi = False
         self._kayar_engel_etabi = False
         self._rampa_etabi = False
+        self._su_etabi = False
         self._kayar_engel_son_tutma = 0.0
         self._kayar_engel_bekliyor = False
         self._surus_modu = 'MANUEL'   # guvenli varsayilan (surus_koprusu.py ile ayni)
@@ -375,6 +379,7 @@ class OnBoslukNoktaAtici(Node):
         self.create_subscription(String, '/surus_modu', self._surus_modu_cb, 10)
         self.create_subscription(Bool, '/kayar_engel_etabi', self._kayar_engel_cb, 10)
         self.create_subscription(Bool, '/rampa_etabi', self._rampa_etabi_cb, 10)
+        self.create_subscription(Bool, '/su_etabi', self._su_etabi_cb, 10)
         self.create_subscription(LaserScan, '/scan', self._scan_cb, 10)
         self.create_subscription(Odometry, '/odom', self._odom_cb, 10)
 
@@ -426,6 +431,7 @@ class OnBoslukNoktaAtici(Node):
             'kayar_engel_koni_derece', 'kayar_engel_acik_mesafesi_m',
             'kayar_engel_tutma_araligi_s', 'kayar_engel_gecis_mesafesi_m',
             'kayar_engel_hizalama_payi_m', 'rampa_etabi_hedef_mesafesi_m',
+            'su_etabi_hedef_mesafesi_m',
             'surus_modu_ile_aktiflesir', 'surus_modu_bayatlik_s',
             'otonom_surus_ile_aktiflesir',
             'veri_bayatlik_esigi_s',
@@ -461,6 +467,14 @@ class OnBoslukNoktaAtici(Node):
                 if yeni else 'KAPANDI - normal davranisa donuldu.'))
             if not yeni:
                 self._kayar_engel_bekliyor = False
+
+    def _su_etabi_cb(self, msg: Bool):
+        yeni = bool(msg.data)
+        if yeni != self._su_etabi:
+            self._su_etabi = yeni
+            self.get_logger().warn(
+                'SU ETABI %s' % ('BASLADI - LIDAR KOR, duz ilerleniyor'
+                                 if yeni else 'bitti - normal moda donuldu'))
 
     def _rampa_etabi_cb(self, msg: Bool):
         yeni = bool(msg.data)
@@ -580,6 +594,21 @@ class OnBoslukNoktaAtici(Node):
             'ham': int(ham_sayi),
         }
 
+        # SU ETABI - EGIM MODLARINDAN **ONCE** (2026-09-09, kullanici:
+        # "suya inerken suyu engel olarak goruyor olabilir, engelde
+        # yaptigimiz gibi cozelim").
+        #
+        # NEDEN EN BASTA: rampa etabi egim modlarindan SONRA bakiliyor,
+        # cunku orada arac tirmanmaya baslayinca TIRMANMA modu devralsin
+        # isteniyor. SUDA TERSI gecerli: arac suya INERKEN govde asagi
+        # egiliyor, INIS modu devraliyor ve _egimde_ilerle onundeki su
+        # yuzeyini "engel" gorup HEDEF GONDERMIYOR - arac tam da su
+        # kenarinda duruyor. Bu yuzden su etabinda hicbir egim modu
+        # devralmamali; kor ve duz ilerlenmeli.
+        if self._su_etabi:
+            self._su_etabinda_ilerle(yaw, odom, durum)
+            return
+
         if egim_on > egim_esigi:
             # (C) TIRMANMA - yanlara GUVENILEMEZ (isinlar engellerin ustunden
             # geciyor, sahte bosluk). Sadece mevcut yonde kisa adim.
@@ -674,6 +703,19 @@ class OnBoslukNoktaAtici(Node):
         self._hedef_gonder(d, 0.0, yaw, odom, durum)
 
     # ---------------- mod: normal (fan puanlamasi) ----------------
+    def _su_etabinda_ilerle(self, yaw, odom, durum):
+        """1. tabela / su gecidi: suyu ENGEL sayma, duz ilerle.
+
+        _rampa_etabinda_ilerle ile AYNI desen - fan taramasi ve engel
+        kirpmasi KASITLI OLARAK atlanir. 2D LIDAR icin su yuzeyi gercek
+        bir duvar gibi okunuyor; normal mantik onu dolasmaya calisip
+        arac su kenarinda kaliyordu (kullanici bildirimi)."""
+        d = float(self._p['su_etabi_hedef_mesafesi_m'])
+        durum.update({'mod': 'SU_ETABI', 'theta': 0.0, 'mesafe': round(d, 2),
+                      'not': 'engel kirpmasi YOK - suya duz giris'})
+        self._onceki_theta = 0.0
+        self._hedef_gonder(d, 0.0, yaw, odom, durum)
+
     def _rampa_etabinda_ilerle(self, yaw, odom, durum):
         """8. tabela: onundeki dik egimden KACMA, duz ilerle.
 

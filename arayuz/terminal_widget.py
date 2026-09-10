@@ -50,18 +50,34 @@ GECIKMELI_RENDER_MS = 100
 
 
 def _hedef_host_belirle():
-    """Once Ubiquiti (nokta-nokta, kasitli birincil link) hedefini dener -
-    tek hizli ping ile (0.5sn timeout, terminal acilisini gozle gorulur
-    sekilde geciktirmesin diye) - ulasilirsa onu, yoksa WiFi IP'sini doner."""
-    try:
-        sonuc = subprocess.run(
-            ["ping", "-c", "1", "-W", "1", UBIQUITI_HEDEF_IP],
-            capture_output=True, text=True, timeout=2.0
-        )
-        if sonuc.returncode == 0:
-            return UBIQUITI_HEDEF_IP
-    except Exception:
-        pass
+    """Once Ubiquiti (nokta-nokta, kasitli birincil link) hedefini dener,
+    ulasilamazsa WiFi IP'sine duser.
+
+    *** SAHADA BULUNAN HATA (2026-09-09, kullanici: "araç çalıştırma
+    butonuna basınca farklı bir port deniyor, 10 ile başlayan ip
+    geliyor") ***: eskiden TEK bir ping (-c 1 -W 1) yetiyordu. Ubiquiti
+    koprusu acilis aninda birkac yuz ms gecikirse ya da tek paket
+    duserse, terminal SESSIZCE WiFi IP'sine (10.40.64.43) baglaniyordu.
+    O IP o an ulasilamazsa kullanici anlamsiz "10.x" hatalari goruyor ve
+    araca hic baglanamiyor - hedefin degistigine dair bir isaret de yok.
+    Duzeltme: 3 denemeye kadar tekrar dene (tek paket kaybi karar
+    degistirmesin) ve SECILEN hedefi stdout'a yaz ki hangi link
+    kullanildigi gorunur olsun."""
+    for deneme in range(3):
+        try:
+            sonuc = subprocess.run(
+                ["ping", "-c", "1", "-W", "1", UBIQUITI_HEDEF_IP],
+                capture_output=True, text=True, timeout=2.0
+            )
+            if sonuc.returncode == 0:
+                if deneme:
+                    print("[terminal] Ubiquiti %s (%d. denemede) kullanilacak"
+                          % (UBIQUITI_HEDEF_IP, deneme + 1))
+                return UBIQUITI_HEDEF_IP
+        except Exception:
+            pass
+    print("[terminal] UYARI: Ubiquiti %s 3 denemede de yanit vermedi - "
+          "WiFi yedegine dusuluyor: %s" % (UBIQUITI_HEDEF_IP, VARSAYILAN_HOST))
     return VARSAYILAN_HOST
 
 # pyte'in standart 8 renk ismi (bkz. pyte.graphics.FG_ANSI/BG_ANSI) -> hex.

@@ -7,6 +7,24 @@ from nav_msgs.msg import Odometry
 import tabela_etap_yoneticisi as T
 
 rclpy.init()
+def _siraya_getir(n, hedef):
+    """Sirali durum makinesini 'hedef' tabelasina kadar yurutur.
+    (Sirali kabul 2026-09-07'de eklendi; testler artik dogrudan 9
+    gonderemiyor - once 1..8 ve Stop gecilmeli.)"""
+    import time as _t
+    from std_msgs.msg import String as _S
+    import tabela_etap_yoneticisi as _T
+    for c in _T.BEKLENEN_SIRA:
+        if c == hedef:
+            break
+        if c == 'Stop':
+            for _ in range(_T.STOP_DOGRULAMA_ADEDI):
+                n._tespit_cb(_S(data='Stop:0.95'))
+        else:
+            for _ in range(_T.STOP_DOGRULAMA_ADEDI):
+                n._tespit_cb(_S(data='%s:0.9' % c))
+        _t.sleep(1.05)
+
 n=T.TabelaEtapYoneticisi() if hasattr(T,'TabelaEtapYoneticisi') else None
 if n is None:
     import inspect
@@ -30,6 +48,7 @@ def temizle():
 def gonder(cls, kere=3, guven=0.9):
     for i in range(kere): n._tespit_cb(String(data=f'{cls}:{guven}'))
 
+_siraya_getir(n, 'Nine')
 print("1) TEK KARE 'Nine' -> hicbir sey olmamali (sahte tespit korumasi)")
 temizle(); gonder('Nine', kere=1)
 print("   turret=%s silah=%s otonom=%s  (hepsi bos olmali)" % (kayit['turret'],kayit['silah'],kayit['otonom']))

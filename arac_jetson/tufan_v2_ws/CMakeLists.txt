@@ -42,6 +42,7 @@ install(PROGRAMS
   src/serbest_yon_takipcisi.py
   src/kaba_harita_olusturucu.py
   src/on_bosluk_nokta_atici.py
+  src/saglik_bekcisi.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

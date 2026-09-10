@@ -85,7 +85,14 @@ while true; do
     # durumunda zaten faulthandler (bkz. main.py) AYRI bir dosyaya
     # (crash_log.txt) tam stack trace yazıyor, bu KRİTİK bilgi stdout
     # buffer'ından BAĞIMSIZ - kabul edilebilir bir takas.
-    python3 main.py 2>&1 | tee "$_LOG"
+    # -u (TAMPONSUZ) ZORUNLU (2026-09-10, canli bulundu): python3 ciktisi
+    # bir BORUYA (tee) yazarken blok-tamponlanir. Arayuz SIGKILL ile
+    # olduruldugunde (kod 137 - bugun tam olarak bu oldu) cekirdek tamponu
+    # BOSALTAMAZ ve 90 saniyelik TUM Python ciktisi KAYBOLUR. Log'da
+    # sadece Qt'nin C++ seviyesinden gelen (tamponsuz) uyarilar kalir -
+    # "neden oldu" sorusuna dair TEK IPUCU bile kalmaz. Bu yuzden gunlerce
+    # teshis cikmadi. -u ile her satir aninda diske yazilir.
+    python3 -u main.py 2>&1 | tee "$_LOG"
     _CIKIS_KODU=${PIPESTATUS[0]}
     _BITIS_EPOCH=$(date +%s)
     _BITIS=$(date '+%Y-%m-%d %H:%M:%S')

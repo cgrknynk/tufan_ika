@@ -46,9 +46,72 @@ if "TUFAN_ENV_HAZIR" not in os.environ:
 # (dosyanın en başında) ayarlanmalı - Fast-DDS bunu ilk yüklendiğinde okuyor.
 # NOT: WiFi/Ubiquiti IP'leri değişirse fastdds_gercek_arabirimler.xml'deki
 # adresler de güncellenmeli (DHCP rezervasyonu/statik IP bu sorunu kalıcı çözer).
+def _dds_profilini_guncelle(yol):
+    """Beyaz listeyi CANLI IP'lerden yeniden üretir (2026-09-10).
+
+    NEDEN: 10 Eylül'de arayüz açılmadı - pencere geliyor ama boş kalıyor ve
+    yanıt vermiyordu ("ekran gelmiyor ama force quit geliyor"). SIGABRT +
+    faulthandler ile alınan yığın izi GUI thread'inin tam olarak burada
+    kilitlendiğini gösterdi:
+        rclpy/node.py:1376 create_subscription
+        telemetri_sistemi.py:214 __init__      <- GUI THREAD'İNDE
+        main.py:364 _telemetri_baglantilari_kur
+    Kök neden: WiFi IP'si DHCP ile 10.40.64.44 -> 192.168.216.150 olmuştu
+    ama XML hâlâ ESKİ adresi listeliyordu. Fast-DDS OLMAYAN bir arabirime
+    bağlanmaya çalışıp çekirdek seviyesinde bloke oluyordu (aynı dosyanın
+    kendi notunda geçen sock_alloc_send_pskb imzası).
+
+    Elle güncelleme talimatı YETMEDİ (XML'de zaten yazıyordu, yine de
+    kaçırıldı), o yüzden artık otomatik: her açılışta gerçek arabirimlerin
+    IP'leri okunup liste yeniden yazılıyor. Sanal arabirimler (docker0,
+    l4tbr0, usb*, can*) DIŞARIDA - onları dahil etmek bu tıkanmanın asıl
+    sebebiydi (bkz. XML dosyasının başındaki 2026-09-01 notu).
+
+    Dosya yazılamazsa (salt-okunur disk vb.) sessizce mevcut haliyle
+    devam edilir - açılışı ENGELLEMEZ."""
+    import io as _io
+    import re as _re
+    import subprocess as _sp
+    try:
+        _cikti = _sp.run(["ip", "-4", "-brief", "addr"], capture_output=True,
+                         text=True, timeout=5).stdout
+    except Exception:
+        return
+    _adresler = []
+    for _satir in _cikti.splitlines():
+        _p = _satir.split()
+        if len(_p) < 3:
+            continue
+        _ad = _p[0]
+        if _ad == "lo" or _ad.startswith(("docker", "l4tbr", "usb", "can",
+                                          "veth", "br-", "tun", "tap")):
+            continue
+        _ip = _p[2].split("/")[0]
+        if _ip:
+            _adresler.append((_ad, _ip))
+    if not _adresler:
+        return          # hiç gerçek arabirim yok - dosyaya dokunma
+    _yeni = "\n".join('                    <address>%s</address>  <!-- %s -->'
+                      % (_ip, _ad) for _ad, _ip in _adresler)
+    _yeni += "\n                    <address>127.0.0.1</address>"
+    try:
+        _icerik = _io.open(yol, encoding="utf-8").read()
+        _yeni_icerik = _re.sub(
+            r"(<interfaceWhiteList>\n).*?(\n\s*</interfaceWhiteList>)",
+            lambda m: m.group(1) + _yeni + m.group(2),
+            _icerik, count=1, flags=_re.S)
+        if _yeni_icerik != _icerik:
+            _io.open(yol, "w", encoding="utf-8").write(_yeni_icerik)
+            print("[DDS] arabirim beyaz listesi guncellendi: "
+                  + ", ".join("%s=%s" % (a, i) for a, i in _adresler))
+    except Exception as _e:
+        print("[DDS] profil guncellenemedi (mevcut haliyle devam): %s" % _e)
+
+
 if "FASTRTPS_DEFAULT_PROFILES_FILE" not in os.environ:
     _dds_profil_yolu = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fastdds_gercek_arabirimler.xml")
     if os.path.isfile(_dds_profil_yolu):
+        _dds_profilini_guncelle(_dds_profil_yolu)
         os.environ["FASTRTPS_DEFAULT_PROFILES_FILE"] = _dds_profil_yolu
 
 # --- KRİTİK AĞ DÜZELTMESİ 2 (2026-09-05) ---
@@ -84,7 +147,9 @@ from ntrip_rtk_sistemi import NtripRtkThread
 from stiller import *
 from arayuz import Ui_MainWindow
 from diller import CEVIRILER
-from terminal_widget import SshTerminalWidget
+from terminal_widget import (
+    SshTerminalWidget, VARSAYILAN_KULLANICI, UBIQUITI_HEDEF_IP,
+)
 
 
 # ==========================================
@@ -885,11 +950,57 @@ class TufanGCS(QMainWindow):
         )
         durdur = "tmux send-keys -t tufan_ana_terminal C-c"
         uzak_komut = (
-            "if pgrep -f 'bin/ros2 launch tufan_v2_ws' >/dev/null 2>&1; then "
+            "if pgrep -f '[b]in/ros2 launch tufan_v2_ws' >/dev/null 2>&1; then "
             + durdur + "; else " + baslat + "; fi"
         )
+        # *** SAHADA BULUNAN HATA (2026-09-09): buton HİÇ BAŞLATMIYORDU ***
+        # pgrep KENDİ KOMUT SATIRINI yakalıyordu. Desen 'bin/ros2 launch
+        # tufan_v2_ws' idi ve bu METİN, ssh'ın araçta çalıştırdığı
+        # `bash -c "if pgrep -f 'bin/ros2 launch tufan_v2_ws' ..."`
+        # sürecinin KOMUT SATIRINDA (pgrep'in ARGÜMANI olarak) duruyordu.
+        # pgrep -f tüm komut satırına baktığı için kendi kabuğunu buluyor,
+        # kabuk "launch çalışıyor" sanıp DURDUR dalına giriyor, buton
+        # hiçbir zaman başlatmıyordu.
+        #
+        # CANLI KANIT (yığın KAPALIYKEN çalıştırıldı):
+        #   pgrep -af 'bin/ros2 launch tufan_v2_ws'
+        #   -> 14025 bash -c if pgrep -f 'bin/ros2 launch tufan_v2_ws' ...
+        # Yani TEK eşleşme kabuğun KENDİSİ.
+        #
+        # 2026-09-07'de 'bin/' eklenerek düzeltildiği SANILMIŞTI; işe
+        # yaramadı, çünkü yeni desen de aynı komut satırında duruyordu.
+        # ÇÖZÜM: köşeli parantez formu - '[b]in/...' regex'i GERÇEK süreçteki
+        # 'bin/...' metnini yakalar, ama komutun kendi metni '[b]in/...'
+        # olduğu için KENDİNİ yakalamaz. (Bu tuzağa bu projede DÖRDÜNCÜ kez
+        # düşüldü: pkill, buton, teşhis komutu, ve butonun 'düzeltmesi'.)
+        #
+        # ssh çağrısına ayrıca kullanıcı adı (arf203@) açıkça eklendi -
+        # ~/.ssh/config'e bağımlı kalmasın - ve stderr bir log dosyasına
+        # yazılıyor: Popen non-blocking (.wait() YOK, GUI donmasın) olduğu
+        # için ssh hatası başka türlü GÖRÜNMEZ, buton sessizce yalan söyler.
+        #
+        # Host da artık sabit değil: SSH terminalinin O AN kullandığı host
+        # kullanılıyor (Ubiquiti mi WiFi yedeği mi - ikisi AYRIŞMASIN).
+        # DİKKAT: _hedef_host_belirle() BURADA ÇAĞRILMAZ - 3 ping denemesi
+        # GUI thread'ini ~3 sn dondurur (bkz. bu dosyadaki STALL uyarıları).
+        # Terminalin ZATEN çözmüş olduğu değer önbellekten okunur; terminal
+        # henüz bağlanmadıysa Ubiquiti IP'si varsayılır (ping YOK).
+        term = getattr(self.ui, 'terminal_ekrani', None)
+        arac_host = getattr(term, '_son_kullanilan_host', None) or UBIQUITI_HEDEF_IP
+        hedef = "%s@%s" % (VARSAYILAN_KULLANICI, arac_host)
         try:
-            subprocess.Popen(["ssh", "-o", "ConnectTimeout=5", "192.168.1.22", uzak_komut])
+            # stderr bir dosyaya yazılıyor - Popen non-blocking olduğu için
+            # (.wait() YOK, GUI donmasın) ssh'ın hatası başka türlü GÖRÜNMEZ;
+            # buton "başlatılıyor" der ama hiçbir şey olmazdı (bu hatanın
+            # ta kendisi böyle gizlenmişti).
+            _ssh_log = open("/tmp/tufan_arac_baslat.log", "a")
+            _ssh_log.write("\n--- %s -> %s ---\n"
+                           % (time.strftime('%Y-%m-%d %H:%M:%S'), hedef))
+            _ssh_log.flush()
+            subprocess.Popen(["ssh", "-o", "ConnectTimeout=5",
+                              "-o", "BatchMode=yes", hedef, uzak_komut],
+                             stdout=_ssh_log, stderr=subprocess.STDOUT)
+            self.log_yaz(f"🔗 Araç bağlantısı: {hedef}")
             if self._arac_yazilimi_calisiyor_mu():
                 self.log_yaz("🛑 Araç yazılımı DURDURULUYOR...")
             else:
@@ -1618,21 +1729,45 @@ class TufanGCS(QMainWindow):
             self.ui.pushButton_devamEt.setVisible(True)
 
     def veri_kaydet_tetikle(self):
+        """KAYIT butonu - SADECE KAMERA GÖRÜNTÜLERİNİ kaydeder (2026-09-09,
+        kullanıcı isteği: "veri kaydet butonuna basınca sadece kamera
+        görüntülerini kaydetsin"). Telemetri/log/harita HİÇBİR ŞEY bu
+        dosyalara yazılmaz.
+
+        SAHADA BULUNAN HATA: bu metot `kamera_motoru.kayit_durumu_degistir()`
+        çağırıyordu ama KameraThread'de ÖYLE BİR METOT YOKTU - buton yazı ve
+        rengini değiştiriyor, sonra AttributeError alıyordu. Yani buton
+        "KAYIT" görünüyor ama diske TEK KARE yazmıyordu. Metot artık
+        kamera_sistemi.py'de gerçekten var (bkz. KameraThread.
+        kayit_durumu_degistir) ve üç kamerayı ayrı ayrı .avi dosyalarına
+        yazıyor.
+        """
         dil = CEVIRILER.get(self.aktif_dil, CEVIRILER["Türkçe"])
         if not self.kayit_yapiyor_mu:
-            self.log_yaz("VİDEO KAYDI BAŞLATILDI: Veriler diske yazılıyor...")
+            klasor = None
+            if hasattr(self, 'kamera_motoru'):
+                try:
+                    klasor = self.kamera_motoru.kayit_durumu_degistir(True)
+                except Exception as e:
+                    self.log_yaz(f"⚠️ Kayıt başlatılamadı: {e}")
+                    return
             self.ui.pushButton_KAYIT.setStyleSheet(KAYIT_AKTIF)
             self.ui.pushButton_KAYIT.setText(dil["btn_kaydi_durdur"])
             self.kayit_yapiyor_mu = True
-            if hasattr(self, 'kamera_motoru'):
-                self.kamera_motoru.kayit_durumu_degistir(True)
+            self.log_yaz("🎥 KAMERA KAYDI BAŞLADI"
+                         + (f" -> {klasor}" if klasor else ""))
         else:
-            self.log_yaz("VİDEO KAYDI DURDURULDU: Dosya başarıyla kaydedildi.")
+            klasor = None
+            if hasattr(self, 'kamera_motoru'):
+                try:
+                    klasor = self.kamera_motoru.kayit_durumu_degistir(False)
+                except Exception as e:
+                    self.log_yaz(f"⚠️ Kayıt durdurulamadı: {e}")
             self.ui.pushButton_KAYIT.setStyleSheet(KAYIT_PASIF)
             self.ui.pushButton_KAYIT.setText(dil["btn_kaydet"])
             self.kayit_yapiyor_mu = False
-            if hasattr(self, 'kamera_motoru'):
-                self.kamera_motoru.kayit_durumu_degistir(False)
+            self.log_yaz("⏹️ KAMERA KAYDI DURDU"
+                         + (f" -> {klasor}" if klasor else ""))
 
     def yedekleme_tetikle(self):
         hedef_klasor = self.ui.lineEdit_hedefKlasor.text() 

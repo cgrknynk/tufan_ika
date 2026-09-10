@@ -47,6 +47,7 @@ One..Eleven (etap numarasi tabelalari), EndOfEleven (parkur/etap 11 bitis
 tabelasi), Stop.
 """
 import math
+import time
 
 import rclpy
 from rclpy.node import Node
@@ -66,6 +67,84 @@ STOP_DOGRULAMA_ADEDI = 3  # ust uste bu kadar kare Stop gormeden TETIKLENMEZ
 # otonom olarak"). Silah fazi 9. tabelaya tasindigi icin Stop artik
 # SADECE bu kisa duraklamayi yapar.
 STOP_BEKLEME_S = 3.0
+
+# =====================================================================
+# TABELA SIRASI (2026-09-07, kullanici: "numaralar 1,2,3,4,5,6,7,8,stop,
+# 9,stop,10,11 olarak gidiyor")
+# =====================================================================
+# Parkurda tabelalar SABIT bir sirada. Bu siradan yararlanmak iki sorunu
+# birden cozer:
+#   1) SAHTE TESPITLER: model gun boyu 0.6 esigini asan rastgele siniflar
+#      uretti (Etap 8: 0.77/0.80/0.71, Etap 2: 0.76, Etap 1: 0.60, ve
+#      8 ile 10'un 40 ms arayla donusumlu gelmesi). Sirali kabul, sadece
+#      BEKLENEN tabelayi gecerli sayar - rastgele bir sinif otomatik elenir.
+#   2) BIRBIRINE YAKIN TABELALAR: kullanici "tabelalar birbirine yakin
+#      oldugu icin ikisini ayni anda gorebilir; 1'i gordu ve 2'yi de
+#      gordu, 1 kadrajdan CIKMAZSA 2'ye gecme" dedi. Bir sonraki tabelaya
+#      ancak ONCEKI tabela TABELA_KAYBOLMA_S boyunca HIC gorulmediginde
+#      gecilir.
+BEKLENEN_SIRA = ['One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven',
+                 'Eight', 'Stop', 'Nine', 'Stop', 'Ten', 'Eleven']
+# Onceki tabela bu sure boyunca hic gorulmezse "kadrajdan cikti" sayilir.
+TABELA_KAYBOLMA_S = 1.0
+# *** SAHADA/CANLI TESTTE BULUNDU (2026-09-07) ***: dogrulama sayaci
+# "ardisik kare" mantigiyla calisiyordu ve BEKLENMEYEN her tespitte
+# SIFIRLANIYORDU. Model gun boyu araya rastgele siniflar soktugu icin
+# (10 Hz'de surekli) sayac 3'e HIC ulasamiyordu - 1..7 gonderilen
+# testte sadece ETAP 1 kabul edildi, gerisi elendi. Artik sayac
+# "ardisik" degil, BU ZAMAN PENCERESI icinde toplam N tespit: araya
+# giren gurultu sayaci BOZMAZ, sadece beklenen sinif bu sure boyunca
+# hic gorulmezse sifirlanir.
+ADAY_ZAMAN_ASIMI_S = 2.0
+
+# STOP SADECE EGIMDE (2026-09-07, kullanici: "stop gorunce eger arac imusu
+# asagiya veya yukariya bakarsa dursun; dik egimde degilse durmasin").
+# Parkurdaki Stop tabelalari rampa bolgesinde; duz zeminde gorulen bir
+# Stop ya sahte tespittir ya da baska bir tabelanin yansimasidir.
+# |pitch| bu esigin ALTINDAYSA Stop YOK SAYILIR.
+STOP_EGIM_ESIGI_DERECE = 3.0
+
+# =====================================================================
+# IKI PARKUR (2026-09-07, kullanici: "2 parkur var, birisi hizlanma
+# birisi engel parkuru")
+# =====================================================================
+#   PARKUR 1 (ENGEL) : 1..10 - 2. STOP gorulup beklendikten SONRA
+#                      PARKUR1_BITIS_ILERLEME_S kadar daha ilerleyince biter.
+#   PARKUR 2 (HIZLANMA): 11 ile BASLAR, EndOfEleven ile BITER.
+#                      11 goruldugu anda arac SON HIZ ile gider
+#                      (/hizlanma_etabi -> surus_koprusu PWM tavanini acar).
+# BEKLENEN_SIRA icinde 1. Stop index 8, 2. Stop index 10 - hangi Stop
+# oldugunu ayrica saymaya gerek yok, sira zaten soyluyor.
+IKINCI_STOP_INDEX = 10
+
+# =====================================================================
+# RAMPA DIZISI (2026-09-07, kullanici tarifi)
+# =====================================================================
+# "parkurda 8 ile stop ve 10 ile stop YAN YANA, o yuzden stop'u ya da 8'i
+#  gordugunde dik egime cikacagini anlayacak; lidar imu yukari kalkana
+#  kadar KOR olacak; imu 15 derece yukari kalktiginda 2 sn sonra duracak,
+#  2 sn bekleyecek ve devam edecek. Ayni sekilde iniste de stop veya 10'u
+#  gorunce imu 15 derece asagi egildikten 2 sn sonra duracak, 2 sn
+#  bekleyip devam edecek; 15 sn sonra ise parkur 1 bitecek."
+#
+# 8+Stop ve 10+Stop yan yana oldugu icin hangisinin once gorulecegi
+# belirsiz - IKISI DE ayni tetigi kurar.
+# Stop, 8+Stop / 10+Stop yan yana oldugu icin SIRA DISI da gorulebilir.
+# Ama parkurun BASINDA gelen sahte bir Stop LIDAR'i kor edip araci
+# duvara surerdi - bu yuzden Stop ancak RAMPA BOLGESINE yaklasilmisken
+# (siradaki tabela 8 ya da sonrasi) kabul edilir.
+STOP_KABUL_MIN_SIRA_INDEX = 7   # BEKLENEN_SIRA[7] == 'Eight'
+RAMPA_IMU_ESIGI_DERECE = 15.0
+RAMPA_DURMA_GECIKMESI_S = 2.0
+RAMPA_BEKLEME_S = 2.0
+PARKUR1_BITIS_ILERLEME_S = 15.0
+
+_R_BOS = 0
+_R_TIRMANIS_BEKLE = 1
+_R_TEPEDE_DUR = 2
+_R_INIS_BEKLE = 3
+_R_ALTTA_DUR = 4
+_R_BITTI = 5
 ILERI_BASLATMA_ETABI = 1  # 'One' tabelasi -> serbest yon takibi baslasin
 # KAYAR ENGEL (2026-09-06, kullanici istegi: "parkura kayar engel
 # ekleyeceğim; ön kamerada 6. tabelayı tespit ettiğinde aracın kayar engel
@@ -76,6 +155,22 @@ ILERI_BASLATMA_ETABI = 1  # 'One' tabelasi -> serbest yon takibi baslasin
 # yerinde bekler ve engel acilinca duz gecer (bkz. o dosyadaki
 # KAYAR_ENGEL modu). Etap 6'yi GECEN bir tabela (7+) gorulunce sinyal
 # kalkar.
+# SU ETABI (2026-09-09, kullanici tarifi: "suya inerken suyu engel olarak
+# goruyor olabilir, buna cozum uretelim engelde yaptigimiz gibi").
+#
+# NEDEN GEREKLI: 2D LIDAR icin su YUZEYI, dik egimin on yuzu gibi, gercek
+# bir DUVAR olarak okunuyor. Arac suya INERKEN govde asagi egiliyor ->
+# on_bosluk_nokta_atici INIS moduna geciyor -> _egimde_ilerle onunde
+# "engel" gorup HEDEF GONDERMIYOR -> arac su kenarinda duruyor
+# (kullanici bildirimi: "su 1. tabela hatta, suya girmeden duruyor").
+# Cozum rampadakiyle AYNI: bu etapta LIDAR KOR, duz ilerlenir.
+SU_ETABI_BASLATMA_ETABI = 1     # su, 1. tabela hattinda (kullanici tarifi)
+SU_ETABI_BITIS_ETABI = 2        # 2. tabela gorulunce KAPANIR
+# EMNIYET: tabela 2 hic okunamazsa arac SONSUZA KADAR kor kalmasin.
+# Bu sure dolunca etap kendiliginden kapanir ve normal engel kacinma
+# geri gelir - "kor kalmaktansa duran arac" tercih edilir.
+SU_ETABI_AZAMI_SURE_S = 45.0
+
 KAYAR_ENGEL_ETABI = 6
 # *** CANLI OLCUMDE BULUNDU (2026-09-06) ***: model, kamera parkurda
 # degilken bile GUVEN_ESIGI'ni (0.6) asan SAHTE tabela tespitleri
@@ -120,6 +215,31 @@ class TabelaEtapYoneticisi(Node):
         self._stop_tetiklendi = False
         self._stop_bekliyor = False
         self._stop_zamanlayici = None
+        self._sira_index = 0             # BEKLENEN_SIRA icindeki konum
+        self._son_gorulme = {}           # sinif -> en son goruldugu an
+        self._son_aday_zamani = None      # bkz. ADAY_ZAMAN_ASIMI_S
+        self._egim_derece = 0.0          # + burun YUKARI, - burun ASAGI
+        self._parkur1_zamanlayici = None
+        self._hizlanma_aktif = False
+        self._rampa_durum = _R_BOS
+        self._rampa_esik_zamani = None
+        self._rampa_bekleme_zamani = None
+        # /otonom_surus_aktif'in ISTENEN durumu. Bu konu ESKIDEN sadece
+        # olay aninda yayinlaniyordu; Stop duraklamasi sirasinda (False
+        # iken) bu dugum ya da hedef ureten dugum yeniden baslarsa bayrak
+        # False'ta KALIYOR ve arac BIR DAHA HIC HAREKET ETMIYORDU
+        # (kullanici: "stopu okuyunca tamamen duruyor, daha ileri
+        # gitmiyor"). Diger tum bayraklarda (kayar engel, rampa, silah
+        # fazi, hizlanma) 1 Hz tekrar vardi, bunda yoktu - eklendi.
+        self._otonom_surus_istenen = None
+        # Stop icin egim esigi PARAMETRE (tezgah testinde 0.0 yapilip
+        # duz zeminde de Stop kabul ettirilebilsin diye - sahada
+        # STOP_EGIM_ESIGI_DERECE varsayilaniyla calisir).
+        self.declare_parameter('stop_egim_esigi_derece', STOP_EGIM_ESIGI_DERECE)
+        self._stop_egim_esigi = self.get_parameter('stop_egim_esigi_derece').value
+        # NOT: add_on_set_parameters_callback ASAGIDA (silah kapisiyla
+        # birlikte) BIR KEZ kaydediliyor - burada tekrar kaydedilirse ayni
+        # callback her 'param set'te iki kez calisirdi.
         self._rampa_baslangic_pozu = None  # (x, y) - etap 8 hedefi gonderilirken (su an tetiklenmiyor)
 
         self._son_odom = None
@@ -132,6 +252,11 @@ class TabelaEtapYoneticisi(Node):
         self._turret_model_pub = self.create_publisher(Bool, '/turret_model_aktif', 10)
         self._silah_modu_pub = self.create_publisher(String, '/silah_modu', 10)
         self._kayar_engel_pub = self.create_publisher(Bool, '/kayar_engel_etabi', 10)
+        # SU ETABI (bkz. SU_ETABI_BASLATMA_ETABI notu): 1. tabelada acilir,
+        # 2. tabelada (ya da azami sure dolunca) kapanir.
+        self._su_etabi_pub = self.create_publisher(Bool, '/su_etabi', 10)
+        self._su_etabi_aktif = False
+        self._su_etabi_baslangici = None
         # SILAH FAZI BAYRAGI + SURUS MODU (2026-09-06, kullanici istegi:
         # "9 numarayi okuyunca silah otonoma gecsin, arac manuele").
         #
@@ -154,6 +279,11 @@ class TabelaEtapYoneticisi(Node):
         # dugum yana kacmayi BIRAKIR ve duz ilerler (bkz. o dosyadaki
         # RAMPA_ETABI modu). Etap 9+ gorulunce kalkar.
         self._rampa_etabi_pub = self.create_publisher(Bool, '/rampa_etabi', 10)
+        # HIZLANMA PARKURU (2. parkur, 11. tabela ile baslar): surus_koprusu
+        # bu bayragi gorunce PWM tavanini son hiza acar. Rampa gazindan
+        # FARKLI: orada egim sarti da vardi, burada duz yolda tam hiz
+        # istenen davranis.
+        self._hizlanma_pub = self.create_publisher(Bool, '/hizlanma_etabi', 10)
         self._rampa_etabi_aktif = False
         self._silah_fazi_pub = self.create_publisher(Bool, '/silah_fazi_aktif', 10)
         self._surus_modu_pub = self.create_publisher(String, '/surus_modu', 10)
@@ -180,8 +310,11 @@ class TabelaEtapYoneticisi(Node):
         # KACIRIRDI ve kayar engelden kacmaya calisirdi. Bu projede ayni
         # ders /surus_modu ve panel baglanti durumunda da yasandi.
         self.create_timer(1.0, self._kayar_engel_durumunu_tekrarla)
+        self.create_timer(1.0, self._su_etabi_durumunu_tekrarla)
         self.create_timer(1.0, self._silah_fazi_durumunu_tekrarla)
         self.create_timer(1.0, self._rampa_etabi_durumunu_tekrarla)
+        self.create_timer(1.0, self._hizlanma_durumunu_tekrarla)
+        self.create_timer(1.0, self._otonom_surus_durumunu_tekrarla)
 
         self.create_subscription(String, '/tabela_tespit', self._tespit_cb, 10)
         self.create_subscription(String, '/surus_modu', self._mod_cb, 10)
@@ -213,7 +346,17 @@ class TabelaEtapYoneticisi(Node):
             if not self._stop_bekliyor:
                 self._stop_tetiklendi = False
 
+    def _egimi_guncelle(self, msg: Odometry):
+        """Govde ileri ekseninin DUNYA-z bileseni -> egim acisi.
+        Euler cikarmak yerine donme matrisinin 3. satiri (konvansiyondan
+        BAGIMSIZ - bu projede pitch isareti defalarca sorun cikardi)."""
+        q = msg.pose.pose.orientation
+        fz = max(-1.0, min(1.0, 2.0 * (q.x * q.z - q.w * q.y)))
+        self._egim_derece = math.degrees(math.asin(fz))
+
     def _odom_cb(self, msg: Odometry):
+        self._egimi_guncelle(msg)
+        self._rampa_dizisini_isle()
         self._son_odom = msg
 
     def _guncel_poz(self):
@@ -264,6 +407,15 @@ class TabelaEtapYoneticisi(Node):
         self.get_logger().info(f'Gecici durdurma: hedef = guncel pozisyon (x={x:.2f} y={y:.2f})')
 
     def _tespit_cb(self, msg):
+        """Tabela tespiti -> SIRALI durum makinesi.
+
+        Kabul kurallari (bkz. BEKLENEN_SIRA notu):
+          1) Sinif, siradaki BEKLENEN tabela olmali (rastgele/sahte
+             siniflar otomatik elenir).
+          2) ONCEKI tabela TABELA_KAYBOLMA_S boyunca hic gorulmemis
+             olmali - "1 kadrajdan cikmazsa 2'ye gecme".
+          3) Ust uste STOP_DOGRULAMA_ADEDI kare dogrulanmali.
+        """
         veri = msg.data
         if veri == 'YOK' or ':' not in veri:
             self._ardisik_stop_sayaci = 0
@@ -275,49 +427,110 @@ class TabelaEtapYoneticisi(Node):
         except ValueError:
             return
         if guven < GUVEN_ESIGI:
-            self._ardisik_stop_sayaci = 0
             return
 
-        if cls_adi in SAYI_ETAP_HARITASI:
-            self._ardisik_stop_sayaci = 0
-            yeni_etap = SAYI_ETAP_HARITASI[cls_adi]
-            # KAYAR ENGEL KARARI icin ARDISIK DOGRULAMA (bkz. sabitteki not).
-            if yeni_etap == self._son_etap_adayi:
-                self._etap_aday_sayaci += 1
-            else:
-                self._son_etap_adayi = yeni_etap
-                self._etap_aday_sayaci = 1
-            if self._etap_aday_sayaci >= KAYAR_ENGEL_DOGRULAMA_ADEDI:
-                self._kayar_engel_etabini_guncelle(yeni_etap)
-                self._rampa_etabini_guncelle(yeni_etap)
-                self._silah_etaplarini_isle(yeni_etap)
-            if yeni_etap != self._guncel_etap:
-                onceki_etap = self._guncel_etap
-                self._guncel_etap = yeni_etap
-                self._etap_pub.publish(Int32(data=yeni_etap))
-                self.get_logger().info(f'🏁 ETAP {yeni_etap} tabelasi algilandi (güven={guven:.2f})')
-
-                if yeni_etap == ILERI_BASLATMA_ETABI and onceki_etap != ILERI_BASLATMA_ETABI:
-                    self._otonom_surus_pub.publish(Bool(data=True))
-                    self.get_logger().info(
-                        '🧭 Etap 1 tabelasi görüldü - serbest yön takibi (gap-following) BAŞLADI.')
-                # RAMPA TETIKLEMESI GECICI DEVRE DISI (kullanici istegi, 2026-09-01):
-                # if yeni_etap == RAMPA_ETABI and onceki_etap != RAMPA_ETABI:
-                #     self._rampa_cikisini_baslat()
-            return
+        su_an = time.time()
+        # Gorulme zamani HER gecerli tespit icin kaydedilir - sirada
+        # olmasa bile, cunku "onceki tabela hala kadrajda mi" sorusunu
+        # bu tablo yanitliyor.
+        self._son_gorulme[cls_adi] = su_an
 
         if cls_adi == 'EndOfEleven':
-            self._ardisik_stop_sayaci = 0
+            # ARAYUZ GOSTERGESI: telemetri_sistemi.guncel_etap_cb,
+            # /guncel_etap == -2 gorunce "BİTİŞ" yaziyor (Int32 tipi
+            # degismesin diye sentinel kullaniliyor). Bu yayin, tespit
+            # mantigi sirali duruma cevrilirken YANLISLIKLA DUSMUSTU -
+            # arayuzde Stop/BITIS hic gorunmuyordu.
+            self._etap_pub.publish(Int32(data=-2))
+            if self._hizlanma_aktif:
+                self._hizlanma_aktif = False
+                self._hizlanma_pub.publish(Bool(data=False))
+                self.get_logger().warn(
+                    '🏁 PARKUR 2 (HIZLANMA) BITTI - son hiz kapatildi.')
             self._parkur_pub.publish(String(data='TAMAMLANDI'))
-            self.get_logger().info(f'🏁 PARKUR TAMAMLANDI tabelasi algilandi (güven={guven:.2f})')
+            self.get_logger().info(
+                f'🏁 PARKUR TAMAMLANDI tabelasi algilandi (güven={guven:.2f})')
             return
 
+        if self._sira_index >= len(BEKLENEN_SIRA):
+            return  # sira bitti
+        beklenen = BEKLENEN_SIRA[self._sira_index]
+
+        # Beklenen sinifin aday sayaci ZAMAN ASIMIYLA sifirlanir (araya
+        # giren gurultu ile DEGIL - bkz. ADAY_ZAMAN_ASIMI_S notu).
+        if (self._son_aday_zamani is not None
+                and (su_an - self._son_aday_zamani) > ADAY_ZAMAN_ASIMI_S):
+            self._etap_aday_sayaci = 0
+            self._son_etap_adayi = None
+
+        if cls_adi != beklenen:
+            # STOP ISTISNASI: 8+Stop ve 10+Stop yan yana oldugu icin Stop
+            # siradan ONCE gorulebilir. Rampa bolgesindeysek kabul edilir
+            # (bkz. STOP_KABUL_MIN_SIRA_INDEX); degilse yok sayilir.
+            if (cls_adi == 'Stop'
+                    and self._sira_index >= STOP_KABUL_MIN_SIRA_INDEX):
+                self._stop_tespiti_isle(guven)
+                return
+            # Siradaki tabela DEGIL - yok say. SAYAC SIFIRLANMAZ: araya
+            # giren gurultu beklenen tabelanin dogrulamasini bozmamali.
+            return
+
+        # --- KURAL 2: onceki tabela kadrajdan cikti mi? ---
+        if self._sira_index > 0:
+            onceki = BEKLENEN_SIRA[self._sira_index - 1]
+            onceki_gorulme = self._son_gorulme.get(onceki)
+            if (onceki_gorulme is not None
+                    and (su_an - onceki_gorulme) < TABELA_KAYBOLMA_S):
+                # Iki tabela AYNI ANDA kadrajda - oncekinin cikmasini bekle.
+                self.get_logger().info(
+                    '⏸️  %s goruldu ama onceki tabela (%s) hala kadrajda - '
+                    'gecis BEKLETILIYOR.' % (cls_adi, onceki))
+                return
+
+        # --- KURAL 3: ardisik kare dogrulamasi ---
         if cls_adi == 'Stop':
             self._stop_tespiti_isle(guven)
             return
 
-        # Bilinmeyen/ilgisiz sinif - Stop dogrulama zincirini bozar
-        self._ardisik_stop_sayaci = 0
+        if cls_adi == self._son_etap_adayi:
+            self._etap_aday_sayaci += 1
+        else:
+            self._son_etap_adayi = cls_adi
+            self._etap_aday_sayaci = 1
+        self._son_aday_zamani = su_an
+        if self._etap_aday_sayaci < STOP_DOGRULAMA_ADEDI:
+            return
+
+        # DOGRULANDI - siradaki tabelaya gec
+        self._etap_aday_sayaci = 0
+        self._son_etap_adayi = None
+        self._sira_index += 1
+        yeni_etap = SAYI_ETAP_HARITASI[cls_adi]
+        self._guncel_etap = yeni_etap
+        self._etap_pub.publish(Int32(data=yeni_etap))
+        self.get_logger().info(
+            f'🏁 ETAP {yeni_etap} tabelasi DOGRULANDI (güven={guven:.2f}) '
+            f'- sirada: {BEKLENEN_SIRA[self._sira_index] if self._sira_index < len(BEKLENEN_SIRA) else "-"}')
+
+        self._kayar_engel_etabini_guncelle(yeni_etap)
+
+        self._su_etabini_guncelle(yeni_etap)
+        self._rampa_etabini_guncelle(yeni_etap)
+        self._silah_etaplarini_isle(yeni_etap)
+        if yeni_etap == 11 and not self._hizlanma_aktif:
+            # PARKUR 2 (HIZLANMA) BASLADI - son hiz.
+            self._hizlanma_aktif = True
+            self._hizlanma_pub.publish(Bool(data=True))
+            # Parkur 1 bitiminde hedef uretimi kesilmisti - burada GERI
+            # ACILIYOR, yoksa arac 11'i gorse bile hareket etmezdi.
+            self._otonom_surus_ayarla(True)
+            self.get_logger().warn(
+                '🚀 11. TABELA - PARKUR 2 (HIZLANMA) BASLADI, arac SON HIZ '
+                'ile gidecek (EndOfEleven gorulene kadar).')
+        if yeni_etap == ILERI_BASLATMA_ETABI:
+            self._otonom_surus_ayarla(True)
+            self.get_logger().info(
+                '🧭 Etap 1 tabelasi görüldü - otonom ileri hareket BAŞLADI.')
 
     def _silah_etaplarini_isle(self, etap):
         """9. tabela -> silah MODELI calisir; arayuz OTONOM ise ayrica silah
@@ -393,7 +606,7 @@ class TabelaEtapYoneticisi(Node):
         DEGIL, 3 BASARILI ATIS bitirir; on kamera o an geri acilir ve 10.
         tabela ondan SONRA gorulur (bkz. _hedef_vuruldu_cb)."""
         self._gecici_dur()
-        self._otonom_surus_pub.publish(Bool(data=False))
+        self._otonom_surus_ayarla(False)
         # NOT: /turret_model_aktif=True'yu _silah_etaplarini_isle ZATEN
         # yayinladi (model, arayuz MANUEL olsa bile aciliyor). Burada
         # tekrar yayinlamak gereksizdi - kaldirildi.
@@ -414,10 +627,50 @@ class TabelaEtapYoneticisi(Node):
         self._turret_model_pub.publish(Bool(data=False))
         self._silah_modu_pub.publish(String(data='MANUEL'))
         self._tabela_model_pub.publish(Bool(data=True))
-        self._otonom_surus_pub.publish(Bool(data=True))
+        self._otonom_surus_ayarla(True)
         self.get_logger().info(
             '🏁 Silah fazi kapatildi: turret modeli KAPALI, silah MANUEL, '
             'tabela modeli ACIK, otonom surus TEKRAR AKTIF.')
+
+    def _su_etabini_guncelle(self, etap):
+        """Etap 1 -> su etabi ACIK (LIDAR kor); etap 2+ -> KAPALI.
+
+        Kayar engel/rampa ile AYNI desen: etap numarasi geri gitmedigi
+        icin 'etap >= bitis' testi asamanin bittigini guvenle gosterir."""
+        yeni = (etap == SU_ETABI_BASLATMA_ETABI)
+        if etap >= SU_ETABI_BITIS_ETABI:
+            yeni = False
+        if yeni == self._su_etabi_aktif:
+            return
+        self._su_etabi_aktif = yeni
+        self._su_etabi_baslangici = time.time() if yeni else None
+        self._su_etabi_pub.publish(Bool(data=yeni))
+        if yeni:
+            self.get_logger().warn(
+                '💧 SU ETABI BASLADI (etap 1 tabelasi) - LIDAR KOR, duz '
+                'ilerleniyor. Su yuzeyi 2D LIDAR icin DUVAR gibi gorunuyor; '
+                'normal mantik onu dolasmaya calisip su kenarinda duruyordu. '
+                'Emniyet: en gec %.0fsn sonra kendiliginden kapanir.'
+                % SU_ETABI_AZAMI_SURE_S)
+        else:
+            self.get_logger().info(
+                '💧 Su etabi bitti (etap %d goruldu) - normal engel '
+                'kacinma geri geldi.' % etap)
+
+    def _su_etabi_durumunu_tekrarla(self):
+        # EMNIYET ZAMAN ASIMI: 2. tabela hic okunamazsa etabi biz kapatiriz.
+        if (self._su_etabi_aktif and self._su_etabi_baslangici is not None
+                and (time.time() - self._su_etabi_baslangici) >= SU_ETABI_AZAMI_SURE_S):
+            self._su_etabi_aktif = False
+            self._su_etabi_baslangici = None
+            self.get_logger().warn(
+                '💧 Su etabi AZAMI SURE (%.0fsn) doldu - 2. tabela '
+                'okunamadi, LIDAR koru kaldirildi (guvenlik).'
+                % SU_ETABI_AZAMI_SURE_S)
+        try:
+            self._su_etabi_pub.publish(Bool(data=bool(self._su_etabi_aktif)))
+        except Exception:
+            pass
 
     def _kayar_engel_etabini_guncelle(self, etap):
         """Etap 6 -> kayar engel asamasi ACIK; 7 ve sonrasi -> KAPALI.
@@ -443,6 +696,10 @@ class TabelaEtapYoneticisi(Node):
     def _parametre_degisti(self, params):
         from rcl_interfaces.msg import SetParametersResult
         for p in params:
+            if p.name == 'stop_egim_esigi_derece':
+                self._stop_egim_esigi = float(p.value)
+                self.get_logger().warn(
+                    'stop_egim_esigi_derece = %.1f' % self._stop_egim_esigi)
             if p.name == 'silah_otonom_modu_gerektirir':
                 self._silah_otonom_gerekir = bool(p.value)
                 self.get_logger().warn(
@@ -479,20 +736,131 @@ class TabelaEtapYoneticisi(Node):
         self._tabela_model_pub.publish(Bool(data=True))
 
     def _rampa_etabini_guncelle(self, etap):
-        """Etap 8 -> rampa asamasi ACIK; 9 ve sonrasi -> KAPALI."""
-        yeni = (etap == RAMPA_ETABI)
-        if etap > RAMPA_ETABI:
-            yeni = False
-        if yeni == self._rampa_etabi_aktif:
-            return
-        self._rampa_etabi_aktif = yeni
-        self._rampa_etabi_pub.publish(Bool(data=yeni))
-        if yeni:
+        """8 ve 10 tabelalari rampa dizisinin tetigidir.
+
+        Rampa bayragini (LIDAR koru) artik DIZI yonetiyor
+        (_rampa_dizisini_isle) - burada sadece tetik kuruluyor. Onceden
+        bayrak dogrudan 8'de acilip 9'da kapaniyordu; kullanici tarifine
+        gore artik IMU inise gecip dizi tamamlanana kadar acik kalmali."""
+        if etap == RAMPA_ETABI:
+            self._rampa_tetigi_kur('8. tabela')
+        elif etap == 10:
+            self._rampa_tetigi_kur('10. tabela')
+
+    def _rampa_tetigi_kur(self, kaynak):
+        """8 / Stop / 10 gorulunce rampa dizisini baslatir/teyit eder."""
+        if self._rampa_durum == _R_BOS:
+            self._rampa_durum = _R_TIRMANIS_BEKLE
+            # LIDAR KOR: rampanin on yuzu gercek duvar gibi olculuyor ve
+            # nokta atici etrafindan dolasmaya calisiyordu. Bayrak acikken
+            # fan taramasi/engel kirpmasi atlanir, duz ilerlenir.
+            self._rampa_etabi_aktif = True
+            self._rampa_etabi_pub.publish(Bool(data=True))
             self.get_logger().warn(
-                '⛰️ RAMPA ASAMASI BASLADI (etap 8) - arac onundeki dik '
-                'egimden KACMAYACAK, duz ilerleyip tirmanacak.')
-        else:
-            self.get_logger().info('⛰️ Rampa asamasi bitti (etap %d).' % etap)
+                '⛰️ RAMPA DIZISI BASLADI (%s) - LIDAR KOR, duz ilerleniyor. '
+                'IMU +%.0f derece bekleniyor.' % (kaynak, RAMPA_IMU_ESIGI_DERECE))
+        elif self._rampa_durum == _R_INIS_BEKLE:
+            self.get_logger().info(
+                '⛰️ Inis tetigi teyit edildi (%s) - IMU -%.0f derece bekleniyor.'
+                % (kaynak, RAMPA_IMU_ESIGI_DERECE))
+
+    def _rampa_dizisini_isle(self):
+        """IMU egimine gore rampa dizisi (her /odom'da cagrilir)."""
+        if self._surus_modu != 'OTONOM':
+            return
+        su_an = time.time()
+        d = self._rampa_durum
+
+        if d == _R_TIRMANIS_BEKLE:
+            if self._egim_derece >= RAMPA_IMU_ESIGI_DERECE:
+                if self._rampa_esik_zamani is None:
+                    self._rampa_esik_zamani = su_an
+                    self.get_logger().warn(
+                        '⛰️ TIRMANIS ALGILANDI (IMU %.1f derece) - %.0f sn sonra '
+                        'durulacak.' % (self._egim_derece, RAMPA_DURMA_GECIKMESI_S))
+                elif (su_an - self._rampa_esik_zamani) >= RAMPA_DURMA_GECIKMESI_S:
+                    self._rampa_durum = _R_TEPEDE_DUR
+                    self._rampa_bekleme_zamani = su_an
+                    self._rampa_esik_zamani = None
+                    self._gecici_dur()
+                    self._otonom_surus_ayarla(False)
+                    self.get_logger().warn(
+                        '🛑 TIRMANISTA DURULDU (IMU %.1f derece) - %.0f sn '
+                        'bekleniyor.' % (self._egim_derece, RAMPA_BEKLEME_S))
+
+        elif d == _R_TEPEDE_DUR:
+            if (su_an - self._rampa_bekleme_zamani) >= RAMPA_BEKLEME_S:
+                self._rampa_durum = _R_INIS_BEKLE
+                self._otonom_surus_ayarla(True)
+                self.get_logger().warn(
+                    '✅ Tirmanis beklemesi bitti - DEVAM. Simdi IMU -%.0f derece '
+                    '(inis) bekleniyor.' % RAMPA_IMU_ESIGI_DERECE)
+
+        elif d == _R_INIS_BEKLE:
+            if self._egim_derece <= -RAMPA_IMU_ESIGI_DERECE:
+                if self._rampa_esik_zamani is None:
+                    self._rampa_esik_zamani = su_an
+                    self.get_logger().warn(
+                        '⛰️ INIS ALGILANDI (IMU %.1f derece) - %.0f sn sonra '
+                        'durulacak.' % (self._egim_derece, RAMPA_DURMA_GECIKMESI_S))
+                elif (su_an - self._rampa_esik_zamani) >= RAMPA_DURMA_GECIKMESI_S:
+                    self._rampa_durum = _R_ALTTA_DUR
+                    self._rampa_bekleme_zamani = su_an
+                    self._rampa_esik_zamani = None
+                    self._gecici_dur()
+                    self._otonom_surus_ayarla(False)
+                    self.get_logger().warn(
+                        '🛑 INISTE DURULDU (IMU %.1f derece) - %.0f sn '
+                        'bekleniyor.' % (self._egim_derece, RAMPA_BEKLEME_S))
+
+        elif d == _R_ALTTA_DUR:
+            if (su_an - self._rampa_bekleme_zamani) >= RAMPA_BEKLEME_S:
+                self._rampa_durum = _R_BITTI
+                self._otonom_surus_ayarla(True)
+                self._rampa_etabi_aktif = False
+                self._rampa_etabi_pub.publish(Bool(data=False))
+                self.get_logger().warn(
+                    '✅ Inis beklemesi bitti - DEVAM, LIDAR tekrar aktif. '
+                    'PARKUR 1 %.0f sn sonra bitecek.' % PARKUR1_BITIS_ILERLEME_S)
+                self._parkur1_zamanlayici = self.create_timer(
+                    PARKUR1_BITIS_ILERLEME_S, self._parkur1_bitti)
+
+    def _otonom_surus_ayarla(self, deger):
+        """/otonom_surus_aktif'i yayinlar VE istenen durumu saklar
+        (periyodik tekrar icin - bkz. _otonom_surus_istenen notu)."""
+        self._otonom_surus_istenen = bool(deger)
+        self._otonom_surus_pub.publish(Bool(data=bool(deger)))
+
+    def _otonom_surus_durumunu_tekrarla(self):
+        if self._otonom_surus_istenen is None:
+            return  # henuz hic karar verilmedi (etap 1 gorulmedi)
+        try:
+            self._otonom_surus_pub.publish(Bool(data=self._otonom_surus_istenen))
+        except Exception:
+            pass
+
+    def _hizlanma_durumunu_tekrarla(self):
+        try:
+            self._hizlanma_pub.publish(Bool(data=bool(self._hizlanma_aktif)))
+        except Exception:
+            pass
+
+    def _parkur1_bitti(self):
+        """2. Stop beklemesinden sonra PARKUR1_BITIS_ILERLEME_S doldu."""
+        if self._parkur1_zamanlayici is not None:
+            self._parkur1_zamanlayici.cancel()
+            self._parkur1_zamanlayici = None
+        self._parkur_pub.publish(String(data='PARKUR1_TAMAMLANDI'))
+        # ARAC DURUR (2026-09-07, kullanici: "parkur1 bitince de dursun").
+        # Kalici acil-durdurma kilidi DEGIL - operator OTONOM'a basip
+        # devam edebilsin diye sadece hedef uretimi kesiliyor + mevcut
+        # konum hedef yapiliyor. Parkur 2, 11. tabela gorulunce baslar.
+        self._gecici_dur()
+        self._otonom_surus_ayarla(False)
+        self.get_logger().warn(
+            '🏁 PARKUR 1 (ENGEL) TAMAMLANDI - 2. Stop sonrasi %.0f saniye '
+            'ilerlendi, ARAC DURDURULDU. Parkur 2 (HIZLANMA) 11. tabela '
+            'gorulunce baslayacak.' % PARKUR1_BITIS_ILERLEME_S)
 
     def _rampa_etabi_durumunu_tekrarla(self):
         try:
@@ -514,49 +882,40 @@ class TabelaEtapYoneticisi(Node):
                 f'Etap {RAMPA_ETABI} algilandi ama rampa hedefi gonderilemedi (/odom yok)!')
 
     def _stop_tespiti_isle(self, guven):
-        """Stop tabelasi -> araci 3 saniye durdur, sonra otonom devam.
+        """Stop tabelasi -> RAMPA DIZISI tetigi (2026-09-07 kullanici tarifi).
 
-        Silah fazi 9. tabelaya tasindiktan sonra Stop'un tek isi bu kisa
-        duraklama. Durdurma yontemi KALICI acil-durdurma kilidi DEGIL
-        (bkz. dosya sonu notu): mevcut konum hedef olarak yayinlanir
-        (goal_manager "ulasildi" deyip yumusakca durur) VE
-        /otonom_surus_aktif=False ile hedef ureten dugumler susturulur.
-        Ikisi birlikte sart - sadece hedef yayinlamak yetmez, cunku
-        on_bosluk_nokta_atici 0.25 sn sonra yeni bir ileri hedef basip
-        araci yeniden yurutur (ayni ders silah fazinda da yasandi)."""
+        ONCEDEN: Stop gorulunce dogrudan 3 saniye durulurdu. ARTIK Stop
+        sadece "dik egim geliyor" bilgisidir - durus karari IMU'ya bagli
+        (bkz. _rampa_dizisini_isle): IMU +/-15 dereceyi astiktan 2 saniye
+        sonra durulur, 2 saniye beklenir, devam edilir.
+        Sebep: parkurda 8+Stop ve 10+Stop YAN YANA; Stop'un gorulme ani
+        aracin nerede oldugunu SOYLEMEZ, ama IMU soyler.
+        """
         if self._surus_modu != 'OTONOM':
             return
-        if self._stop_bekliyor or self._stop_tetiklendi:
-            return
-
+        su_an_s = time.time()
+        if (getattr(self, '_son_stop_zamani', None) is not None
+                and (su_an_s - self._son_stop_zamani) > ADAY_ZAMAN_ASIMI_S):
+            self._ardisik_stop_sayaci = 0
+        self._son_stop_zamani = su_an_s
         self._ardisik_stop_sayaci += 1
-        self.get_logger().info(
-            f'🛑 Stop tabelasi tespiti {self._ardisik_stop_sayaci}/{STOP_DOGRULAMA_ADEDI} (güven={guven:.2f})'
-        )
         if self._ardisik_stop_sayaci < STOP_DOGRULAMA_ADEDI:
             return
-
-        self._stop_tetiklendi = True
-        self._stop_bekliyor = True
-        self.get_logger().warn(
-            '🛑 STOP TABELASI DOGRULANDI - arac %.0f saniye duruyor.' % STOP_BEKLEME_S)
-        self._gecici_dur()
-        self._otonom_surus_pub.publish(Bool(data=False))
-        # Tek atislik zamanlayici: ROS2'de dogrudan one-shot yok, callback
-        # icinde iptal ediliyor.
-        self._stop_zamanlayici = self.create_timer(
-            STOP_BEKLEME_S, self._stop_beklemesi_bitti)
-
-        if STOP_ILE_SILAH_TETIKLE:
-            # ESKI DAVRANIS (varsayilan KAPALI): Stop silah fazini
-            # baslatirdi. Silah fazi 9. tabelaya tasindi; kod
-            # SILINMEDI, tek satirla geri acilabilir.
-            self._tabela_model_pub.publish(Bool(data=False))
-            self._turret_model_pub.publish(Bool(data=True))
-            self._silah_modu_pub.publish(String(data='OTONOM'))
-            self.get_logger().info('🔫 Silah fazi basladi (Stop tetiklemesi).')
+        self._ardisik_stop_sayaci = 0
+        # ARAYUZ GOSTERGESI: -1 sentinel -> arayuzde "STOP" yazar.
+        self._etap_pub.publish(Int32(data=-1))
+        # Sirada Stop varsa index ilerletilir; Stop sirada DEGILSE (8/10
+        # ile yan yana oldugu icin erken gorulmus olabilir) index'e
+        # DOKUNULMAZ - dizi kilitlenmesin.
+        if (self._sira_index < len(BEKLENEN_SIRA)
+                and BEKLENEN_SIRA[self._sira_index] == 'Stop'):
+            self._sira_index += 1
+        self._rampa_tetigi_kur('Stop')
 
     def _stop_beklemesi_bitti(self):
+        # ARTIK KULLANILMIYOR: Stop dogrudan durdurmuyor, rampa dizisi
+        # (IMU tabanli) durduruyor. Fonksiyon SILINMEDI - Stop'un eski
+        # "3 sn dur" davranisi gerekirse geri acilabilir.
         """3 saniye doldu - otonom surus devam."""
         if self._stop_zamanlayici is not None:
             self._stop_zamanlayici.cancel()
@@ -564,9 +923,19 @@ class TabelaEtapYoneticisi(Node):
         if not self._stop_bekliyor:
             return
         self._stop_bekliyor = False
-        self._otonom_surus_pub.publish(Bool(data=True))
+        self._otonom_surus_ayarla(True)
         self.get_logger().warn(
             '✅ Stop beklemesi bitti (%.0f sn) - OTONOM SURUS DEVAM EDIYOR.' % STOP_BEKLEME_S)
+        # 2. STOP ise: bu noktadan sonra PARKUR1_BITIS_ILERLEME_S kadar
+        # daha ilerlenince PARKUR 1 biter (kullanici tarifi).
+        # _sira_index Stop kabul edilirken 1 artirildigi icin burada
+        # IKINCI_STOP_INDEX+1 degerini gorurüz.
+        if self._sira_index == IKINCI_STOP_INDEX + 1:
+            self.get_logger().info(
+                '⏱️  2. Stop tamamlandi - PARKUR 1 bitisi icin %.0f saniye '
+                'ilerleniyor.' % PARKUR1_BITIS_ILERLEME_S)
+            self._parkur1_zamanlayici = self.create_timer(
+                PARKUR1_BITIS_ILERLEME_S, self._parkur1_bitti)
 
     def _hedef_vuruldu_cb(self, msg: Int32):
         if msg.data < HEDEF_VURULDU_ESIGI:
@@ -592,7 +961,7 @@ class TabelaEtapYoneticisi(Node):
         # bunu VETO olarak kullaniyor. Ates bitince GERI ACILMALI, yoksa
         # arac asagidaki ileri hedefi tamamlayip bir daha hic hedef
         # almaz ve parkurun geri kalaninda hareketsiz kalirdi.
-        self._otonom_surus_pub.publish(Bool(data=True))
+        self._otonom_surus_ayarla(True)
         self._silah_fazi_aktif = False
 
         inis_mesafesi = SON_ILERI_PAY_M

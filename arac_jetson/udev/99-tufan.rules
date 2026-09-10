@@ -1,14 +1,24 @@
-# TUFAN IKA - SABIT CIHAZ ISIMLERI (2026-09-07)
+# TUFAN IKA - SABIT CIHAZ ISIMLERI (2026-09-07, 2026-09-09 saglamlastirildi)
 # Sorun: USB yeniden-numaralandirmasinda LIDAR /dev/ttyUSB0 -> ttyUSB1'e
-# kayiyor ve sllidar_node olmayan bir portu okumaya devam ediyordu
-# (sahada 3 kez yasandi, en son bugun - /scan tamamen sustu).
-# Bu kurallar seri cihazlara DEGISMEZ bir isim verir.
+# kayiyor ve sllidar_node olmayan bir portu okumaya devam ediyordu.
 #
-# KAMERALAR KASITLI OLARAK DAHIL EDILMEDI (kullanici karari, 2026-09-07):
-# "kameralara udev simdilik uygulama". Gerekirse iki C270'in AYNI seri
-# numarasini paylastigi (200901010001) ve bu yuzden ancak FIZIKSEL USB
-# PORT yoluyla ayirt edilebilecekleri unutulmamali.
+# 2026-09-09 DEGISIKLIGI - LIDAR kuralindan ATTRS{serial} KALDIRILDI:
+# 9 Eylul'de adaptor 6 KEZ kendiliginden koptu (dmesg: status -19/ENODEV)
+# ve bu kopmalardan BIRINDE (15:44) /dev/tufan_lidar sembolik baglantisi
+# HIC OLUSMADI - cihaz vardi ama kural eslesmedi. Muhtemel sebep: cok
+# hizli yeniden numaralandirmada 'add' olayi sirasinda serial attribute'u
+# henuz okunabilir degil. VID:PID (10c4:ea60) bu araçta ZATEN TEK (2x
+# Arduino 2341:0042/0043, 2x CubeOrange 2dae:1016 - cakisma yok, canli
+# dogrulandi), yani seri no ek guvenlik saglamiyordu ama kirilganlik
+# ekliyordu. Arduino kurallarinda seri no KALIYOR: orada AYNI VID:PID'den
+# iki cihaz var, ayirt etmek icin gerekli.
+#
+# KAMERALAR KASITLI OLARAK DAHIL DEGIL (kullanici karari 2026-09-07:
+# "kameralara udev simdilik uygulama"). Iki C270 AYNI seri numarasini
+# paylasiyor (200901010001), ancak FIZIKSEL USB PORT yoluyla ayirt
+# edilebilirler - kod bunu /dev/v4l/by-path ile yapiyor (bkz.
+# arka_kamera_node.py::_kamera_kaynagi_bul).
 
-SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{serial}=="484c9fb8a813ec11b9def4ef7a109228", SYMLINK+="tufan_lidar"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", SYMLINK+="tufan_lidar"
 SUBSYSTEM=="tty", ATTRS{idVendor}=="2341", ATTRS{idProduct}=="0043", ATTRS{serial}=="03536373332351B0B270", SYMLINK+="tufan_surus_arduino"
 SUBSYSTEM=="tty", ATTRS{idVendor}=="2341", ATTRS{idProduct}=="0042", ATTRS{serial}=="1453230353235190F1B0", SYMLINK+="tufan_turret_arduino"

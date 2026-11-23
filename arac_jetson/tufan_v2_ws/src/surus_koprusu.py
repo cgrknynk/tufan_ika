@@ -106,7 +106,13 @@ class SurusKoprusu(Node):
         # ilerlemiyor" aninda, kademeli olarak devreye giriyor ve arac
         # hareket eder etmez geri cekiliyor. Yani su/comur/cim/kucuk
         # engel gibi TUM yuksek-direnc durumlarini tek mekanizma cozuyor.
-        self.declare_parameter('takilma_tespiti_aktif', True)
+        # 2026-09-12 VARSAYILAN **KAPALI**: yarisma oncesi guvenlik karari.
+        # Bu ozellik sahada iki kez beklenmedik hizlanmaya karisti (biri
+        # kesin: donus agirlikli komutta gaz acti). Guvenlik sinirlari
+        # eklendi ama SAHADA DOGRULANMADI - dogrulanana kadar kapali.
+        # Suya/comura takilirsa elle acilabilir:
+        #   ros2 param set /surus_koprusu takilma_tespiti_aktif true
+        self.declare_parameter('takilma_tespiti_aktif', False)
         # /odom durağanken TAM 0.0 donuyor (canli olculdu), yani gurultu
         # tabani yok - esik yine de guvenli tarafta tutuldu.
         self.declare_parameter('takilma_hiz_esigi_ms', 0.03)
@@ -122,12 +128,76 @@ class SurusKoprusu(Node):
         self.declare_parameter('takilma_birakma_hizi_ms', 0.10)
         # Hareket basladiktan sonra takviyenin geri cekilme suresi.
         self.declare_parameter('takilma_soguma_s', 1.5)
+        # --- 2026-09-11 GUVENLIK SINIRLARI (SAHADA YASANDI) ---
+        # Arac "hizlanarak olduğu yerde donuyor" halinde bulundu. Log:
+        #   TAKILMA: komut 0.63 m/s ama olculen hiz 0.000 m/s
+        # Takviye DONUS agirlikli komutta da devreye giriyordu; tam gaz
+        # yerinde donmeye donusuyordu. Takviyenin AMACI su/comur/cim gibi
+        # yuksek dirence karsi ILERI itmekti - donus icin degil.
+        # (a) Komut ILERI agirlikli degilse takviye YOK.
+        self.declare_parameter('takilma_ileri_agirlik_orani', 0.6)
+        # (b) Takviye en fazla bu kadar surer; sonra ZORLA kesilir ve
+        #     soguma_s kadar tekrar acilmaz. Kacak gaz sonsuza kadar
+        #     suremesin - "kurtaramiyorsa zorlamak zarar verir".
+        self.declare_parameter('takilma_azami_sure_s', 4.0)
         # INISTE TAKVIYE YOK - GUVENLIK. test_egim_gaz.py bu riski yakaladi:
         # inisde odometri "hareket yok" derse (lazer odometrisi ozelliksiz
         # zeminde/suda yanilabilir) takviye YOKUS ASAGI TAM GAZ verirdi.
         # Zaten inisde ek guce ihtiyac YOK - yercekimi calisiyor; orada
         # takilma varsa sebep engeldir ve tam gaz TEHLIKELIDIR.
         self.declare_parameter('takilma_inis_esigi_derece', -3.0)
+
+        # --- INISTE SABIT MINIMUM HIZ (2026-09-11, kullanici istegi:
+        # "imu assagiya baktiginda minimum hiz ile insin", sonra "90 ile
+        # gitsin") ---
+        # Yokus asagi inerken yercekimi zaten ivmelendiriyor; normal seyir
+        # tavani (110) uygulanirsa arac hizlanarak iniyor ve rampanin
+        # dibinde savrulma/burun vurma riski doguyor. Inis algilaninca
+        # PWM buyuklugu SABIT inis_pwm'e kilitlenir.
+        #
+        # Deger 90 = min_pwm, yani motorun fiziksel olarak donebildigi EN
+        # DUSUK seviye - iniste bundan azi zaten hareket uretmez.
+        #
+        # DIKKAT - TABAN/TAVAN BIRLIKTE AYARLANMALI: _deadzone_uygula
+        # formulu  taban + oran*(tavan - taban)  seklinde. SADECE tavani
+        # dusurmek yetmez; taban min_pwm'de kalirsa ve tavan tabanin
+        # ALTINA inerse formul TERSINE doner (hizlandikca PWM AZALIR).
+        # Bu yuzden iniste taban da tavan da inis_pwm yapilir - buyukluk
+        # her komutta tam olarak inis_pwm olur.
+        #
+        # DIREKSIYON: iki palet de ayni BUYUKLUGU alir, ama ISARET komuttan
+        # gelmeye devam eder - keskin donuste bir palet negatif olabilir,
+        # yani yerinde donme yetkisi KAYBOLMAZ. Sadece oransal direksiyon
+        # (hafif kavis) kaybolur; rampa inisi duz oldugu icin kabul edildi.
+        # --- TABELASIZ DIK ENGEL: IMU TEK BASINA GAZ ACAR (2026-09-11) ---
+        # Kullanici: "dik engel var, dik engelin tabelasini okumayabilir;
+        # onda da IMU'dan dik engeli tirmandigimizi anlayabiliriz, yaklasik
+        # 10 derece falan yukari cikiyor; IMU yukari kalktikca hiz artsin".
+        #
+        # NEDEN AYRI BIR ESIK: rampa gazi (255) TABELA sartina baglanmisti
+        # cunku kullanici "bazen cok hizli gidiyor" demisti - kucuk
+        # tumsekler/egimler (3-5 derece) tam gazi tetiklemesin diye. O
+        # koruma AYNEN DURUYOR. Buraya eklenen, tabeladan BAGIMSIZ bir
+        # esik: gercek bir dik engelde gaz tabela okunmasa bile acilir.
+        # Esik 5 derece (kullanici: "egim 5 derecenin uzerine cikmadikca
+        # hiz artmasin, 5 derece ve uzeri egimlerde hiz artsin").
+        #
+        # ORANTILI: "kalktikca artsin" istendigi icin bu yol ikili (ac/kapa)
+        # degil - esikten itibaren tavan, tam_gaz_derece'ye kadar dogrusal
+        # olarak max_pwm'den egim_max_pwm'e tirmanir.
+        # 2026-09-12 VARSAYILAN **KAPALI**: ayni guvenlik karari. Tabelasiz
+        # dik engelde gaz acmasi ISTENEN davranis ama sahada test
+        # edilmedi; tabela yolu (8. tabela + egim) ZATEN CALISIYOR ve
+        # rampayi cikariyor. Denemek icin:
+        #   ros2 param set /surus_koprusu imu_tek_basina_gaz_aktif true
+        self.declare_parameter('imu_tek_basina_gaz_aktif', False)
+        self.declare_parameter('imu_tek_basina_esigi_derece', 5.0)
+        self.declare_parameter('imu_tam_gaz_derece', 12.0)
+
+        self.declare_parameter('inis_sabit_pwm_aktif', True)
+        self.declare_parameter('inis_pwm', 90.0)
+        # Bu esikten DAHA DIK asagi egimde sabit hiz devreye girer.
+        self.declare_parameter('inis_pwm_esigi_derece', -5.0)
         # SU ETABINDA INIS KILIDI KALKAR (2026-09-09): araç suya INEREK
         # giriyor, yani tam da takviyeye ihtiyac duydugu anda govde asagi
         # egik oluyor ve yukaridaki iniş guvenligi takviyeyi kapatirdi.
@@ -155,8 +225,51 @@ class SurusKoprusu(Node):
         self._takilma_artis = float(self.get_parameter('takilma_artis_pwm_s').value)
         self._takilma_birakma_hizi = float(self.get_parameter('takilma_birakma_hizi_ms').value)
         self._takilma_soguma = float(self.get_parameter('takilma_soguma_s').value)
+        self._takilma_ileri_orani = float(
+            self.get_parameter('takilma_ileri_agirlik_orani').value)
+        self._takilma_azami_sure = float(
+            self.get_parameter('takilma_azami_sure_s').value)
+        self._takviye_basladi = None      # takviyenin ACILDIGI an
+        self._takviye_yasak_bitis = 0.0   # azami sure sonrasi yasak
+
+        # CANLI PARAMETRE DESTEGI (2026-09-11): parametreler acilista bir
+        # kez okunup onbellege aliniyordu; 'ros2 param set' "successful"
+        # diyor ama dugum ESKI degeri kullanmaya devam ediyordu. Sahada
+        # takviyeyi acil kapatmak isterken bu ortaya cikti - komut kabul
+        # edildi, hicbir sey degismedi. Artik degisiklikler onbellege
+        # yansitiliyor.
+        self._param_attr = {
+            'max_pwm': '_max_pwm',
+            'min_pwm': '_min_pwm',
+            'egim_max_pwm': '_egim_max_pwm',
+            'hizlanma_max_pwm': '_hizlanma_max_pwm',
+            'takilma_tespiti_aktif': '_takilma_aktif_ayar',
+            'takilma_hiz_esigi_ms': '_takilma_hiz_esigi',
+            'takilma_suresi_s': '_takilma_suresi',
+            'takilma_max_pwm': '_takilma_max_pwm',
+            'takilma_artis_pwm_s': '_takilma_artis',
+            'takilma_birakma_hizi_ms': '_takilma_birakma_hizi',
+            'takilma_soguma_s': '_takilma_soguma',
+            'takilma_inis_esigi_derece': '_takilma_inis_esigi',
+            'takilma_ileri_agirlik_orani': '_takilma_ileri_orani',
+            'takilma_azami_sure_s': '_takilma_azami_sure',
+            'inis_sabit_pwm_aktif': '_inis_sabit_aktif',
+            'inis_pwm': '_inis_pwm',
+            'inis_pwm_esigi_derece': '_inis_pwm_esigi',
+            'imu_tek_basina_gaz_aktif': '_imu_tek_aktif',
+            'imu_tek_basina_esigi_derece': '_imu_tek_esigi',
+            'imu_tam_gaz_derece': '_imu_tam_gaz',
+        }
         self._takilma_inis_esigi = float(
             self.get_parameter('takilma_inis_esigi_derece').value)
+        self._imu_tek_aktif = bool(self.get_parameter('imu_tek_basina_gaz_aktif').value)
+        self._imu_tek_esigi = float(self.get_parameter('imu_tek_basina_esigi_derece').value)
+        self._imu_tam_gaz = float(self.get_parameter('imu_tam_gaz_derece').value)
+        self._imu_tek_logu = False
+        self._inis_sabit_aktif = bool(self.get_parameter('inis_sabit_pwm_aktif').value)
+        self._inis_pwm = float(self.get_parameter('inis_pwm').value)
+        self._inis_pwm_esigi = float(self.get_parameter('inis_pwm_esigi_derece').value)
+        self._inis_logu = False
         self._takilma_suda_inis = bool(
             self.get_parameter('takilma_su_etabinda_iniste_aktif').value)
         self._su_etabi = False
@@ -192,6 +305,25 @@ class SurusKoprusu(Node):
             'surus_koprusu aktif: SADECE OTONOM modda /cmd_vel_gated dinlenip /palet_hizlari '
             'yayinlanir (MANUEL modda tamamen sessiz kalinir, o konuyu yer istasyonu yonetir)'
         )
+
+
+        # CANLI PARAMETRE DESTEGI (2026-09-11): parametreler acilista bir
+        # kez okunup onbellege aliniyordu; 'ros2 param set' "successful"
+        # diyor ama dugum ESKI degeri kullanmaya devam ediyordu. Sahada
+        # takviyeyi ACIL kapatmak isterken ortaya cikti - komut kabul
+        # edildi, hicbir sey degismedi. Artik onbellege yansitiliyor.
+        self.add_on_set_parameters_callback(self._param_degisti_cb)
+    def _param_degisti_cb(self, params):
+        """ros2 param set ile gelen degisiklikleri onbellege yansitir."""
+        from rcl_interfaces.msg import SetParametersResult
+        for prm in params:
+            attr = self._param_attr.get(prm.name)
+            if attr is None:
+                continue
+            setattr(self, attr, prm.value)
+            self.get_logger().warn('Parametre guncellendi: %s = %s'
+                                   % (prm.name, prm.value))
+        return SetParametersResult(successful=True)
 
     def _mod_cb(self, msg: String):
         yeni_mod = msg.data.strip().upper()
@@ -241,7 +373,7 @@ class SurusKoprusu(Node):
                    self._hizlanma_max_pwm if yeni else self._max_pwm))
         self._hizlanma_etabi = yeni
 
-    def _takviyeyi_guncelle(self, komut_hizi_ms):
+    def _takviyeyi_guncelle(self, komut_hizi_ms, lin_x=None, ang_z=None):
         """Komut var ama arac ilerlemiyorsa PWM tavanina kademeli takviye.
 
         Doner: tavana EKLENECEK PWM miktari (0 = takviye yok).
@@ -260,6 +392,40 @@ class SurusKoprusu(Node):
         self._takviye_zamani = su_an
 
         if not self._takilma_aktif_ayar:
+            return 0.0
+
+        # (a) SADECE ILERI AGIRLIKLI KOMUTTA. Donus bileseni baskinsa
+        # takviye verilmez - yerinde donerken tam gaz TEHLIKELI (sahada
+        # yasandi, bkz. takilma_ileri_agirlik_orani notu).
+        if lin_x is not None and ang_z is not None:
+            ileri = abs(float(lin_x))
+            donus = abs(float(ang_z)) * (self._iz_genisligi / 2.0)
+            toplam = ileri + donus
+            if toplam > 1e-6 and (ileri / toplam) < self._takilma_ileri_orani:
+                self._takilma_baslangici = None
+                self._takviye_pwm = 0.0
+                self._takviye_basladi = None
+                if self._takilma_logu:
+                    self.get_logger().info(
+                        'Komut DONUS agirlikli - takilma takviyesi verilmiyor.')
+                    self._takilma_logu = False
+                return 0.0
+
+        # (b) AZAMI SURE: takviye bu kadar surduyse zorla kesilir ve
+        # soguma boyunca tekrar acilmaz.
+        if self._takviye_basladi is not None and (
+                su_an - self._takviye_basladi) > self._takilma_azami_sure:
+            self.get_logger().warn(
+                'Takilma takviyesi %.0f sn surdu - KESILDI (kurtaramiyor). '
+                '%.0f sn tekrar denenmeyecek.'
+                % (self._takilma_azami_sure, self._takilma_soguma))
+            self._takviye_pwm = 0.0
+            self._takviye_basladi = None
+            self._takilma_baslangici = None
+            self._takilma_logu = False
+            self._takviye_yasak_bitis = su_an + self._takilma_soguma
+            return 0.0
+        if su_an < self._takviye_yasak_bitis:
             return 0.0
 
         # INIS GUVENLIGI (bkz. takilma_inis_esigi_derece): asagi egimde
@@ -296,6 +462,8 @@ class SurusKoprusu(Node):
                 # takilir ve "durup kalkma" nobetlesmesi baslar.
                 azalma = (self._takilma_max_pwm / max(self._takilma_soguma, 0.1)) * dt
                 self._takviye_pwm = max(0.0, self._takviye_pwm - azalma)
+                if self._takviye_pwm == 0.0:
+                    self._takviye_basladi = None
                 if self._takviye_pwm == 0.0 and self._takilma_logu:
                     self.get_logger().info(
                         'Takilma bitti - takviye kapandi, normal seyire donuldu.')
@@ -309,6 +477,8 @@ class SurusKoprusu(Node):
         if (su_an - self._takilma_baslangici) < self._takilma_suresi:
             return self._takviye_pwm
 
+        if self._takviye_basladi is None:
+            self._takviye_basladi = su_an
         self._takviye_pwm = min(self._takviye_pwm + self._takilma_artis * dt,
                                 max(0.0, self._takilma_max_pwm - self._max_pwm))
         if not self._takilma_logu:
@@ -341,7 +511,32 @@ class SurusKoprusu(Node):
             else:
                 self.get_logger().info(
                     'Egim bitti - normal seyir tavanina donuldu (%.0f)' % self._max_pwm)
-        return self._egim_max_pwm if tirmaniyor else self._max_pwm
+        if tirmaniyor:
+            return self._egim_max_pwm
+
+        # TABELASIZ DIK ENGEL (bkz. imu_tek_basina_esigi_derece notu):
+        # tabela gorulmemis olsa bile IMU yeterince yukari kalkmissa gaz
+        # ORANTILI olarak acilir. Tabela YOLU YUKARIDA - oraya girmisse
+        # buraya hic gelinmez, yani iki yol birbirini ezmez.
+        if self._imu_tek_aktif and self._egim_derece >= self._imu_tek_esigi:
+            aralik = max(self._imu_tam_gaz - self._imu_tek_esigi, 0.1)
+            oran = (self._egim_derece - self._imu_tek_esigi) / aralik
+            oran = max(0.0, min(1.0, oran))
+            tavan = self._max_pwm + oran * (self._egim_max_pwm - self._max_pwm)
+            if not self._imu_tek_logu:
+                self._imu_tek_logu = True
+                self.get_logger().warn(
+                    '⛰️ DIK ENGEL (TABELASIZ): IMU %.1f derece >= %.1f - '
+                    'gaz orantili aciliyor (PWM tavani %.0f).'
+                    % (self._egim_derece, self._imu_tek_esigi, tavan))
+            return tavan
+
+        if self._imu_tek_logu:
+            self._imu_tek_logu = False
+            self.get_logger().info(
+                'Dik engel bitti - normal seyir tavanina donuldu (%.0f).'
+                % self._max_pwm)
+        return self._max_pwm
 
     def _canli_mi(self, zaman):
         return zaman is not None and (time.time() - zaman) < self._timeout
@@ -378,23 +573,54 @@ class SurusKoprusu(Node):
         # TAKILMA TAKVIYESI: seyir tavani AYNEN korunur, uzerine sadece
         # "komut var ama arac ilerlemiyor" durumunda ek PWM binder.
         komut_hizi = abs(lin_x) + abs(ang_z) * (self._iz_genisligi / 2.0)
-        tavan = min(tavan + self._takviyeyi_guncelle(komut_hizi),
+        tavan = min(tavan + self._takviyeyi_guncelle(komut_hizi, lin_x, ang_z),
                     self._takilma_max_pwm)
-        sol_pwm = self._deadzone_uygula(sol_ham, tavan)
-        sag_pwm = self._deadzone_uygula(sag_ham, tavan)
+
+        # INISTE SABIT MINIMUM HIZ (bkz. inis_pwm notu). Hizlanma
+        # parkurunda (PARKUR 2) DEVRE DISI - orasi duz hizlanma pisti,
+        # olcum gurultusu yuzunden hafif negatif egim okunursa arac
+        # yarisin ortasinda 85'e dusmemeli.
+        iniste_mi = (self._inis_sabit_aktif
+                     and not self._hizlanma_etabi
+                     and self._egim_derece <= self._inis_pwm_esigi)
+        if iniste_mi != self._inis_logu:
+            self._inis_logu = iniste_mi
+            if iniste_mi:
+                self.get_logger().warn(
+                    '⬇️ INIS (IMU %.1f derece) - SABIT MINIMUM HIZ: PWM %.0f'
+                    % (self._egim_derece, self._inis_pwm))
+            else:
+                self.get_logger().info(
+                    'Inis bitti - normal seyir tavanina donuldu (%.0f).'
+                    % self._max_pwm)
+
+        if iniste_mi:
+            taban = tavan_i = self._inis_pwm
+        else:
+            taban, tavan_i = self._min_pwm, tavan
+
+        sol_pwm = self._deadzone_uygula(sol_ham, tavan_i, taban)
+        sag_pwm = self._deadzone_uygula(sag_ham, tavan_i, taban)
 
         msg = Float32MultiArray()
         msg.data = [float(sol_pwm), float(sag_pwm)]
         self._palet_pub.publish(msg)
 
-    def _deadzone_uygula(self, ham_pwm, tavan=None):
+    def _deadzone_uygula(self, ham_pwm, tavan=None, taban=None):
+        """Sifir olmayan komutu [taban, tavan] araligina yeniden olcekler.
+
+        taban PARAMETRE oldu (2026-09-11): iniste taban=tavan=inis_pwm
+        verilerek buyukluk SABITLENIR. Varsayilan min_pwm - motor bunun
+        altinda fiziksel olarak donmuyor."""
         if abs(ham_pwm) < 1e-6:
             return 0.0
         if tavan is None:
             tavan = self._max_pwm
+        if taban is None:
+            taban = self._min_pwm
         isaret = 1.0 if ham_pwm > 0 else -1.0
         oran = min(abs(ham_pwm) / 255.0, 1.0)
-        olcekli = self._min_pwm + oran * (tavan - self._min_pwm)
+        olcekli = taban + oran * (tavan - taban)
         return isaret * olcekli
 
 

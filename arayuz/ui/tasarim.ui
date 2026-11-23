@@ -1458,9 +1458,9 @@ p, li { white-space: pre-wrap; }
              <widget class="QLabel" name="label_kontrolAyarlariYazi">
               <property name="geometry">
                <rect>
-                <x>60</x>
+                <x>45</x>
                 <y>5</y>
-                <width>351</width>
+                <width>390</width>
                 <height>41</height>
                </rect>
               </property>
@@ -1505,9 +1505,9 @@ p, li { white-space: pre-wrap; }
              <widget class="QLabel" name="label_guvenlikKontrolleriYazi">
               <property name="geometry">
                <rect>
-                <x>30</x>
+                <x>8</x>
                 <y>5</y>
-                <width>411</width>
+                <width>464</width>
                 <height>41</height>
                </rect>
               </property>
@@ -1523,54 +1523,7 @@ p, li { white-space: pre-wrap; }
 }</string>
               </property>
               <property name="text">
-               <string>GÜVENLİK KONTROLLERİ</string>
-              </property>
-             </widget>
-            </widget>
-            <widget class="QFrame" name="frame_goruntuAyarlari">
-             <property name="geometry">
-              <rect>
-               <x>1265</x>
-               <y>150</y>
-               <width>480</width>
-               <height>50</height>
-              </rect>
-             </property>
-             <property name="styleSheet">
-              <string notr="true">QFrame#frame_goruntuAyarlari{
-    background-color: #0A0A12;   /* Neredeyse siyah, çok koyu lacivert/gri zemin */
-    border: 2px solid #00AAFF;   /* İŞTE O PARLAK MAVİ ÇERÇEVE */
-    border-radius: 16px;         /* Köşeler hafif yuvarlak */
-}</string>
-             </property>
-             <property name="frameShape">
-              <enum>QFrame::StyledPanel</enum>
-             </property>
-             <property name="frameShadow">
-              <enum>QFrame::Raised</enum>
-             </property>
-             <widget class="QLabel" name="label_goruntuAyarlari">
-              <property name="geometry">
-               <rect>
-                <x>75</x>
-                <y>5</y>
-                <width>351</width>
-                <height>41</height>
-               </rect>
-              </property>
-              <property name="styleSheet">
-               <string notr="true">QLabel {
-    color: #FFFFFF;
-    font-size: 22px;
-    font-weight: bold;
-    letter-spacing: 5px;           /* Harflerin arasını açtık */
-    border: none;                  /* Çerçeve yok */
-    background-color: transparent; /* Arka plan şeffaf */
-    padding-bottom: 5px;           /* Çizgiyle yazı arasına hafif boşluk */
-}</string>
-              </property>
-              <property name="text">
-               <string>GÖRÜNTÜ AYARLARI</string>
+               <string>S Ü R Ü Ş   A Y A R L A R I</string>
               </property>
              </widget>
             </widget>
@@ -1578,7 +1531,7 @@ p, li { white-space: pre-wrap; }
              <property name="geometry">
               <rect>
                <x>1265</x>
-               <y>460</y>
+               <y>150</y>
                <width>480</width>
                <height>50</height>
               </rect>
@@ -1902,211 +1855,12 @@ QPushButton:checked:hover {
               <bool>true</bool>
              </property>
             </widget>
-            <widget class="QLabel" name="label_VPN">
-             <property name="geometry">
-              <rect>
-               <x>700</x>
-               <y>220</y>
-               <width>101</width>
-               <height>41</height>
-              </rect>
-             </property>
-             <property name="styleSheet">
-              <string notr="true">color: #CCCCCC;        /* Hafif gri/beyaz */
-font-size: 24px;       /* İdeal okuma boyutu */
-font-weight: bold;
-border: none;
-background-color: transparent;</string>
-             </property>
-             <property name="text">
-              <string>V P N :</string>
-             </property>
-            </widget>
-            <widget class="QComboBox" name="comboBox_VPNsecimi">
-             <property name="geometry">
-              <rect>
-               <x>820</x>
-               <y>220</y>
-               <width>341</width>
-               <height>45</height>
-              </rect>
-             </property>
-             <property name="font">
-              <font>
-               <family>Roboto Mono</family>
-               <pointsize>-1</pointsize>
-              </font>
-             </property>
-             <property name="styleSheet">
-              <string notr="true">/* --- 1. ANA COMBOBOX (KAPALI HALİ) --- */
-QComboBox {
-    background-color: #151520;
-    color: #FFFFFF;
-    border: 2px solid #444455;
-    border-radius: 12px;
-    padding: 8px 15px;
-    font-size: 22px;
-    font-family: &quot;Roboto Mono&quot;;
-}
-
-QComboBox:hover {
-    border: 2px solid #00AAFF;
-}
-
-QComboBox::drop-down {
-    border: none;
-    width: 40px;
-}
-
-/* --- 2. AÇILAN LİSTENİN DIŞ KUTUSU --- */
-QComboBox QAbstractItemView {
-    background-color: #151520;
-    border: 2px solid #00AAFF;
-    border-radius: 12px;
-    padding: 6px;         /* İŞTE ÇÖZÜM: Listenin iç duvarlarına 6px yastık koyduk */
-    outline: none;
-}
-
-/* --- 3. LİSTE ELEMANLARI (Türkçe, English) --- */
-QComboBox QAbstractItemView::item {
-    color: #FFFFFF;
-    min-height: 40px;
-    border-radius: 6px;   /* Şıkların da köşelerini yuvarladık */
-}
-
-/* --- 4. SEÇİLİ OLAN ŞIK (Mavi Yanan Kısım) --- */
-QComboBox QAbstractItemView::item:selected {
-    background-color: #00AAFF;
-    color: #FFFFFF;
-    border-radius: 6px;   /* MAVİ SEÇİMİN KÖŞELERİ KESİNLİKLE YUVARLAK OLACAK */
-}
-
-QComboBox QAbstractItemView::item:hover {
-    background-color: #00AAFF;
-    color: #FFFFFF;
-    border-radius: 6px;
-}</string>
-             </property>
-             <item>
-              <property name="text">
-               <string>VPN 1</string>
-              </property>
-             </item>
-             <item>
-              <property name="text">
-               <string>VPN 2</string>
-              </property>
-             </item>
-            </widget>
-            <widget class="QLineEdit" name="lineEdit_kullaniciAdi">
-             <property name="geometry">
-              <rect>
-               <x>700</x>
-               <y>337</y>
-               <width>400</width>
-               <height>45</height>
-              </rect>
-             </property>
-             <property name="styleSheet">
-              <string notr="true">QLineEdit {
-    background-color: #151520;  /* Koyu arka plan */
-    color: #FFFFFF;             /* Yazı rengi beyaz */
-    border: 1px solid #444455;  /* Sönük gri çerçeve */
-    border-radius: 12px;         /* Köşeler hafif yuvarlak */
-    padding: 5px 10px;          /* İçeriden boşluk (ferah dursun) */
-    font-size: 26px;
-    font-family: &quot;Roboto Mono&quot;;
-}
-
-/* Mouse ile içine tıklanıp YAZI YAZILMAYA BAŞLANDIĞINDA (Focus) */
-QLineEdit:focus {
-    border: 1px solid #00AAFF;  /* Çerçeve Mavi Parlasın */
-    background-color: #1A1A25;
-}</string>
-             </property>
-             <property name="text">
-              <string>Admin_Tufan</string>
-             </property>
-            </widget>
-            <widget class="QLabel" name="label_kullaniciAdi">
-             <property name="geometry">
-              <rect>
-               <x>700</x>
-               <y>285</y>
-               <width>271</width>
-               <height>41</height>
-              </rect>
-             </property>
-             <property name="styleSheet">
-              <string notr="true">color: #CCCCCC;        /* Hafif gri/beyaz */
-font-size: 24px;       /* İdeal okuma boyutu */
-font-weight: bold;
-border: none;
-background-color: transparent;</string>
-             </property>
-             <property name="text">
-              <string>K u l l a n ı c ı   A d ı :</string>
-             </property>
-            </widget>
-            <widget class="QLabel" name="label_sifre">
-             <property name="geometry">
-              <rect>
-               <x>700</x>
-               <y>400</y>
-               <width>121</width>
-               <height>41</height>
-              </rect>
-             </property>
-             <property name="styleSheet">
-              <string notr="true">color: #CCCCCC;        /* Hafif gri/beyaz */
-font-size:24px;       /* İdeal okuma boyutu */
-font-weight: bold;
-border: none;
-background-color: transparent;</string>
-             </property>
-             <property name="text">
-              <string>Ş i f r e :</string>
-             </property>
-            </widget>
-            <widget class="QLineEdit" name="lineEdit_sifre">
-             <property name="geometry">
-              <rect>
-               <x>830</x>
-               <y>400</y>
-               <width>350</width>
-               <height>45</height>
-              </rect>
-             </property>
-             <property name="styleSheet">
-              <string notr="true">QLineEdit {
-    background-color: #151520;  /* Koyu arka plan */
-    color: #FFFFFF;             /* Yazı rengi beyaz */
-    border: 1px solid #444455;  /* Sönük gri çerçeve */
-    border-radius: 12px;         /* Köşeler hafif yuvarlak */
-    padding: 5px 10px;          /* İçeriden boşluk (ferah dursun) */
-    font-size: 26px;
-    font-family: &quot;Roboto Mono&quot;;
-}
-
-/* Mouse ile içine tıklanıp YAZI YAZILMAYA BAŞLANDIĞINDA (Focus) */
-QLineEdit:focus {
-    border: 1px solid #00AAFF;  /* Çerçeve Mavi Parlasın */
-    background-color: #1A1A25;
-}</string>
-             </property>
-             <property name="text">
-              <string>Admin_Tufan</string>
-             </property>
-             <property name="echoMode">
-              <enum>QLineEdit::Password</enum>
-             </property>
-            </widget>
             <widget class="QLabel" name="label_telefon">
              <property name="geometry">
               <rect>
                <x>700</x>
-               <y>466</y>
-               <width>171</width>
+               <y>225</y>
+               <width>325</width>
                <height>41</height>
               </rect>
              </property>
@@ -2118,15 +1872,15 @@ border: none;
 background-color: transparent;</string>
              </property>
              <property name="text">
-              <string>T e l e f o n :</string>
+              <string>P W M   H ı z   S ı n ı r ı :</string>
              </property>
             </widget>
             <widget class="QLineEdit" name="lineEdit_kullaniciAdi_2">
              <property name="geometry">
               <rect>
-               <x>880</x>
-               <y>466</y>
-               <width>300</width>
+               <x>1035</x>
+               <y>220</y>
+               <width>190</width>
                <height>45</height>
               </rect>
              </property>
@@ -2155,7 +1909,7 @@ QLineEdit:focus {
              <property name="geometry">
               <rect>
                <x>700</x>
-               <y>530</y>
+               <y>310</y>
                <width>341</width>
                <height>41</height>
               </rect>
@@ -2174,10 +1928,10 @@ background-color: transparent;</string>
             <widget class="QTextEdit" name="textEdit_canliSistemLog">
              <property name="geometry">
               <rect>
-               <x>660</x>
-               <y>590</y>
-               <width>390</width>
-               <height>171</height>
+               <x>700</x>
+               <y>360</y>
+               <width>480</width>
+               <height>400</height>
               </rect>
              </property>
              <property name="styleSheet">
@@ -2200,7 +1954,15 @@ QTextEdit QScrollBar:vertical {
 QTextEdit QScrollBar::handle:vertical {
     background: #444;
     border-radius: 5px;
-}</string>
+}
+
+/* 2026-10-28: kaydirma cubugu 48px kavisin DISINA tasiyordu -
+   ust/alt bosluk birakilip kisaltildi, tutamak yuvarlatildi. */
+QScrollBar:vertical { background: transparent; width: 10px;
+  margin: 26px 4px 26px 0; border: none; }
+QScrollBar::handle:vertical { background: #2E3B52; border-radius: 5px;
+  min-height: 28px; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }</string>
              </property>
              <property name="readOnly">
               <bool>true</bool>
@@ -2413,261 +2175,11 @@ QPushButton:checked:hover {
               <bool>true</bool>
              </property>
             </widget>
-            <widget class="QComboBox" name="comboBox_yayinKalite">
-             <property name="geometry">
-              <rect>
-               <x>1270</x>
-               <y>277</y>
-               <width>350</width>
-               <height>45</height>
-              </rect>
-             </property>
-             <property name="font">
-              <font>
-               <family>Roboto Mono</family>
-               <pointsize>-1</pointsize>
-              </font>
-             </property>
-             <property name="styleSheet">
-              <string notr="true">/* --- 1. ANA COMBOBOX (KAPALI HALİ) --- */
-QComboBox {
-    background-color: #151520;
-    color: #FFFFFF;
-    border: 2px solid #444455;
-    border-radius: 12px;
-    padding: 8px 15px;
-    font-size: 22px;
-    font-family: &quot;Roboto Mono&quot;;
-}
-
-QComboBox:hover {
-    border: 2px solid #00AAFF;
-}
-
-QComboBox::drop-down {
-    border: none;
-    width: 40px;
-}
-
-/* --- 2. AÇILAN LİSTENİN DIŞ KUTUSU --- */
-QComboBox QAbstractItemView {
-    background-color: #151520;
-    border: 2px solid #00AAFF;
-    border-radius: 12px;
-    padding: 6px;         /* İŞTE ÇÖZÜM: Listenin iç duvarlarına 6px yastık koyduk */
-    outline: none;
-}
-
-/* --- 3. LİSTE ELEMANLARI (Türkçe, English) --- */
-QComboBox QAbstractItemView::item {
-    color: #FFFFFF;
-    min-height: 40px;
-    border-radius: 6px;   /* Şıkların da köşelerini yuvarladık */
-}
-
-/* --- 4. SEÇİLİ OLAN ŞIK (Mavi Yanan Kısım) --- */
-QComboBox QAbstractItemView::item:selected {
-    background-color: #00AAFF;
-    color: #FFFFFF;
-    border-radius: 6px;   /* MAVİ SEÇİMİN KÖŞELERİ KESİNLİKLE YUVARLAK OLACAK */
-}
-
-QComboBox QAbstractItemView::item:hover {
-    background-color: #00AAFF;
-    color: #FFFFFF;
-    border-radius: 6px;
-}</string>
-             </property>
-             <item>
-              <property name="text">
-               <string>1080p - Yüksek</string>
-              </property>
-             </item>
-             <item>
-              <property name="text">
-               <string>720p - Orta</string>
-              </property>
-             </item>
-             <item>
-              <property name="text">
-               <string>480p - Düşük</string>
-              </property>
-             </item>
-            </widget>
-            <widget class="QLabel" name="label_yayinKalite">
-             <property name="geometry">
-              <rect>
-               <x>1270</x>
-               <y>225</y>
-               <width>301</width>
-               <height>41</height>
-              </rect>
-             </property>
-             <property name="styleSheet">
-              <string notr="true">color: #CCCCCC;        /* Hafif gri/beyaz */
-font-size: 24px;       /* İdeal okuma boyutu */
-font-weight: bold;
-border: none;
-background-color: transparent;</string>
-             </property>
-             <property name="text">
-              <string>Y a y ı n   K a l i t e s i :</string>
-             </property>
-            </widget>
-            <widget class="QLabel" name="label_FPS">
-             <property name="geometry">
-              <rect>
-               <x>1270</x>
-               <y>337</y>
-               <width>301</width>
-               <height>41</height>
-              </rect>
-             </property>
-             <property name="styleSheet">
-              <string notr="true">color: #CCCCCC;        /* Hafif gri/beyaz */
-font-size: 24px;       /* İdeal okuma boyutu */
-font-weight: bold;
-border: none;
-background-color: transparent;</string>
-             </property>
-             <property name="text">
-              <string>F P S   S ı n ı r ı :</string>
-             </property>
-            </widget>
-            <widget class="QComboBox" name="comboBox_FPS">
-             <property name="geometry">
-              <rect>
-               <x>1270</x>
-               <y>382</y>
-               <width>350</width>
-               <height>45</height>
-              </rect>
-             </property>
-             <property name="font">
-              <font>
-               <family>Roboto Mono</family>
-               <pointsize>-1</pointsize>
-              </font>
-             </property>
-             <property name="styleSheet">
-              <string notr="true">/* --- 1. ANA COMBOBOX (KAPALI HALİ) --- */
-QComboBox {
-    background-color: #151520;
-    color: #FFFFFF;
-    border: 2px solid #444455;
-    border-radius: 12px;
-    padding: 8px 15px;
-    font-size: 22px;
-    font-family: &quot;Roboto Mono&quot;;
-}
-
-QComboBox:hover {
-    border: 2px solid #00AAFF;
-}
-
-QComboBox::drop-down {
-    border: none;
-    width: 40px;
-}
-
-/* --- 2. AÇILAN LİSTENİN DIŞ KUTUSU --- */
-QComboBox QAbstractItemView {
-    background-color: #151520;
-    border: 2px solid #00AAFF;
-    border-radius: 12px;
-    padding: 6px;         /* İŞTE ÇÖZÜM: Listenin iç duvarlarına 6px yastık koyduk */
-    outline: none;
-}
-
-/* --- 3. LİSTE ELEMANLARI (Türkçe, English) --- */
-QComboBox QAbstractItemView::item {
-    color: #FFFFFF;
-    min-height: 40px;
-    border-radius: 6px;   /* Şıkların da köşelerini yuvarladık */
-}
-
-/* --- 4. SEÇİLİ OLAN ŞIK (Mavi Yanan Kısım) --- */
-QComboBox QAbstractItemView::item:selected {
-    background-color: #00AAFF;
-    color: #FFFFFF;
-    border-radius: 6px;   /* MAVİ SEÇİMİN KÖŞELERİ KESİNLİKLE YUVARLAK OLACAK */
-}
-
-QComboBox QAbstractItemView::item:hover {
-    background-color: #00AAFF;
-    color: #FFFFFF;
-    border-radius: 6px;
-}</string>
-             </property>
-             <item>
-              <property name="text">
-               <string>60 Kare/sn</string>
-              </property>
-             </item>
-             <item>
-              <property name="text">
-               <string>30 Kare/sn</string>
-              </property>
-             </item>
-            </widget>
-            <widget class="QLineEdit" name="lineEdit_hedefKlasor">
-             <property name="geometry">
-              <rect>
-               <x>1270</x>
-               <y>573</y>
-               <width>350</width>
-               <height>45</height>
-              </rect>
-             </property>
-             <property name="styleSheet">
-              <string notr="true">QLineEdit {
-    background-color: #151520;  /* Koyu arka plan */
-    color: #FFFFFF;             /* Yazı rengi beyaz */
-    border: 1px solid #444455;  /* Sönük gri çerçeve */
-    border-radius: 12px;         /* Köşeler hafif yuvarlak */
-    padding: 5px 10px;          /* İçeriden boşluk (ferah dursun) */
-    font-size: 26px;
-    font-family: &quot;Roboto Mono&quot;;
-}
-
-/* Mouse ile içine tıklanıp YAZI YAZILMAYA BAŞLANDIĞINDA (Focus) */
-QLineEdit:focus {
-    border: 1px solid #00AAFF;  /* Çerçeve Mavi Parlasın */
-    background-color: #1A1A25;
-}</string>
-             </property>
-             <property name="text">
-              <string>/home/tufan/rec</string>
-             </property>
-             <property name="echoMode">
-              <enum>QLineEdit::Normal</enum>
-             </property>
-            </widget>
-            <widget class="QLabel" name="label_hedefKlasor">
-             <property name="geometry">
-              <rect>
-               <x>1270</x>
-               <y>529</y>
-               <width>281</width>
-               <height>41</height>
-              </rect>
-             </property>
-             <property name="styleSheet">
-              <string notr="true">color: #CCCCCC;        /* Hafif gri/beyaz */
-font-size: 24px;       /* İdeal okuma boyutu */
-font-weight: bold;
-border: none;
-background-color: transparent;</string>
-             </property>
-             <property name="text">
-              <string>H e d e f   K l a s ö r :</string>
-             </property>
-            </widget>
             <widget class="QLabel" name="label_sifreleme">
              <property name="geometry">
               <rect>
                <x>1270</x>
-               <y>635</y>
+               <y>225</y>
                <width>211</width>
                <height>41</height>
               </rect>
@@ -2687,7 +2199,7 @@ background-color: transparent;</string>
              <property name="geometry">
               <rect>
                <x>1520</x>
-               <y>635</y>
+               <y>222</y>
                <width>130</width>
                <height>40</height>
               </rect>
@@ -2756,7 +2268,7 @@ QPushButton:checked:hover {
              <property name="geometry">
               <rect>
                <x>1270</x>
-               <y>699</y>
+               <y>300</y>
                <width>450</width>
                <height>50</height>
               </rect>

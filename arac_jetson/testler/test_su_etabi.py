@@ -43,8 +43,15 @@ i_inis = kaynak.index('if egim_on < -egim_esigi:')
 i_rampa = kaynak.index('if self._rampa_etabi:')
 kontrol("su etabi TIRMANMA'dan once", i_su < i_tirmanma, True)
 kontrol("su etabi INIS'ten once", i_su < i_inis, True)
-kontrol("rampa etabi hala egim modlarindan SONRA (bozulmadi)",
-        i_rampa > i_inis, True)
+# 2026-09-11 DEGISTI: rampa etabi korlugu egim modlarindan ONCE'ye
+# alindi. Eskiden SONRAYDI ve INISTE kiriliyordu - govde asagi egilince
+# INIS modu devraliyor, zemini "duvar" gorup hedef uretmiyordu
+# (kullanici: "dik egimin inisinde de zemini duvar olarak gorebilir").
+# Su etabinda YASANAN VE AYNI SEKILDE COZULEN ariza. Rampa etabinin
+# tanimi zaten "LIDAR KOR, duz ilerle".
+kontrol("rampa etabi artik egim modlarindan ONCE (inis korlugu)",
+        i_rampa < i_inis and i_rampa < i_tirmanma, True)
+kontrol("su etabi hala rampa'dan da once", i_su < i_rampa, True)
 kontrol("su etabinda engel kirpmasi YOK",
         'engel kirpmasi YOK - suya duz giris' in kaynak, True)
 

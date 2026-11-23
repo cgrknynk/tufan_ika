@@ -1,0 +1,11 @@
+tmux has-session -t tufan_ana_terminal 2>/dev/null || tmux new-session -d -s tufan_ana_terminal
+tmux send-keys -t tufan_ana_terminal 'export ROS_DOMAIN_ID=77 && cd ~/Desktop/tufan_v2_ws && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch tufan_v2_ws tufan_mppi.launch.py' Enter
+
+
+durdurma
+tmux send-keys -t tufan_ana_terminal C-c
+
+
+kontrol 
+pgrep -f '[b]in/ros2 launch tufan_v2_ws' >/dev/null && echo CALISIYOR || echo KAPALI
+tmux attach -t tufan_ana_terminal      # logları canlı izle (çıkmak için Ctrl-B sonra D)

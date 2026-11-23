@@ -656,7 +656,7 @@ class Ui_MainWindow(object):
         self.frame_kontrolAyarlari.setFrameShadow(QtWidgets.QFrame.Raised)
         self.frame_kontrolAyarlari.setObjectName("frame_kontrolAyarlari")
         self.label_kontrolAyarlariYazi = QtWidgets.QLabel(self.frame_kontrolAyarlari)
-        self.label_kontrolAyarlariYazi.setGeometry(QtCore.QRect(60, 5, 351, 41))
+        self.label_kontrolAyarlariYazi.setGeometry(QtCore.QRect(45, 5, 390, 41))
         self.label_kontrolAyarlariYazi.setStyleSheet("QLabel {\n"
 "    color: #FFFFFF;\n"
 "    font-size: 24px;\n"
@@ -678,7 +678,7 @@ class Ui_MainWindow(object):
         self.frame_guvenlikKontrolleri.setFrameShadow(QtWidgets.QFrame.Raised)
         self.frame_guvenlikKontrolleri.setObjectName("frame_guvenlikKontrolleri")
         self.label_guvenlikKontrolleriYazi = QtWidgets.QLabel(self.frame_guvenlikKontrolleri)
-        self.label_guvenlikKontrolleriYazi.setGeometry(QtCore.QRect(30, 5, 411, 41))
+        self.label_guvenlikKontrolleriYazi.setGeometry(QtCore.QRect(8, 5, 464, 41))
         self.label_guvenlikKontrolleriYazi.setStyleSheet("QLabel {\n"
 "    color: #FFFFFF;\n"
 "    font-size: 22px;\n"
@@ -689,30 +689,8 @@ class Ui_MainWindow(object):
 "    padding-bottom: 5px;           /* Çizgiyle yazı arasına hafif boşluk */\n"
 "}")
         self.label_guvenlikKontrolleriYazi.setObjectName("label_guvenlikKontrolleriYazi")
-        self.frame_goruntuAyarlari = QtWidgets.QFrame(self.page_ayarlar)
-        self.frame_goruntuAyarlari.setGeometry(QtCore.QRect(1265, 150, 480, 50))
-        self.frame_goruntuAyarlari.setStyleSheet("QFrame#frame_goruntuAyarlari{\n"
-"    background-color: #0A0A12;   /* Neredeyse siyah, çok koyu lacivert/gri zemin */\n"
-"    border: 2px solid #00AAFF;   /* İŞTE O PARLAK MAVİ ÇERÇEVE */\n"
-"    border-radius: 16px;         /* Köşeler hafif yuvarlak */\n"
-"}")
-        self.frame_goruntuAyarlari.setFrameShape(QtWidgets.QFrame.StyledPanel)
-        self.frame_goruntuAyarlari.setFrameShadow(QtWidgets.QFrame.Raised)
-        self.frame_goruntuAyarlari.setObjectName("frame_goruntuAyarlari")
-        self.label_goruntuAyarlari = QtWidgets.QLabel(self.frame_goruntuAyarlari)
-        self.label_goruntuAyarlari.setGeometry(QtCore.QRect(75, 5, 351, 41))
-        self.label_goruntuAyarlari.setStyleSheet("QLabel {\n"
-"    color: #FFFFFF;\n"
-"    font-size: 22px;\n"
-"    font-weight: bold;\n"
-"    letter-spacing: 5px;           /* Harflerin arasını açtık */\n"
-"    border: none;                  /* Çerçeve yok */\n"
-"    background-color: transparent; /* Arka plan şeffaf */\n"
-"    padding-bottom: 5px;           /* Çizgiyle yazı arasına hafif boşluk */\n"
-"}")
-        self.label_goruntuAyarlari.setObjectName("label_goruntuAyarlari")
         self.frame_veriYedekleme = QtWidgets.QFrame(self.page_ayarlar)
-        self.frame_veriYedekleme.setGeometry(QtCore.QRect(1265, 460, 480, 50))
+        self.frame_veriYedekleme.setGeometry(QtCore.QRect(1265, 150, 480, 50))
         self.frame_veriYedekleme.setStyleSheet("QFrame#frame_veriYedekleme{\n"
 "    background-color: #0A0A12;   /* Neredeyse siyah, çok koyu lacivert/gri zemin */\n"
 "    border: 2px solid #00AAFF;   /* İŞTE O PARLAK MAVİ ÇERÇEVE */\n"
@@ -913,126 +891,8 @@ class Ui_MainWindow(object):
         self.pushButton_bildirimler.setCheckable(True)
         self.pushButton_bildirimler.setChecked(True)
         self.pushButton_bildirimler.setObjectName("pushButton_bildirimler")
-        self.label_VPN = QtWidgets.QLabel(self.page_ayarlar)
-        self.label_VPN.setGeometry(QtCore.QRect(700, 220, 101, 41))
-        self.label_VPN.setStyleSheet("color: #CCCCCC;        /* Hafif gri/beyaz */\n"
-"font-size: 24px;       /* İdeal okuma boyutu */\n"
-"font-weight: bold;\n"
-"border: none;\n"
-"background-color: transparent;")
-        self.label_VPN.setObjectName("label_VPN")
-        self.comboBox_VPNsecimi = QtWidgets.QComboBox(self.page_ayarlar)
-        self.comboBox_VPNsecimi.setGeometry(QtCore.QRect(820, 220, 341, 45))
-        font = QtGui.QFont()
-        font.setFamily("Roboto Mono")
-        font.setPointSize(-1)
-        self.comboBox_VPNsecimi.setFont(font)
-        self.comboBox_VPNsecimi.setStyleSheet("/* --- 1. ANA COMBOBOX (KAPALI HALİ) --- */\n"
-"QComboBox {\n"
-"    background-color: #151520;\n"
-"    color: #FFFFFF;\n"
-"    border: 2px solid #444455;\n"
-"    border-radius: 12px;\n"
-"    padding: 8px 15px;\n"
-"    font-size: 22px;\n"
-"    font-family: \"Roboto Mono\";\n"
-"}\n"
-"\n"
-"QComboBox:hover {\n"
-"    border: 2px solid #00AAFF;\n"
-"}\n"
-"\n"
-"QComboBox::drop-down {\n"
-"    border: none;\n"
-"    width: 40px;\n"
-"}\n"
-"\n"
-"/* --- 2. AÇILAN LİSTENİN DIŞ KUTUSU --- */\n"
-"QComboBox QAbstractItemView {\n"
-"    background-color: #151520;\n"
-"    border: 2px solid #00AAFF;\n"
-"    border-radius: 12px;\n"
-"    padding: 6px;         /* İŞTE ÇÖZÜM: Listenin iç duvarlarına 6px yastık koyduk */\n"
-"    outline: none;\n"
-"}\n"
-"\n"
-"/* --- 3. LİSTE ELEMANLARI (Türkçe, English) --- */\n"
-"QComboBox QAbstractItemView::item {\n"
-"    color: #FFFFFF;\n"
-"    min-height: 40px;\n"
-"    border-radius: 6px;   /* Şıkların da köşelerini yuvarladık */\n"
-"}\n"
-"\n"
-"/* --- 4. SEÇİLİ OLAN ŞIK (Mavi Yanan Kısım) --- */\n"
-"QComboBox QAbstractItemView::item:selected {\n"
-"    background-color: #00AAFF;\n"
-"    color: #FFFFFF;\n"
-"    border-radius: 6px;   /* MAVİ SEÇİMİN KÖŞELERİ KESİNLİKLE YUVARLAK OLACAK */\n"
-"}\n"
-"\n"
-"QComboBox QAbstractItemView::item:hover {\n"
-"    background-color: #00AAFF;\n"
-"    color: #FFFFFF;\n"
-"    border-radius: 6px;\n"
-"}")
-        self.comboBox_VPNsecimi.setObjectName("comboBox_VPNsecimi")
-        self.comboBox_VPNsecimi.addItem("")
-        self.comboBox_VPNsecimi.addItem("")
-        self.lineEdit_kullaniciAdi = QtWidgets.QLineEdit(self.page_ayarlar)
-        self.lineEdit_kullaniciAdi.setGeometry(QtCore.QRect(700, 337, 400, 45))
-        self.lineEdit_kullaniciAdi.setStyleSheet("QLineEdit {\n"
-"    background-color: #151520;  /* Koyu arka plan */\n"
-"    color: #FFFFFF;             /* Yazı rengi beyaz */\n"
-"    border: 1px solid #444455;  /* Sönük gri çerçeve */\n"
-"    border-radius: 12px;         /* Köşeler hafif yuvarlak */\n"
-"    padding: 5px 10px;          /* İçeriden boşluk (ferah dursun) */\n"
-"    font-size: 26px;\n"
-"    font-family: \"Roboto Mono\";\n"
-"}\n"
-"\n"
-"/* Mouse ile içine tıklanıp YAZI YAZILMAYA BAŞLANDIĞINDA (Focus) */\n"
-"QLineEdit:focus {\n"
-"    border: 1px solid #00AAFF;  /* Çerçeve Mavi Parlasın */\n"
-"    background-color: #1A1A25;\n"
-"}")
-        self.lineEdit_kullaniciAdi.setObjectName("lineEdit_kullaniciAdi")
-        self.label_kullaniciAdi = QtWidgets.QLabel(self.page_ayarlar)
-        self.label_kullaniciAdi.setGeometry(QtCore.QRect(700, 285, 271, 41))
-        self.label_kullaniciAdi.setStyleSheet("color: #CCCCCC;        /* Hafif gri/beyaz */\n"
-"font-size: 24px;       /* İdeal okuma boyutu */\n"
-"font-weight: bold;\n"
-"border: none;\n"
-"background-color: transparent;")
-        self.label_kullaniciAdi.setObjectName("label_kullaniciAdi")
-        self.label_sifre = QtWidgets.QLabel(self.page_ayarlar)
-        self.label_sifre.setGeometry(QtCore.QRect(700, 400, 121, 41))
-        self.label_sifre.setStyleSheet("color: #CCCCCC;        /* Hafif gri/beyaz */\n"
-"font-size:24px;       /* İdeal okuma boyutu */\n"
-"font-weight: bold;\n"
-"border: none;\n"
-"background-color: transparent;")
-        self.label_sifre.setObjectName("label_sifre")
-        self.lineEdit_sifre = QtWidgets.QLineEdit(self.page_ayarlar)
-        self.lineEdit_sifre.setGeometry(QtCore.QRect(830, 400, 350, 45))
-        self.lineEdit_sifre.setStyleSheet("QLineEdit {\n"
-"    background-color: #151520;  /* Koyu arka plan */\n"
-"    color: #FFFFFF;             /* Yazı rengi beyaz */\n"
-"    border: 1px solid #444455;  /* Sönük gri çerçeve */\n"
-"    border-radius: 12px;         /* Köşeler hafif yuvarlak */\n"
-"    padding: 5px 10px;          /* İçeriden boşluk (ferah dursun) */\n"
-"    font-size: 26px;\n"
-"    font-family: \"Roboto Mono\";\n"
-"}\n"
-"\n"
-"/* Mouse ile içine tıklanıp YAZI YAZILMAYA BAŞLANDIĞINDA (Focus) */\n"
-"QLineEdit:focus {\n"
-"    border: 1px solid #00AAFF;  /* Çerçeve Mavi Parlasın */\n"
-"    background-color: #1A1A25;\n"
-"}")
-        self.lineEdit_sifre.setEchoMode(QtWidgets.QLineEdit.Password)
-        self.lineEdit_sifre.setObjectName("lineEdit_sifre")
         self.label_telefon = QtWidgets.QLabel(self.page_ayarlar)
-        self.label_telefon.setGeometry(QtCore.QRect(700, 466, 171, 41))
+        self.label_telefon.setGeometry(QtCore.QRect(700, 225, 325, 41))
         self.label_telefon.setStyleSheet("color: #CCCCCC;        /* Hafif gri/beyaz */\n"
 "font-size: 24px;       /* İdeal okuma boyutu */\n"
 "font-weight: bold;\n"
@@ -1040,7 +900,7 @@ class Ui_MainWindow(object):
 "background-color: transparent;")
         self.label_telefon.setObjectName("label_telefon")
         self.lineEdit_kullaniciAdi_2 = QtWidgets.QLineEdit(self.page_ayarlar)
-        self.lineEdit_kullaniciAdi_2.setGeometry(QtCore.QRect(880, 466, 300, 45))
+        self.lineEdit_kullaniciAdi_2.setGeometry(QtCore.QRect(1035, 220, 190, 45))
         self.lineEdit_kullaniciAdi_2.setStyleSheet("QLineEdit {\n"
 "    background-color: #151520;  /* Koyu arka plan */\n"
 "    color: #FFFFFF;             /* Yazı rengi beyaz */\n"
@@ -1059,7 +919,7 @@ class Ui_MainWindow(object):
         self.lineEdit_kullaniciAdi_2.setText("")
         self.lineEdit_kullaniciAdi_2.setObjectName("lineEdit_kullaniciAdi_2")
         self.label_canliSistemLog = QtWidgets.QLabel(self.page_ayarlar)
-        self.label_canliSistemLog.setGeometry(QtCore.QRect(700, 530, 341, 41))
+        self.label_canliSistemLog.setGeometry(QtCore.QRect(700, 310, 341, 41))
         self.label_canliSistemLog.setStyleSheet("color: #CCCCCC;        /* Hafif gri/beyaz */\n"
 "font-size: 24px;       /* İdeal okuma boyutu */\n"
 "font-weight: bold;\n"
@@ -1067,7 +927,7 @@ class Ui_MainWindow(object):
 "background-color: transparent;")
         self.label_canliSistemLog.setObjectName("label_canliSistemLog")
         self.textEdit_canliSistemLog = QtWidgets.QTextEdit(self.page_ayarlar)
-        self.textEdit_canliSistemLog.setGeometry(QtCore.QRect(660, 590, 390, 171))
+        self.textEdit_canliSistemLog.setGeometry(QtCore.QRect(700, 360, 480, 400))
         self.textEdit_canliSistemLog.setStyleSheet("QTextEdit {\n"
 "    background-color: #05050A;     /* Simsiyah, derin terminal arka planı */\n"
 "    color: #00FF00;                /* Neon / Hacker Yeşili yazı rengi */\n"
@@ -1087,7 +947,15 @@ class Ui_MainWindow(object):
 "QTextEdit QScrollBar::handle:vertical {\n"
 "    background: #444;\n"
 "    border-radius: 5px;\n"
-"}")
+"}\n"
+"\n"
+"/* 2026-10-28: kaydirma cubugu 48px kavisin DISINA tasiyordu -\n"
+"   ust/alt bosluk birakilip kisaltildi, tutamak yuvarlatildi. */\n"
+"QScrollBar:vertical { background: transparent; width: 10px;\n"
+"  margin: 26px 4px 26px 0; border: none; }\n"
+"QScrollBar::handle:vertical { background: #2E3B52; border-radius: 5px;\n"
+"  min-height: 28px; }\n"
+"QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }")
         self.textEdit_canliSistemLog.setReadOnly(True)
         self.textEdit_canliSistemLog.setObjectName("textEdit_canliSistemLog")
         self.label_joystick = QtWidgets.QLabel(self.page_ayarlar)
@@ -1196,166 +1064,8 @@ class Ui_MainWindow(object):
         self.pushButton_klavye.setCheckable(True)
         self.pushButton_klavye.setChecked(True)
         self.pushButton_klavye.setObjectName("pushButton_klavye")
-        self.comboBox_yayinKalite = QtWidgets.QComboBox(self.page_ayarlar)
-        self.comboBox_yayinKalite.setGeometry(QtCore.QRect(1270, 277, 350, 45))
-        font = QtGui.QFont()
-        font.setFamily("Roboto Mono")
-        font.setPointSize(-1)
-        self.comboBox_yayinKalite.setFont(font)
-        self.comboBox_yayinKalite.setStyleSheet("/* --- 1. ANA COMBOBOX (KAPALI HALİ) --- */\n"
-"QComboBox {\n"
-"    background-color: #151520;\n"
-"    color: #FFFFFF;\n"
-"    border: 2px solid #444455;\n"
-"    border-radius: 12px;\n"
-"    padding: 8px 15px;\n"
-"    font-size: 22px;\n"
-"    font-family: \"Roboto Mono\";\n"
-"}\n"
-"\n"
-"QComboBox:hover {\n"
-"    border: 2px solid #00AAFF;\n"
-"}\n"
-"\n"
-"QComboBox::drop-down {\n"
-"    border: none;\n"
-"    width: 40px;\n"
-"}\n"
-"\n"
-"/* --- 2. AÇILAN LİSTENİN DIŞ KUTUSU --- */\n"
-"QComboBox QAbstractItemView {\n"
-"    background-color: #151520;\n"
-"    border: 2px solid #00AAFF;\n"
-"    border-radius: 12px;\n"
-"    padding: 6px;         /* İŞTE ÇÖZÜM: Listenin iç duvarlarına 6px yastık koyduk */\n"
-"    outline: none;\n"
-"}\n"
-"\n"
-"/* --- 3. LİSTE ELEMANLARI (Türkçe, English) --- */\n"
-"QComboBox QAbstractItemView::item {\n"
-"    color: #FFFFFF;\n"
-"    min-height: 40px;\n"
-"    border-radius: 6px;   /* Şıkların da köşelerini yuvarladık */\n"
-"}\n"
-"\n"
-"/* --- 4. SEÇİLİ OLAN ŞIK (Mavi Yanan Kısım) --- */\n"
-"QComboBox QAbstractItemView::item:selected {\n"
-"    background-color: #00AAFF;\n"
-"    color: #FFFFFF;\n"
-"    border-radius: 6px;   /* MAVİ SEÇİMİN KÖŞELERİ KESİNLİKLE YUVARLAK OLACAK */\n"
-"}\n"
-"\n"
-"QComboBox QAbstractItemView::item:hover {\n"
-"    background-color: #00AAFF;\n"
-"    color: #FFFFFF;\n"
-"    border-radius: 6px;\n"
-"}")
-        self.comboBox_yayinKalite.setObjectName("comboBox_yayinKalite")
-        self.comboBox_yayinKalite.addItem("")
-        self.comboBox_yayinKalite.addItem("")
-        self.comboBox_yayinKalite.addItem("")
-        self.label_yayinKalite = QtWidgets.QLabel(self.page_ayarlar)
-        self.label_yayinKalite.setGeometry(QtCore.QRect(1270, 225, 301, 41))
-        self.label_yayinKalite.setStyleSheet("color: #CCCCCC;        /* Hafif gri/beyaz */\n"
-"font-size: 24px;       /* İdeal okuma boyutu */\n"
-"font-weight: bold;\n"
-"border: none;\n"
-"background-color: transparent;")
-        self.label_yayinKalite.setObjectName("label_yayinKalite")
-        self.label_FPS = QtWidgets.QLabel(self.page_ayarlar)
-        self.label_FPS.setGeometry(QtCore.QRect(1270, 337, 301, 41))
-        self.label_FPS.setStyleSheet("color: #CCCCCC;        /* Hafif gri/beyaz */\n"
-"font-size: 24px;       /* İdeal okuma boyutu */\n"
-"font-weight: bold;\n"
-"border: none;\n"
-"background-color: transparent;")
-        self.label_FPS.setObjectName("label_FPS")
-        self.comboBox_FPS = QtWidgets.QComboBox(self.page_ayarlar)
-        self.comboBox_FPS.setGeometry(QtCore.QRect(1270, 382, 350, 45))
-        font = QtGui.QFont()
-        font.setFamily("Roboto Mono")
-        font.setPointSize(-1)
-        self.comboBox_FPS.setFont(font)
-        self.comboBox_FPS.setStyleSheet("/* --- 1. ANA COMBOBOX (KAPALI HALİ) --- */\n"
-"QComboBox {\n"
-"    background-color: #151520;\n"
-"    color: #FFFFFF;\n"
-"    border: 2px solid #444455;\n"
-"    border-radius: 12px;\n"
-"    padding: 8px 15px;\n"
-"    font-size: 22px;\n"
-"    font-family: \"Roboto Mono\";\n"
-"}\n"
-"\n"
-"QComboBox:hover {\n"
-"    border: 2px solid #00AAFF;\n"
-"}\n"
-"\n"
-"QComboBox::drop-down {\n"
-"    border: none;\n"
-"    width: 40px;\n"
-"}\n"
-"\n"
-"/* --- 2. AÇILAN LİSTENİN DIŞ KUTUSU --- */\n"
-"QComboBox QAbstractItemView {\n"
-"    background-color: #151520;\n"
-"    border: 2px solid #00AAFF;\n"
-"    border-radius: 12px;\n"
-"    padding: 6px;         /* İŞTE ÇÖZÜM: Listenin iç duvarlarına 6px yastık koyduk */\n"
-"    outline: none;\n"
-"}\n"
-"\n"
-"/* --- 3. LİSTE ELEMANLARI (Türkçe, English) --- */\n"
-"QComboBox QAbstractItemView::item {\n"
-"    color: #FFFFFF;\n"
-"    min-height: 40px;\n"
-"    border-radius: 6px;   /* Şıkların da köşelerini yuvarladık */\n"
-"}\n"
-"\n"
-"/* --- 4. SEÇİLİ OLAN ŞIK (Mavi Yanan Kısım) --- */\n"
-"QComboBox QAbstractItemView::item:selected {\n"
-"    background-color: #00AAFF;\n"
-"    color: #FFFFFF;\n"
-"    border-radius: 6px;   /* MAVİ SEÇİMİN KÖŞELERİ KESİNLİKLE YUVARLAK OLACAK */\n"
-"}\n"
-"\n"
-"QComboBox QAbstractItemView::item:hover {\n"
-"    background-color: #00AAFF;\n"
-"    color: #FFFFFF;\n"
-"    border-radius: 6px;\n"
-"}")
-        self.comboBox_FPS.setObjectName("comboBox_FPS")
-        self.comboBox_FPS.addItem("")
-        self.comboBox_FPS.addItem("")
-        self.lineEdit_hedefKlasor = QtWidgets.QLineEdit(self.page_ayarlar)
-        self.lineEdit_hedefKlasor.setGeometry(QtCore.QRect(1270, 573, 350, 45))
-        self.lineEdit_hedefKlasor.setStyleSheet("QLineEdit {\n"
-"    background-color: #151520;  /* Koyu arka plan */\n"
-"    color: #FFFFFF;             /* Yazı rengi beyaz */\n"
-"    border: 1px solid #444455;  /* Sönük gri çerçeve */\n"
-"    border-radius: 12px;         /* Köşeler hafif yuvarlak */\n"
-"    padding: 5px 10px;          /* İçeriden boşluk (ferah dursun) */\n"
-"    font-size: 26px;\n"
-"    font-family: \"Roboto Mono\";\n"
-"}\n"
-"\n"
-"/* Mouse ile içine tıklanıp YAZI YAZILMAYA BAŞLANDIĞINDA (Focus) */\n"
-"QLineEdit:focus {\n"
-"    border: 1px solid #00AAFF;  /* Çerçeve Mavi Parlasın */\n"
-"    background-color: #1A1A25;\n"
-"}")
-        self.lineEdit_hedefKlasor.setEchoMode(QtWidgets.QLineEdit.Normal)
-        self.lineEdit_hedefKlasor.setObjectName("lineEdit_hedefKlasor")
-        self.label_hedefKlasor = QtWidgets.QLabel(self.page_ayarlar)
-        self.label_hedefKlasor.setGeometry(QtCore.QRect(1270, 529, 281, 41))
-        self.label_hedefKlasor.setStyleSheet("color: #CCCCCC;        /* Hafif gri/beyaz */\n"
-"font-size: 24px;       /* İdeal okuma boyutu */\n"
-"font-weight: bold;\n"
-"border: none;\n"
-"background-color: transparent;")
-        self.label_hedefKlasor.setObjectName("label_hedefKlasor")
         self.label_sifreleme = QtWidgets.QLabel(self.page_ayarlar)
-        self.label_sifreleme.setGeometry(QtCore.QRect(1270, 635, 211, 41))
+        self.label_sifreleme.setGeometry(QtCore.QRect(1270, 225, 211, 41))
         self.label_sifreleme.setStyleSheet("color: #CCCCCC;        /* Hafif gri/beyaz */\n"
 "font-size: 24px;       /* İdeal okuma boyutu */\n"
 "font-weight: bold;\n"
@@ -1363,7 +1073,7 @@ class Ui_MainWindow(object):
 "background-color: transparent;")
         self.label_sifreleme.setObjectName("label_sifreleme")
         self.pushButton_sifreleme = QtWidgets.QPushButton(self.page_ayarlar)
-        self.pushButton_sifreleme.setGeometry(QtCore.QRect(1520, 635, 130, 40))
+        self.pushButton_sifreleme.setGeometry(QtCore.QRect(1520, 222, 130, 40))
         sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
         sizePolicy.setHorizontalStretch(0)
         sizePolicy.setVerticalStretch(0)
@@ -1405,7 +1115,7 @@ class Ui_MainWindow(object):
         self.pushButton_sifreleme.setChecked(True)
         self.pushButton_sifreleme.setObjectName("pushButton_sifreleme")
         self.pushButton_simdiYedekle = QtWidgets.QPushButton(self.page_ayarlar)
-        self.pushButton_simdiYedekle.setGeometry(QtCore.QRect(1270, 699, 450, 50))
+        self.pushButton_simdiYedekle.setGeometry(QtCore.QRect(1270, 300, 450, 50))
         self.pushButton_simdiYedekle.setStyleSheet("QPushButton {\n"
 "    background-color: #1F1F2E; /* İçi boş (arkaplan rengi yok) */\n"
 "    color: #00AAFF;                /* Mavi yazı */\n"
@@ -1707,8 +1417,7 @@ class Ui_MainWindow(object):
         self.label_ayarlarYazi.setText(_translate("MainWindow", "SİSTEM AYARLARI "))
         self.label_genelAyarlarYazi.setText(_translate("MainWindow", "GENEL AYARLAR"))
         self.label_kontrolAyarlariYazi.setText(_translate("MainWindow", "KONTROL AYARLARI"))
-        self.label_guvenlikKontrolleriYazi.setText(_translate("MainWindow", "GÜVENLİK KONTROLLERİ"))
-        self.label_goruntuAyarlari.setText(_translate("MainWindow", "GÖRÜNTÜ AYARLARI"))
+        self.label_guvenlikKontrolleriYazi.setText(_translate("MainWindow", "S Ü R Ü Ş   A Y A R L A R I"))
         self.label_veriYedeklemeYazi.setText(_translate("MainWindow", "VERİ YEDEKLEME"))
         self.label_sistemDili.setText(_translate("MainWindow", "S i s t e m   D i l i :"))
         self.comboBox_dilSecimi.setItemText(0, _translate("MainWindow", "Türkçe"))
@@ -1718,14 +1427,7 @@ class Ui_MainWindow(object):
         self.label_tema.setText(_translate("MainWindow", "T e m a :"))
         self.label_bildirimler.setText(_translate("MainWindow", "B i l d i r i m l e r :"))
         self.pushButton_bildirimler.setText(_translate("MainWindow", "Açık"))
-        self.label_VPN.setText(_translate("MainWindow", "V P N :"))
-        self.comboBox_VPNsecimi.setItemText(0, _translate("MainWindow", "VPN 1"))
-        self.comboBox_VPNsecimi.setItemText(1, _translate("MainWindow", "VPN 2"))
-        self.lineEdit_kullaniciAdi.setText(_translate("MainWindow", "Admin_Tufan"))
-        self.label_kullaniciAdi.setText(_translate("MainWindow", "K u l l a n ı c ı   A d ı :"))
-        self.label_sifre.setText(_translate("MainWindow", "Ş i f r e :"))
-        self.lineEdit_sifre.setText(_translate("MainWindow", "Admin_Tufan"))
-        self.label_telefon.setText(_translate("MainWindow", "T e l e f o n :"))
+        self.label_telefon.setText(_translate("MainWindow", "P W M   H ı z   S ı n ı r ı :"))
         self.label_canliSistemLog.setText(_translate("MainWindow", "CANLI SİSTEM LOGLARI :"))
         self.textEdit_canliSistemLog.setMarkdown(_translate("MainWindow", "**[14:22:01] Settings page accessed.  **\n"
 "\n"
@@ -1748,15 +1450,6 @@ class Ui_MainWindow(object):
         self.pushButton_joystick.setText(_translate("MainWindow", "Bağlı"))
         self.label_klavyeKontrol.setText(_translate("MainWindow", "K l a v y e   K o n t r o l :"))
         self.pushButton_klavye.setText(_translate("MainWindow", "Pasif"))
-        self.comboBox_yayinKalite.setItemText(0, _translate("MainWindow", "1080p - Yüksek"))
-        self.comboBox_yayinKalite.setItemText(1, _translate("MainWindow", "720p - Orta"))
-        self.comboBox_yayinKalite.setItemText(2, _translate("MainWindow", "480p - Düşük"))
-        self.label_yayinKalite.setText(_translate("MainWindow", "Y a y ı n   K a l i t e s i :"))
-        self.label_FPS.setText(_translate("MainWindow", "F P S   S ı n ı r ı :"))
-        self.comboBox_FPS.setItemText(0, _translate("MainWindow", "60 Kare/sn"))
-        self.comboBox_FPS.setItemText(1, _translate("MainWindow", "30 Kare/sn"))
-        self.lineEdit_hedefKlasor.setText(_translate("MainWindow", "/home/tufan/rec"))
-        self.label_hedefKlasor.setText(_translate("MainWindow", "H e d e f   K l a s ö r :"))
         self.label_sifreleme.setText(_translate("MainWindow", "Ş i f r e l e m e :"))
         self.pushButton_sifreleme.setText(_translate("MainWindow", "Açık"))
         self.pushButton_simdiYedekle.setText(_translate("MainWindow", "Ş i m d i   Y e d e k l e"))

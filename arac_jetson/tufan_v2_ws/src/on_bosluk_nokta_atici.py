@@ -609,6 +609,23 @@ class OnBoslukNoktaAtici(Node):
             self._su_etabinda_ilerle(yaw, odom, durum)
             return
 
+        # RAMPA ETABI - EGIM MODLARINDAN **ONCE** (2026-09-11 TASINDI).
+        # ESKIDEN egim modlarindan SONRAYDI; gerekce "arac zaten
+        # tirmanmaya basladiysa TIRMANMA modu devralsin" idi. Ama bu,
+        # INISTE KIRILIYORDU: govde asagi egilince INIS modu devraliyor,
+        # _egimde_ilerle onunde zemini "duvar" olarak gorup HEDEF
+        # URETMIYOR ve arac inisin basinda duruyordu (kullanici bildirimi:
+        # "dik egimin inisinde de zemini duvar olarak gorebilir").
+        # Su etabinda AYNI ariza yasanmis ve ayni sekilde cozulmustu.
+        #
+        # Rampa etabinin TANIMI zaten "LIDAR KOR, duz ilerle" - o yuzden
+        # bayrak acikken egim modlarina hic girilmemeli. Bayrak SADECE
+        # 8/Stop ile aciliyor ve inis tamamlaninca (rampa dizisi _R_BITTI)
+        # kapaniyor, yani korluk parkurun sadece bu dar bolumunde gecerli.
+        if self._rampa_etabi:
+            self._rampa_etabinda_ilerle(yaw, odom, durum)
+            return
+
         if egim_on > egim_esigi:
             # (C) TIRMANMA - yanlara GUVENILEMEZ (isinlar engellerin ustunden
             # geciyor, sahte bosluk). Sadece mevcut yonde kisa adim.
@@ -625,13 +642,6 @@ class OnBoslukNoktaAtici(Node):
             fan_yari = float(self._p['egimde_fan_yari_acisi_derece'])
             self._normal_ilerle(px, py, yaw, odom, durum, fan_yari_derece=fan_yari,
                                 mod_adi='YAN_EGIM')
-            return
-
-        # RAMPA ETABI (8. tabela) - egim modlarindan SONRA: arac zaten
-        # tirmanmaya basladiysa TIRMANMA modu devralmis olur; bu mod
-        # sadece rampaya YAKLASIRKEN (govde henuz duzken) gecerli.
-        if self._rampa_etabi:
-            self._rampa_etabinda_ilerle(yaw, odom, durum)
             return
 
         # KAYAR ENGEL asamasi (6. tabela) - egim modlarindan SONRA kontrol

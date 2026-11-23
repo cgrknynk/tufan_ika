@@ -3646,6 +3646,313 @@ baskın kaynak yok.
 > `__init__`'in çağrısını `elle=True` yapmıştı — koruma tam ters çalışıyor,
 > terminal yine bağlanıyordu. SSH sürecinin varlığı ölçülerek yakalandı.
 
+### Rampa dizisi yeniden kurgulandı: tırmanışta durma YOK (2026-09-11)
+
+*İstek:* "dik eğimde durmayı kapat, 8 veya stop görünce durmasın, dik eğimi
+çıksın, **IMU düz olunca dursun**, belki 9'u okuyamayabilir, IMU düzeldikten
+sonra durduktan sonra hedef modeli çalışsın, silah 3 saniye attıktan sonra
+devam etsin."
+
+**Eski akış:** 8/Stop → IMU +15° → 2 sn → **DUR** → 2 sn → devam → iniş.
+Rampanın *ortasında* durmak hem gereksizdi hem riskliydi (eğimde duran araç
+geri kayabiliyor, tekrar kalkış zor).
+
+**Yeni akış:**
+
+| Adım | Davranış |
+|---|---|
+| 8 / Stop görülür | LIDAR kör, düz ilerle — **durma yok** |
+| IMU ≥ +15° | Tırmanış algılandı, **kesintisiz devam** |
+| Tepede \|eğim\| ≤ 5°, 1.5 sn teyit | **DUR** + silah fazı başlar |
+| 3 atış tamamlanır | 3 sn bekle → devam |
+| IMU ≤ −15° | (değişmedi) 2 sn → dur → 2 sn → devam |
+
+**Silah fazı artık 9. tabelaya bağlı değil.** Kullanıcı tabelanın
+okunamayabileceğini açıkça söyledi; IMU düzleşmesi **donanımdan gelen**,
+model/görüntü koşullarına bağlı olmayan sağlam bir tetik. 9. tabela yolu
+**kaldırılmadı** — iki tetik de ortak `_silah_fazini_tetikle()` girişini
+kullanıyor, hangisi önce gelirse fazı o başlatır, `_silah_fazi_aktif`
+bayrağı çift başlatmayı engeller.
+
+Atış düzeni **değişmedi** (kullanıcı onayı): 3 kilit × (5 sn ateş + 2 sn
+duraksama). Değişen tek şey, son atıştan sonra otonom sürüşün **hemen
+değil** `SILAH_SONRASI_DEVAM_GECIKMESI_S = 3.0` sn sonra açılması.
+
+Yeni sabitler: `RAMPA_DUZ_ESIGI_DERECE = 5.0`,
+`RAMPA_DUZLESME_GECIKMESI_S = 1.5` (anlık sarsıntı "düzleşme" sanılmasın —
+eşik süre boyunca korunmalı, bozulursa sayaç sıfırlanır).
+Yeni durumlar: `_R_DUZLESME_BEKLE = 6`, `_R_SILAH_BEKLE = 7`.
+`_R_TEPEDE_DUR (=2)` artık kullanılmıyor.
+
+*Doğrulama:* **13/13 test geçti.** İki eski test bu değişiklikle çeliştiği
+için güncellendi (silinmedi): `test_rampa_dizisi.py` artık tırmanışta
+durmamayı doğruluyor, `test_silah_akis.py` gecikmeli devamı.
+
+> İki test altyapısı hatası da bu sırada bulundu: (1) `bekle()` node'u
+> **spin etmiyordu**, bu yüzden `create_timer` tabanlı gecikme hiç
+> tetiklenmiyor ve testi yanlışlıkla düşürüyordu; (2) spin açılınca
+> `/otonom_surus_aktif`'in 1 Hz periyodik tekrarı listeye karıştığı için
+> "liste boş mu" testi anlamsızlaştı — asıl değişmez artık doğrudan
+> ölçülüyor: *tırmanış boyunca hiç `False` yayınlanmamalı*.
+
+### Taret seri portu: kendini toparlama (2026-09-10)
+
+USB hub yeniden bağlanınca taret Arduino'su `ttyACM0 → ttyACM4` olarak
+yeniden numaralandı; `turret_node` **ölü dosya tanımlayıcısını** tutmaya
+devam etti. Süreç ayakta, log doluyor, ama taret hareket etmiyor ve lazer
+yanmıyordu — **1824 yazma hatası** ölçüldü. Kameralardaki "ayakta ama
+sessiz" arızasının seri port versiyonu.
+
+İki katman: (1) port aramasında **önce `/dev/tufan_turret_arduino`** kararlı
+udev sembolü denenir (çekirdek açılma anında çözer, ACM numarası önemsiz);
+(2) üç yazıcı thread'inde de (hareket/lazer/adım) ard arda 20 hata birikirse
+port kapatılıp yeniden aranır. Başarılı yazımda sayaç sıfırlanır.
+
+*Canlı doğrulandı:* `baglandi: /dev/tufan_turret_arduino`, dört hareket
+komutu işlendi, **0 yazma hatası**.
+
+### Nişan trimi güncellendi (2026-09-10, montaj değişikliği)
+
+Fiziksel montaj değişince nişan kaydı. 8 m'de odak 296.92 px → **1 px =
+2.69 cm**.
+
+| Eksen | Eski | Yeni | Toplam düzeltme |
+|---|---|---|---|
+| `nisan_bias_y_px` | −25.00 | **−8.30** | 45 cm yukarı |
+| `nisan_bias_x_px` | 9.40 | **20.53** | 30 cm sola |
+
+**X işaret kuralı artık sahada doğrulandı:** `nisan_bias_x_px` ARTIRILIR →
+lazer **SOLA**. (Operatör "20 cm sola" sonrası "10 cm daha sola" isteyince
+yön kanıtlandı.) Y kuralı zaten doğrulanmıştı: ARTIRILIR → **YUKARI**.
+
+### Ayarlar ekranı sadeleştirildi + açık tema düzeltildi (2026-10-28)
+
+*İstek:* "yayın kalitesi, fps, hedef dosya, kullanıcı adı, şifre ve VPN
+kalksın — işlevsiz çünkü; ama tasarım bozuk/çirkin durmasın. Bir de açık
+temaya geçince yazılar kutular bozuluyor, curveli objeler dik köşeli oluyor."
+
+**Kaldırılan alanlar** (hiçbiri bir işe bağlı değildi — ölü arayüz):
+`label_VPN` + `comboBox_VPNsecimi`, `label_kullaniciAdi` +
+`lineEdit_kullaniciAdi`, `label_sifre` + `lineEdit_sifre`,
+`label_yayinKalite` + `comboBox_yayinKalite`, `label_FPS` +
+`comboBox_FPS`, `label_hedefKlasor` + `lineEdit_hedefKlasor`, ve tamamen
+boşalan `frame_goruntuAyarlari` grubu.
+
+> ⚠️ `lineEdit_kullaniciAdi_2` **KALDI** — adı yanıltıcı, aslında **PWM Hız
+> Sınırı** kutusu (işlevsel). Etiketi de `label_telefon`; ikisi de eski
+> widget adları. Silmeden önce bu kontrol edilmeli.
+
+**Yeniden düzen** (boşluk kalmasın diye): orta sütunda PWM kutusu ve canlı
+loglar yukarı alındı; sağ sütunda VERİ YEDEKLEME, boşalan GÖRÜNTÜ
+AYARLARI'nın yerine taşındı. Orta grubun başlığı içeriğe uyacak şekilde
+"GÜVENLİK KONTROLLERİ" → **"SÜRÜŞ AYARLARI"** oldu (içinde yalnızca PWM
+sınırı ve loglar var). `lineEdit_hedefKlasor` kalktığı için yedekleme
+hedefi artık sabit: `~/Desktop/tufan/kayitlar`.
+
+`tasarim.ui` düzenlendi ve `arayuz.py` **pyuic5 ile yeniden üretildi** —
+sadece `.ui`'yi değiştirmek yetmez, `main.py` üretilmiş modülü import eder.
+
+### Açık tema: kök neden ve çözüm
+
+Eski `tema_degistir`, açık temaya geçerken **her QFrame'in kendi stilini
+`setStyleSheet("")` ile tamamen siliyordu**; `TEMA_ACIK` ise yalnızca
+**isim isim sayılan** frame'leri geri boyuyordu. Listede olmayan her şey
+`border-radius`'ını kaybediyordu. Ölçüm — kavisini kaybeden 3 widget:
+
+| Widget | Kavis | Sonuç |
+|---|---|---|
+| `frame_halka` | **175px** (bir HALKA) | kare oluyordu |
+| `frame_navigasyonAlan` | 32px | kuralı vardı ama `border-radius` yoktu |
+| `alt_bar` | 16px | aynı |
+
+**Çözüm:** stili silmek yerine **sadece renk bildirimlerini soy**
+(`_stil_renklerini_soy`). `border-radius`, `padding`, `margin`, `font`,
+`border-width/style` widget'ta kalır; rengi uygulama seviyesindeki
+`TEMA_ACIK` verir. `border: 2px solid #334155` gibi kısa yazım
+`border-width: 2px; border-style: solid;` haline getirilir — genişlik ve
+biçim korunur, renk gider.
+
+Bunun yan faydası: açık temaya **yeni eklenen** bir widget da kendiliğinden
+doğru çalışır; isim listesine eklemeyi unutmak diye bir risk kalmaz.
+
+**Koyu kalması gerekenler** (`KOYU_KALAN_WIDGETLAR`) — kamera çerçeveleri,
+`log_ekran`, `terminal_ekrani`, `frame_BilgiKart`, `frame_navigasyonAlan`,
+`textEdit_canliSistemLog` — stillerine **hiç dokunulmaz**.
+
+> Bu liste render ile iki kez düzeltildi: önce renklerini soyup `TEMA_ACIK`'tan
+> vermek denendi, **log terminali BEYAZ çıktı** (Qt, kendi stili olan bir
+> QFrame'in zeminini palete göre çiziyor). Ardından `log_ekran` siyah oldu
+> ama içindeki `terminal_ekrani` beyaz kaldı — o da listeye eklendi.
+
+*Doğrulama:* offscreen render ile iki tema da PNG'ye alınıp **gözle
+karşılaştırıldı**; ayrıca 38 kavisli widget üzerinde otomatik kontrol —
+**0 bozuk kavis**. AST taramasıyla silinen widget'lara kalan referans
+**yok**; kalması gerekenlerin hepsi `arayuz.py`'de mevcut.
+
+### Açık tema rötuşları + navigasyon paneli yuvarlatma (2026-10-28, ikinci tur)
+
+*İstek:* "açık temada ana ekranda orta halkanın gözükmesi gibi ufak tefek
+sorunlar var; hepsini tek renk yapmaktansa açık tonlarda başka renkler de
+kullanılabilir; hem açık hem koyu temada canlı log kaydırma alanını biraz
+kısalt (curve olduğu için az taşıyor); navigasyon ve görev planlama
+ekranında sonradan eklediklerimiz çok köşeli, bozmadan düzelt."
+
+**1) Palet artık ROL bazlı — her yer beyaz değil.** Katman hiyerarşisi
+renkle kuruluyor:
+
+| Alan | Eski | Yeni |
+|---|---|---|
+| Sayfa zemini | `#E8F0F4` | `#EDF2F7` |
+| Yan menü + alt bar | `#E8F0F4` (zeminle aynı) | **`#E3EBF2`** (içerikten ayrışır) |
+| Kart / kutu | `#FFFFFF` | `#FFFFFF` (korundu) |
+| Alt bar göstergeleri | `#FFFFFF` | **`#F3F8FC`** |
+| Ayarlar bölüm başlıkları | `#FFFFFF` + `#B0C4DE` | **`#DCE9F5`** + `#9FB8D0` (bant hissi) |
+| Bant üstü başlık yazısı | — | `#16415F` |
+| Girdi kutusu | `#FFFFFF` | `#F8FAFC` |
+
+Yan menüdeki şeritli görünüm, `#ayarlar_button, #power_button,
+#pushButton_acilKapat` saydam buton kuralına eklenerek giderildi.
+
+**2) Ana ekranın ortasındaki gri disk.** `frame_halka` koyu temada
+`rgba(0,0,0,50)` ile koyu zemine karışıyor. Açık temada ilk denemede
+`rgba(70,110,150,10)` verilmişti — **alfa yalnızca %4 olmasına rağmen**
+ekranın ortasında 400×400'lük görünür bir disk oluşturuyordu. Pikselle
+ölçüldü: zemin `#EDF2F7` → disk `#E7EDF3`, **6 ton fark**.
+
+> **Kural:** açık zeminde dekoratif dolgu kullanma. Halka açık temada
+> **tamamen saydam**; radar çemberini zaten üstündeki `label_radar_cember`
+> her 50 ms'de kesikli `#00bfff` elips olarak çiziyor.
+
+Saydamlık **iki yerde** tanımlı ve tutarlı olmalı: `stiller.py`
+(`QFrame#frame_halka`) ve `main.py::ACIK_TEMA_OZEL`. İkincisi yeni bir
+mekanizma — uygulama seviyesindeki kuralın tutmadığı widget'lara stil
+**doğrudan** yazmak için (Qt, kendi stili olan bir QFrame'in zeminini
+palete göre çiziyor; `QFrame#...` özgüllüğü bile yetmeyebiliyor).
+
+**3) Canlı log kaydırma çubuğu — her iki temada kısaltıldı.**
+
+| Yer | Eski | Yeni |
+|---|---|---|
+| Koyu tema (`tasarim.ui` → `arayuz.py`) | kural yok, Qt varsayılanı tepeden dibe | `QScrollBar:vertical { width:10px; margin: 26px 4px 26px 0; border:none; }` |
+| Açık tema (`stiller.py`) | aynı sorun | aynı kural |
+| Terminal kapsayıcı (`main.py`) | `setContentsMargins(0,0,0,0)` | `setContentsMargins(10,8,10,10)` |
+
+26px üst/alt boşluk sayesinde çubuk `log_ekran`'ın 16px kavisinin İÇİNDE
+kalıyor.
+
+**4) Görev planlama paneli** (`harita_sistemi.py::_sag_panel_kur`) —
+renkler ve davranış değişmeden yuvarlatıldı:
+
+| Öğe | Eski | Yeni |
+|---|---|---|
+| Panel gövdesi | `border-left: 2px solid #1e2836` (köşeli) | `border: 2px solid #1e2836; border-radius: 16px` |
+| Rota listesi | köşeli | `border-radius: 12px; padding: 4px` |
+| Seçili satır | köşeli | `border-radius: 8px` |
+| Spin kutuları | `padding: 2px` | `border-radius: 10px; padding: 4px 24px 4px 8px` |
+| 4 buton | `border-radius: 6px` | `border-radius: 12px` |
+
+**Yuvarlatmanın yan etkisi ve çözümü:** `QDoubleSpinBox`'ın ok düğmeleri
+stilsiz bırakılınca Qt onları **varsayılan köşeli kutu** olarak çiziyor ve
+bu kutu 10px kavisin dışına taşıp sağda bir çentik yapıyordu. Alt
+kontroller (`::up-button`, `::down-button`, `::up-arrow`, `::down-arrow`)
+bilerek şekillendirildi.
+
+> Ok üçgenleri için **iki yol denendi, ikisi de başarısız:** CSS'in
+> "şeffaf kenarlı üçgen" hilesi Qt'de üçgen değil **küçük bir kutu**
+> çiziyor; alt kontrolü çerçevesiz bırakınca Qt yerel oku **hiç
+> çizmiyor**. Bu yüzden ikon üretildi: `icons/spin_yukari.png`,
+> `icons/spin_asagi.png` (18×12, `#9FB8D0`).
+
+> ⚠️ **Qt stil sayfasındaki `url()` geçerli ÇALIŞMA DİZİNİNE göre
+> çözülür.** Arayüz başka dizinden başlatılırsa ikonlar sessizce kaybolur.
+> Bu yüzden yol `_BU_DIZIN = os.path.dirname(os.path.abspath(__file__))`
+> ile **mutlak** üretiliyor — çalışma dizini `/tmp` iken test edildi.
+
+İşlev korundu: iki `stepUp()` → 1.0 m, bir `stepDown()` → 0.5 m.
+
+**5) Kırpılan etiketler** (yeniden adlandırmaların artığı):
+
+| Widget | Eski genişlik | Yeni | Gereken |
+|---|---|---|---|
+| `label_guvenlikKontrolleriYazi` | 411 (x=30) | **464** (x=8) | 464 |
+| `label_kontrolAyarlariYazi` | 351 (x=60) | **390** (x=45) | 362 |
+| `label_telefon` | 271 | **325** | 325 |
+| `lineEdit_kullaniciAdi_2` | x=990 | **x=1035** | çakışmasın diye |
+
+*Doğrulama:* `page_anaMenu`, `page_ayarlar`, `page_kamera` iki temada da
+render edildi; navigasyon paneli tek başına render edilip yakınlaştırıldı;
+halka için widget yığını (955, 440) noktasında sondalandı; kırpma
+`sizeHint().width() > width()` ile sayısal ölçüldü. Ayrıntılı eski/yeni
+raporu: **`~/Desktop/ARAYUZ_DEGISIKLIK_RAPORU.html`**.
+
+### Navigasyon ekranı: sekme yazıları, köşeler ve suni ufuk (2026-10-28, üçüncü tur)
+
+*İstek:* "taktik lidar ve uydu haritası yazıları sığmıyor ve bulundukları
+alan köşeli; orda bazı objelerin köşeleri silik gibi gözükmüyordu."
+
+**1) Sekme yazıları kırpılıyordu.** `TAKTİK LİDAR` → "AKTİK LİDA",
+`UYDU HARİTASI` → "YDU HARİTAS" (iki yandan kesik).
+
+> **Kök neden:** stil sayfası `font-weight: bold` diyor, ama Qt sekmenin
+> **genişliğini widget'ın KENDİ fontuyla (kalın değil)** hesaplıyor. Kalın
+> metin daha geniş olduğu için ortalanmış yazı iki yandan taşıyor.
+> **Stil sayfasına yazılan font, ölçümü etkilemiyor.**
+
+**Çözüm:** font sekme çubuğuna **koddan** veriliyor —
+`harita_sekmeleri.tabBar().setFont(QFont("Arial", 11, QFont.Bold))` —
+böylece `sizeHint` kalın metriğe göre hesaplanıyor. Ek emniyet olarak
+`min-width: 150px`. Ölçüm sonrası: kutu 212 px / metin 104–116 px.
+
+**2) Sekme alanı köşeliydi.** Yeni stil: sekmelerin üst köşeleri 12px,
+`QTabWidget::pane` 14px kavis + `2px solid #1e2836` çerçeve,
+`margin-right: 6px` ile sekmeler birbirinden ayrıldı, `:hover` eklendi.
+
+**3) "Köşeleri silik" — iki ayrı kök neden bulundu.**
+
+**(a) paintEvent super()'i çağırmıyor.** `SuniUfukEkrani`,
+`TaktikRadarEkrani` ve `UyduHaritaWidget` çizimi tamamen kendileri yapıyor
+ve `super().paintEvent()` **hiç çağrılmıyor**. Bunun sonucu: stil
+sayfasındaki `border-radius: 15px` ve `border: 2px solid ...` **ölü** —
+Qt bunları QFrame'in kendi paintEvent'inde çizer, o çağrılmayınca ekrana
+hiç ulaşmaz. Üstüne el ile çizilen dolgular dikdörtgen olduğu için
+köşelere kadar taşıyordu.
+
+**Çözüm:** yeni ortak modül **`cizim_yardimcilari.py`**:
+
+| Fonksiyon | Ne yapar |
+|---|---|
+| `yuvarlak_kirp(ressam, widget, yaricap)` | Çizime başlamadan ressamı yuvarlak köşe hattına kırpar |
+| `yuvarlak_cerceve_ciz(...)` | Çizim bitince çerçeveyi el ile çizer (stil sayfasının yapamadığı) |
+
+Üç widget'ta da aynı kalıp uygulandı; `_KOSE_YARICAP = 15` sınıf sabiti
+stil sayfasındaki değerle aynı tutulmalı.
+
+> ⚠️ Gövde içinde `setClipRect`/`setClipPath` kullanan yerler
+> **`Qt.IntersectClip`** ile çağrılmalı — varsayılan `ReplaceClip`, dışarıda
+> kurulan yuvarlak kırpmayı **siler** ve sorun geri döner.
+
+> `uydu_harita_widget.py`'deki **erken `return` kaldırıldı** (if/else'e
+> çevrildi): GNSS yokken çerçeve hiç çizilmiyordu. Ayrıca erken return bu
+> dosyada daha önce gerçek bir SIGSEGV'e yol açmıştı.
+
+**(b) Suni ufuk KARE kırpılıyordu.** `_paintEvent_govde` içinde dolgu
+`setClipRect` ile **kare** kırpılıyor, hemen altında **aynı yarıçapla**
+cyan bir **daire** çiziliyordu. Karenin dört köşesi dairenin **dışına**
+taşıyordu — ekranda gördüğün "köşeleri düzensiz/silik" görüntü buydu.
+
+| | Eski | Yeni |
+|---|---|---|
+| Gökyüzü/yer dolgusu kırpması | `setClipRect` (**kare**) | `QPainterPath.addEllipse` (**daire**, `Qt.IntersectClip`) |
+| Sonuç | Karenin köşeleri cyan dairenin dışında | Gerçek bir attitude topu — dolgu tam halkanın içinde |
+
+Kırpma `rotate(roll)`'den **önce** kurulduğu için daire roll ile dönse de
+aynı kalır. Doğrulama: roll **0°, +25°, −40°** için dört köşe de
+`(17,20,26)` — yani her açıda temiz.
+
+*Doğrulama:* `HaritaYoneticisi` tam olarak (1721×600) render edildi, her
+iki sekme ayrı ayrı; sekme genişlikleri `QFontMetrics` ile sayısal
+ölçüldü; suni ufuk köşeleri üç roll açısında pikselle okundu.
+
 ---
 *Bu doküman, `~/Desktop/tufan` altındaki kodun mevcut haline göre otomatik
 olarak (kod incelemesiyle) hazırlanmıştır.*

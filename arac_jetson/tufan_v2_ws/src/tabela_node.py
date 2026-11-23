@@ -323,6 +323,18 @@ class TabelaNode(Node):
         self.declare_parameter('kamera_usb_port', '1-2.3')
         self.declare_parameter('model_path', _VARSAYILAN_MODEL_YOLU)
         self.declare_parameter('hedef_confidence', 0.5)
+        # SAHTE "TAM KARE" TESPITI FILTRESI (2026-09-11, canli goruntuyle
+        # kanitlandi): ortada HIC tabela yokken model, karenin neredeyse
+        # tamamini kaplayan bir kutu cizip 'Ten' diyordu (0.61-0.72 guven,
+        # 182 karenin 154'unde). Gercek bir tabela kareyi bu kadar
+        # kaplamaz - yarisma mesafesinde kucuk bir bolgedir.
+        #
+        # NEDEN KRITIK: dugum kare basina SADECE EN YUKSEK GUVENLI
+        # tespiti yayinliyor. Sahte 'Ten' 0.63 ile gercek 'One' 0.60'i
+        # BASTIRIYOR ve gercek tabela HIC bildirilmiyordu - operator
+        # "1 gosteriyorum ama parkur asamasi ilerlemiyor" diyordu.
+        # Kutu alani kare alaninin bu oranini asarsa tespit ELENIR.
+        self.declare_parameter('maks_kutu_alan_orani', 0.35)
         self.declare_parameter('imgsz', 640)
         self.declare_parameter('video_target_ip', '10.40.64.44')
         self.declare_parameter('video_target_port', 5001)
@@ -340,6 +352,7 @@ class TabelaNode(Node):
         self._kamera_usb_port = self.get_parameter('kamera_usb_port').value
         self._model_path = self.get_parameter('model_path').value
         self._conf = self.get_parameter('hedef_confidence').value
+        self._maks_kutu_alan = float(self.get_parameter('maks_kutu_alan_orani').value)
         self._imgsz = self.get_parameter('imgsz').value
         self._video_target_ip = self.get_parameter('video_target_ip').value
         self._video_target_port = self.get_parameter('video_target_port').value
@@ -385,6 +398,38 @@ class TabelaNode(Node):
                 self._sock_video.sendto(data, (self._video_target_ip, self._video_target_port))
             except Exception:
                 pass
+
+    def _makul_tespitleri_sec(self, result, frame_sekli):
+        """Alan filtresinden GECEN tespitler arasindan en guvenliyi doner.
+
+        Doner: (sinif_adi, guven) veya makul tespit yoksa None.
+
+        Bkz. maks_kutu_alan_orani: karenin buyuk bolumunu kaplayan kutular
+        ELENIR. Filtre argmax'tan ONCE uygulanir - aksi halde sahte dev
+        kutu en yuksek guveni alip gercek tabelayi gizlemeye devam
+        ederdi (asil ariza buydu)."""
+        try:
+            kutular = result.boxes
+            if kutular is None or len(kutular) == 0:
+                return None
+            h, w = frame_sekli[:2]
+            kare_alani = float(max(h * w, 1))
+            confs = kutular.conf.cpu().numpy()
+            xyxy = kutular.xyxy.cpu().numpy()
+            en_iyi = None
+            for i in range(len(confs)):
+                x1, y1, x2, y2 = xyxy[i]
+                alan = max(0.0, float(x2 - x1)) * max(0.0, float(y2 - y1))
+                if (alan / kare_alani) > self._maks_kutu_alan:
+                    continue          # tam-kare halusinasyonu - ELE
+                if en_iyi is None or confs[i] > en_iyi[1]:
+                    cls_id = int(kutular.cls[i].item())
+                    en_iyi = (self._model.names.get(cls_id, str(cls_id)),
+                              float(confs[i]))
+            return en_iyi
+        except Exception as e:
+            self.get_logger().error('Tespit secimi hatasi: %s' % e)
+            return None
 
     def _model_aktif_cb(self, msg: Bool):
         yeni = bool(msg.data)
@@ -479,13 +524,9 @@ class TabelaNode(Node):
                     result = results[0]
                     cizili_frame = result.plot()
 
-                    if len(result.boxes) > 0:
-                        # En yuksek guvenli tespiti bildir
-                        confs = result.boxes.conf.cpu().numpy()
-                        en_iyi_idx = int(confs.argmax())
-                        cls_id = int(result.boxes.cls[en_iyi_idx].item())
-                        cls_adi = self._model.names.get(cls_id, str(cls_id))
-                        guven = float(confs[en_iyi_idx])
+                    gecerli = self._makul_tespitleri_sec(result, frame.shape)
+                    if gecerli:
+                        cls_adi, guven = gecerli
                         self._tespit_pub.publish(String(data=f'{cls_adi}:{guven:.2f}'))
                     else:
                         self._tespit_pub.publish(String(data='YOK'))

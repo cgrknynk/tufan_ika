@@ -1,5 +1,13 @@
 """9 -> silah OTONOM + arac MANUEL -> 3 atis -> arac OTONOM akisi."""
-import sys, inspect
+# TEST IZOLASYONU (2026-09-11): bu test node'u SPIN ediyor. Spin
+# acikken dugum GERCEK ROS agina (domain 77) baglanip calisan araçtan
+# gelen /surus_modu, /arac_komut gibi mesajlari ALIYOR - testin kurdugu
+# durumu eziyor ve testi rastgele dusuruyordu (canli olarak yasandi:
+# surus_modu OTONOM yapiliyor, arac MANUEL yayinlayinca test kaliyordu).
+# Ayri bir domain testi tamamen yalitir.
+import os
+os.environ['ROS_DOMAIN_ID'] = '99'
+import sys, time, inspect
 sys.path.insert(0,'/home/tufan-yer/tufan_ika_repo/arac_jetson/tufan_v2_ws/src')
 import rclpy
 from std_msgs.msg import String, Bool, Int32
@@ -63,10 +71,23 @@ print(f"  /turret_model      = {k['turret']}         (False olmali)")
 print(f"  /silah_modu        = {k['silah']}          (MANUEL olmali)")
 print(f"  /tabela_model      = {k['tabela']}         (True - on kamera geri)")
 print(f"  /silah_fazi_aktif  = {k['faz']}            (False -> arayuz OTONOM'a doner)")
-print(f"  /otonom_surus_aktif= {k['otonom']}         (True - hedef uretimi geri)")
+print(f"  /otonom_surus_aktif= {k['otonom']}         (HENUZ bos - gecikmeli)")
 print(f"  ileri hedef        = {k['goal']}")
 assert k['turret']==[False] and k['silah']==['MANUEL'] and k['tabela']==[True]
-assert k['faz']==[False] and k['otonom']==[True] and len(k['goal'])==1
+assert k['faz']==[False] and len(k['goal'])==1
+# 2026-09-11 SARTNAME: "silah 3 saniye attiktan sonra devam etsin" -
+# otonom surus ARTIK HEMEN acilmiyor, SILAH_SONRASI_DEVAM_GECIKMESI_S
+# kadar sonra bir ROS zamanlayicisiyla aciliyor. Zamanlayicinin
+# tetiklenmesi icin node SPIN EDILMELI.
+assert not k['otonom'], "otonom HEMEN acildi - gecikme uygulanmamis"
+print(f"  -> 3 atis anindaki durum OK (otonom henuz kapali)")
+
+print(f"== {T.SILAH_SONRASI_DEVAM_GECIKMESI_S:.0f} SN GECIKME SONRASI ==")
+_t = time.time()
+while time.time() - _t < T.SILAH_SONRASI_DEVAM_GECIKMESI_S + 0.8:
+    rclpy.spin_once(n, timeout_sec=0.0); time.sleep(0.05)
+print(f"  /otonom_surus_aktif= {k['otonom']}  (True olmali - hedef uretimi geri)")
+assert k['otonom'] and k['otonom'][-1] is True, "gecikme sonrasi otonom acilmadi"
 print("  -> OK")
 n.destroy_node(); rclpy.shutdown()
 print("\nAKIS DOGRULANDI")

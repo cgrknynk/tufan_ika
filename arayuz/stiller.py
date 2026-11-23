@@ -84,8 +84,23 @@ TEMA_ACIK = """
 /* ==========================================
    1. GENEL ARKA PLANLAR (Açık Mavi / Krem Tonu)
    ========================================== */
-QMainWindow, #centralwidget, #icerik_frame, #sol_menu_frame, #alt_bar, QStackedWidget > QWidget {
-    background-color: #E8F0F4; /* İstediğin ferah, açık buz mavisi zemin */
+/* 2026-10-28 PALET REVIZYONU (kullanici: "hepsini tek renk yapmaktansa
+   acik tonlarda baska renkler de kullanilabilir, daha sik olur").
+   Artik her sey #FFFFFF degil - renk ROLE gore ayrisiyor:
+     sayfa zemini  #EDF2F7  (en acik, notr)
+     yan menu/alt bar #E986... hayir: #E981 degil -> #E3EBF2 (hafif koyu,
+                      icerikten AYRISIR, cerceve cizmeye gerek kalmaz)
+     kart/kutu     #FFFFFF  (en one cikan katman)
+     grup basligi  #DCE9F5  (bant hissi - ayarlar sayfasindaki bolum
+                             basliklarini icerikten ayirir)
+     alt bar kutusu #F3F8FC (karttan bir ton acik, bar icinde yumusak)
+     girdi kutusu  #F8FAFC
+   Boylece katman hiyerarsisi RENKLE kuruluyor, her yer beyaz olmuyor. */
+QMainWindow, #centralwidget, #icerik_frame, QStackedWidget > QWidget {
+    background-color: #EDF2F7;
+}
+#sol_menu_frame, #alt_bar {
+    background-color: #E3EBF2;
 }
 
 /* ==========================================
@@ -96,7 +111,8 @@ QWidget {
 }
 
 /* Ayarlar sayfasındaki başlık yazıları (Eski gri yazılar şimdi koyu lacivert) */
-#label_sistemDili, #label_tema, #label_bildirimler, #label_VPN, #label_kullaniciAdi, #label_sifre, #label_telefon, #label_canliSistemLog, #label_joystick, #label_klavyeKontrol, #label_yayinKalite, #label_FPS, #label_hedefKlasor, #label_sifreleme {
+#label_sistemDili, #label_tema, #label_bildirimler, #label_telefon,
+#label_canliSistemLog, #label_joystick, #label_klavyeKontrol, #label_sifreleme {
     color: #334155; 
 }
 
@@ -122,19 +138,31 @@ QLabel {
    3. ANA SAYFA KUTULARI (Kavis: 24px)
    ========================================== */
 #frame_motorlar, #frame_Guc, #frame_lidar, #frame_wifi, #frame_GPS, #frame_kamera {
-    background-color: #FFFFFF; /* Kutuların içi bembeyaz temiz dursun */
-    border: 2px solid #B0C4DE; /* Yumuşak bir açık mavi-gri çerçeve */
-    border-radius: 24px;       /* Orijinal tasarımındaki kavis */
+    background-color: #FFFFFF;
+    border: 2px solid #AFC3D9;
+    border-radius: 24px;
 }
 
 /* ==========================================
    4. ALT BAR VE AYAR KUTULARI (Kavis: 16px)
    ========================================== */
-#frame_hiz, #frame_etap, #frame_aracBatarya, #frame_yerBatarya,
-#frame_genelAyarlar, #frame_kontrolAyarlari, #frame_guvenlikKontrolleri, #frame_goruntuAyarlari, #frame_veriYedekleme {
-    background-color: #FFFFFF;
-    border: 2px solid #B0C4DE; 
-    border-radius: 16px;       /* Orijinal tasarımındaki kavis */
+/* Alt bardaki gosterge kutulari - bar zemininden (#E3EBF2) bir ton ACIK */
+#frame_hiz, #frame_etap, #frame_aracBatarya, #frame_yerBatarya {
+    background-color: #F3F8FC;
+    border: 2px solid #AFC3D9;
+    border-radius: 16px;
+}
+
+/* Ayarlar sayfasi BOLUM BASLIKLARI - bant hissi veren tonlu zemin */
+#frame_genelAyarlar, #frame_kontrolAyarlari,
+#frame_guvenlikKontrolleri, #frame_veriYedekleme {
+    background-color: #DCE9F5;
+    border: 2px solid #9FB8D0;
+    border-radius: 16px;
+}
+#label_genelAyarlarYazi, #label_kontrolAyarlariYazi,
+#label_guvenlikKontrolleriYazi, #label_veriYedeklemeYazi {
+    color: #16415F;   /* bant uzerinde kontrastli koyu lacivert */
 }
 
 /* ==========================================
@@ -170,8 +198,14 @@ QComboBox QAbstractItemView::item:selected {
    6. İSTİSNALAR (Koyu ve Askeri Kalması Gereken Yerler)
    ========================================== */
 /* Kamera ekranları, Log terminali ve Bilgi Kartı açık modda dahi KOYU kalmalı */
-#frame_anaKamera, #frame_yanKamera1, #frame_yanKamera2, #frame_yanKamera3, 
-#log_ekran, #frame_BilgiKart, #frame_navigasyonAlan {
+/* SECICI OZGULLUGU (2026-10-28): widget'larin KENDI stili
+   "QFrame#log_ekran { ... }" seklinde yazilmis. Buradaki kural sadece
+   "#log_ekran" olunca OZGULLUGU DUSUK kaliyor ve zemin uygulanmiyordu -
+   log terminali acik temada BEYAZ cikiyordu (render ile goruldu).
+   Sinif adi eklenerek ozgulluk esitlendi. */
+QFrame#frame_anaKamera, QFrame#frame_yanKamera1, QFrame#frame_yanKamera2,
+QFrame#frame_yanKamera3, QFrame#log_ekran, QFrame#frame_BilgiKart,
+QFrame#frame_navigasyonAlan {
     background-color: #05050A; /* Zifiri Karanlık */
 }
 
@@ -181,6 +215,97 @@ QComboBox QAbstractItemView::item:selected {
     color: #00FF00;
     border: 2px solid #00FF41;
     border-radius: 48px; /* Orijinal kavis */
+}
+
+/* ==========================================
+   7. 2026-10-28 EKLENDI - RENK ARTIK TEK KAYNAKTAN
+   ==========================================
+   Tema gecisi artik widget stillerini SILMIYOR, sadece RENK bildirimlerini
+   soyuyor (bkz. main.py::_stil_renklerini_soy). Yani border-radius/padding
+   widget'in kendinde kalir, RENK buradan gelir. Asagidakiler eskiden
+   TEMA_ACIK'ta hic gecmedigi icin acik temada renksiz kaliyordu. */
+
+/* Ortadaki seffaf konteyner - acik temada da seffaf kalmali */
+#frame_merkezAlan {
+    background-color: transparent;
+}
+
+/* Ana menudeki dekoratif halka (175px kavis).
+   2026-10-28 (kullanici: "acik temada ana ekranda orta halkanin
+   gozukmesi gibi"): koyu temada rgba(0,0,0,50) koyu zemine karisip hic
+   belli olmuyor. Acik zeminde ise EN KUCUK dolgu bile goze batiyor -
+   olculdu: alfa 10 ile zemin #EDF2F7 -> disk #E7EDF3, yani ekranin
+   ortasinda 6 ton koyu GRI BIR DAIRE. Bu yuzden acik temada cerceve
+   TAMAMEN SAYDAM; radar halkasini zaten ustundeki label_radar_cember
+   kesikli #00bfff elips olarak ciziyor.
+   SECICI OZGULLUGU: widget kendi stilinde "QFrame#frame_halka" yaziyor;
+   sadece "#frame_halka" demek OZGULLUK olarak YETMEZ (log_ekran'da
+   yasanan AYNI tuzak) - sinif adi bu yuzden yazili. Kesin cozum icin
+   ayrica main.py::ACIK_TEMA_OZEL widget'in KENDI stilini de saydam
+   yapiyor; ikisi birbiriyle tutarli olmali. */
+QFrame#frame_halka {
+    background-color: transparent;
+    border: none;
+}
+
+/* Butonlar: ayarlar ekranindaki ac/kapa butonlari koyu temada koyu zeminli.
+   Renkleri soyuldugu icin burada acik tema karsiligi veriliyor; kavis ve
+   dolgu widget'in kendi stilinden geliyor. */
+QPushButton {
+    background-color: #FFFFFF;
+    color: #1A1C20;
+    border-color: #B0C4DE;
+}
+QPushButton:hover {
+    background-color: #F1F5F9;
+    border-color: #00AAFF;
+}
+QPushButton:pressed {
+    background-color: #E2E8F0;
+}
+
+/* Kamera/log/navigasyon KOYU kalan alanlarin UZERINDEKI yazilar beyaz
+   kalmali - QWidget kuralindaki koyu renk oralarda okunmuyordu. */
+#frame_anaKamera QLabel, #frame_yanKamera1 QLabel, #frame_yanKamera2 QLabel,
+#frame_yanKamera3 QLabel, #frame_BilgiKart QLabel, #frame_navigasyonAlan QLabel {
+    color: #FFFFFF;
+}
+
+/* SOL MENU IKON BUTONLARI: kendi koyu zeminleri soyulunca acik temada
+   serit serit gorunuyordu (render ile goruldu). Menu zeminiyle ayni
+   olsunlar, sadece uzerine gelince/secilince belli olsunlar. */
+#home_button, #kamera_button, #navigasyon_button, #hakkinda_button,
+#ayarlar_button, #power_button, #pushButton_acilKapat {
+    background-color: transparent;
+    border: none;
+    border-radius: 16px;
+}
+#home_button:hover, #kamera_button:hover, #navigasyon_button:hover,
+#hakkinda_button:hover, #ayarlar_button:hover, #power_button:hover,
+#pushButton_acilKapat:hover {
+    background-color: #D2E0EC;
+}
+
+/* KAYDIRMA CUBUGU (2026-10-28, kullanici: "canli log ekraninin asagi
+   kaydirma alanini biraz kisalt, curve oldugu icin az miktarda tasiyor").
+   Log kutusunun kavisi 48px; cubuk tam yuksekligi kaplayinca kose
+   egrisinin DISINA tasiyordu. Ust/alt bosluk birakilarak kisaltildi ve
+   tutamak yuvarlatildi. Ayni kural koyu temada da gecerli olsun diye
+   tasarim.ui'deki stile de eklendi. */
+QTextEdit QScrollBar:vertical, QPlainTextEdit QScrollBar:vertical {
+    background: transparent;
+    width: 10px;
+    margin: 26px 4px 26px 0;
+    border: none;
+}
+QTextEdit QScrollBar::handle:vertical, QPlainTextEdit QScrollBar::handle:vertical {
+    background: #9FB8D0;
+    border-radius: 5px;
+    min-height: 28px;
+}
+QTextEdit QScrollBar::add-line:vertical, QTextEdit QScrollBar::sub-line:vertical,
+QPlainTextEdit QScrollBar::add-line:vertical, QPlainTextEdit QScrollBar::sub-line:vertical {
+    height: 0px;
 }
 
 /* Hakkında Sayfası TextBrowser */

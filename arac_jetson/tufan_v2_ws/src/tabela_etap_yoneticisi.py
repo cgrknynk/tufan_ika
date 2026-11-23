@@ -135,6 +135,25 @@ IKINCI_STOP_INDEX = 10
 # (siradaki tabela 8 ya da sonrasi) kabul edilir.
 STOP_KABUL_MIN_SIRA_INDEX = 7   # BEKLENEN_SIRA[7] == 'Eight'
 RAMPA_IMU_ESIGI_DERECE = 15.0
+# 2026-09-11, KULLANICI ISTEGI - TIRMANISTA ARTIK DURULMUYOR:
+# "dik egimde durmayi kapat, 8 veya stop gorunce durmasin, dik egimi
+#  ciksin, imu duz olunca dursun, belki 9'u okuyamayabilir, imu
+#  duzeldikten sonra durduktan sonra hedef modeli calissin"
+# Eski akis: IMU +15 -> 2sn -> DUR -> 2sn -> devam. Rampanin ORTASINDA
+# durmak hem gereksizdi hem de tekrar kalkis riskliydi (egimde duran
+# arac geri kayabiliyor). Yeni akis: egim gorulur, TIRMANIS KESINTISIZ
+# surer, arac TEPEYE CIKIP DUZLESINCE durur ve silah fazi ORADA baslar.
+#
+# SILAH FAZI ARTIK 9. TABELAYA BAGLI DEGIL: tabela okunamayabilir
+# (kullanici bunu acikca soyledi). IMU duzlesmesi ROBUST bir tetik -
+# donanimdan gelir, model/goruntu kosullarina bagli degildir. 9. tabela
+# yolu KALDIRILMADI; hangisi once gelirse fazi o baslatir (cift
+# baslatmayi _silah_fazi_aktif bayragi engeller).
+RAMPA_DUZ_ESIGI_DERECE = 5.0        # |egim| bunun altindaysa "duz" sayilir
+RAMPA_DUZLESME_GECIKMESI_S = 1.5    # duzlugun TEYIT suresi (anlik sarsinti gecmesin)
+# 3 atis bittikten sonra araci hemen kaldirmak yerine kisa bir pay birak
+# (kullanici: "silah 3 saniye attiktan sonra devam etsin").
+SILAH_SONRASI_DEVAM_GECIKMESI_S = 3.0
 RAMPA_DURMA_GECIKMESI_S = 2.0
 RAMPA_BEKLEME_S = 2.0
 PARKUR1_BITIS_ILERLEME_S = 15.0
@@ -145,6 +164,11 @@ _R_TEPEDE_DUR = 2
 _R_INIS_BEKLE = 3
 _R_ALTTA_DUR = 4
 _R_BITTI = 5
+# 2026-09-11 eklendi (bkz. RAMPA_DUZ_ESIGI_DERECE notu):
+_R_DUZLESME_BEKLE = 6   # egim goruldu, TEPEDE DUZLESME bekleniyor (DURMADAN)
+_R_SILAH_BEKLE = 7      # tepede durdu, silah fazi calisiyor
+# _R_TEPEDE_DUR (=2) ARTIK KULLANILMIYOR - tirmanista durma kaldirildi.
+# Numarasi bilincli olarak bos birakildi (eski loglarla karismasin).
 ILERI_BASLATMA_ETABI = 1  # 'One' tabelasi -> serbest yon takibi baslasin
 # KAYAR ENGEL (2026-09-06, kullanici istegi: "parkura kayar engel
 # ekleyeceğim; ön kamerada 6. tabelayı tespit ettiğinde aracın kayar engel
@@ -199,6 +223,15 @@ RAMPA_ETABI = 8  # *** GECICI DEVRE DISI (2026-09-01, kullanici istegi) ***
 RAMPA_HEDEF_MESAFE_M = 20.0  # tam mesafe bilinmedigi icin bol tutuldu
 SON_ILERI_PAY_M = 5.0  # inis sonrasi sabit ek mesafe (kullanici istegi)
 HEDEF_VURULDU_ESIGI = 3  # turret_node.py ile TUTARLI olmali
+# SILAH FAZI EMNIYET SURESI (2026-09-11, kullanici: "bazen yanlislikla 10
+# gorulebiliyor, atis yapildiktan sonra devam edilsin").
+# ESKIDEN: 10. tabela gorulunce faz atislar BITMEDEN kapatiliyordu
+# ("yedek guvence"). Ama 10 SAHTE de gorulebiliyor - o zaman arac tam
+# nisan alirken silahi kapatip yoluna devam ediyordu. Artik 10 fazi
+# KESMIYOR; faz yalnizca (a) 3 atis tamamlaninca ya da (b) bu sure
+# dolunca biter. Boylece sahte tabela atisi iptal edemez, ama hedef hic
+# bulunamazsa arac yine de parkurda kilitli kalmaz.
+SILAH_FAZI_AZAMI_SURE_S = 60.0
 
 
 def _yaw_of(q):
@@ -222,6 +255,8 @@ class TabelaEtapYoneticisi(Node):
         self._parkur1_zamanlayici = None
         self._hizlanma_aktif = False
         self._rampa_durum = _R_BOS
+        self._silah_devam_zamanlayici = None
+        self._silah_fazi_baslangici = None
         self._rampa_esik_zamani = None
         self._rampa_bekleme_zamani = None
         # /otonom_surus_aktif'in ISTENEN durumu. Bu konu ESKIDEN sadece
@@ -550,52 +585,61 @@ class TabelaEtapYoneticisi(Node):
         asan Etap 8/2/1 tespitleri goruldu) fazi yanlislikla
         baslatmasin/bitirmesin diye."""
         if etap == SILAH_BASLATMA_ETABI:
-            otonom_mu = (self._surus_modu == 'OTONOM')
-
-            # 1) MODEL: her durumda, bir kez.
-            if not self._silah_modeli_acildi:
-                self._silah_modeli_acildi = True
-                self._turret_model_pub.publish(Bool(data=True))
-                self.get_logger().warn(
-                    '🎯 ETAP 9 DOGRULANDI - SILAH MODELI ACILDI '
-                    '(hedef algilama calisiyor).')
-
-            # 2) OTONOMLASMA: sadece arayuz OTONOM iken.
-            if self._silah_fazi_aktif:
-                return
-            if self._silah_otonom_gerekir and not otonom_mu:
-                # MANUEL: silah MANUEL kalir. Modu ACIKCA yaziyoruz ki
-                # turret_node onceki bir OTONOM'da takili kalmasin.
-                self._silah_modu_pub.publish(String(data='MANUEL'))
-                self.get_logger().warn(
-                    '🔫 Arayuz MANUEL - silah OTONOMA GECMEDI (model acik, '
-                    'taret kendiliginden hareket etmeyecek). Otonoma '
-                    'gecmesi icin arayuzden OTONOM secin.')
-                return
-            self._silah_fazi_aktif = True
-            self.get_logger().warn(
-                '🔫 Arayuz OTONOM - SILAH FAZI BASLIYOR (arac MANUEL\'e '
-                'alinacak, taret OTONOM hedefleyecek).')
-            self._silah_fazini_baslat()
+            # 2026-09-11: model acma + otonomlasma kontrolleri ORTAK
+            # _silah_fazini_tetikle metoduna tasindi - ayni mantik artik
+            # rampa tepesindeki IMU tetigi tarafindan da kullaniliyor
+            # (bkz. RAMPA_DUZ_ESIGI_DERECE notu). Faz zaten baslamissa
+            # (IMU tetigi once geldiyse) tetikle() sessizce doner.
+            self._silah_fazini_tetikle('ETAP 9 dogrulandi')
 
         elif etap == SILAH_BITIS_ETABI:
+            # 2026-09-11: 10. TABELA ARTIK SILAH FAZINI KESMIYOR.
+            # Sahte 10 tespitleri goruluyor (kullanici bildirimi) ve eski
+            # kod tam nisan alirken silahi kapatiyordu. Faz calisirken
+            # gelen 10 YOK SAYILIR; faz 3 atisla (veya emniyet suresiyle,
+            # bkz. SILAH_FAZI_AZAMI_SURE_S) biter. Atislar bittikten
+            # SONRA gelen 10 ise zaten kapali olan modeli tekrar
+            # kapatmaya calismaz - _silah_modeli_acildi bayragi ile.
+            if self._silah_fazi_aktif:
+                self.get_logger().warn(
+                    '⚠️ ETAP 10 goruldu ama SILAH FAZI DEVAM EDIYOR - '
+                    'yok sayiliyor (atislar bitmeden kesilmez).')
+                return
             if self._silah_modeli_acildi:
                 self._silah_modeli_acildi = False
                 self._turret_model_pub.publish(Bool(data=False))
                 self.get_logger().warn(
                     '🏁 ETAP 10 DOGRULANDI - silah modeli KAPATILDI.')
-            if self._silah_fazi_aktif:
-                # YEDEK GUVENCE: normalde faz 3 ATIS ile biter
-                # (_hedef_vuruldu_cb) ve bayrak orada temizlenir. Buraya
-                # dusulmesi, atislar tamamlanmadan 10. tabelanin gorulmesi
-                # demektir (orn. hedef bulunamadi) - sistem yine de silahi
-                # kapatip yola devam eder, silah fazinda kilitli kalmaz.
-                self._silah_fazi_aktif = False
-                self._silah_fazi_pub.publish(Bool(data=False))
-                self.get_logger().warn(
-                    '🏁 (3 atis TAMAMLANMADAN) yedek guvence: silah '
-                    'kapatiliyor, yola devam.')
-                self._silah_fazini_bitir()
+
+    def _silah_fazini_tetikle(self, kaynak):
+        """Silah fazini baslatan ORTAK giris (2026-09-11).
+
+        Iki tetik var ve ikisi de bu metoda girer:
+          1) 9. tabela dogrulanmasi (eski yol, KORUNDU)
+          2) rampa tepesinde IMU'nun duzlesmesi (YENI, kullanici istegi:
+             "belki 9'u okuyamayabilir")
+        Hangisi once gelirse fazi o baslatir; _silah_fazi_aktif bayragi
+        ikinci tetigin fazi yeniden baslatmasini engeller.
+
+        MANUEL'de faz OTONOMLASMAZ (arayuz kontrolu operatorde kalir) ama
+        MODEL yine de acilir - operator nisangahla elle atis yapabilsin."""
+        if not self._silah_modeli_acildi:
+            self._silah_modeli_acildi = True
+            self._turret_model_pub.publish(Bool(data=True))
+            self.get_logger().warn(
+                '🎯 SILAH MODELI ACILDI (%s) - hedef algilama calisiyor.' % kaynak)
+
+        if self._silah_fazi_aktif:
+            return
+        if self._silah_otonom_gerekir and self._surus_modu != 'OTONOM':
+            self._silah_modu_pub.publish(String(data='MANUEL'))
+            self.get_logger().warn(
+                '🔫 Arayuz MANUEL - silah OTONOMA GECMEDI (%s). Model acik, '
+                'taret kendiliginden hareket etmeyecek.' % kaynak)
+            return
+        self._silah_fazi_aktif = True
+        self._silah_fazi_baslangici = time.time()
+        self._silah_fazini_baslat()
 
     def _silah_fazini_baslat(self):
         """Silah fazi: arac durur, turret OTONOM hedeflemeye baslar.
@@ -620,6 +664,25 @@ class TabelaEtapYoneticisi(Node):
         self.get_logger().info(
             '🔫 Silah fazi: SILAH OTONOM, ARAC MANUEL. Tabela modeli KAPALI '
             '(3 atis tamamlaninca geri acilacak).')
+
+    def _silah_sonrasi_devam(self):
+        """3 atis + gecikme sonrasi: otonom surus geri acilir; rampa
+        dizisi tepede bekliyorsa INIS adimina gecirilir."""
+        if self._silah_devam_zamanlayici is not None:
+            try:
+                self._silah_devam_zamanlayici.cancel()
+            except Exception:
+                pass
+            self._silah_devam_zamanlayici = None
+        self._otonom_surus_ayarla(True)
+        if self._rampa_durum == _R_SILAH_BEKLE:
+            self._rampa_durum = _R_INIS_BEKLE
+            self._rampa_esik_zamani = None
+            self.get_logger().warn(
+                '✅ Silah fazi bitti - DEVAM. Simdi IMU -%.0f derece (inis) '
+                'bekleniyor.' % RAMPA_IMU_ESIGI_DERECE)
+        else:
+            self.get_logger().info('✅ Silah fazi bitti - otonom surus acildi.')
 
     def _silah_fazini_bitir(self):
         """10. tabela: turret kapanir, tabela modeli calismaya devam eder,
@@ -764,37 +827,78 @@ class TabelaEtapYoneticisi(Node):
                 '⛰️ Inis tetigi teyit edildi (%s) - IMU -%.0f derece bekleniyor.'
                 % (kaynak, RAMPA_IMU_ESIGI_DERECE))
 
+    def _silah_emniyet_suresini_kontrol_et(self):
+        """Silah fazi cok uzun surduyse vazgecip yola devam eder.
+
+        10. tabela artik fazi KESMIYOR (sahte tespit riski, bkz.
+        SILAH_FAZI_AZAMI_SURE_S). Tek kacis yolu bu sure - hedef hic
+        bulunamazsa arac parkurda sonsuza kadar beklemesin."""
+        if not self._silah_fazi_aktif or self._silah_fazi_baslangici is None:
+            return
+        if (time.time() - self._silah_fazi_baslangici) < SILAH_FAZI_AZAMI_SURE_S:
+            return
+        self.get_logger().warn(
+            '⏰ SILAH FAZI EMNIYET SURESI DOLDU (%.0f sn, 3 atis '
+            'tamamlanamadi) - silah kapatiliyor, yola devam.'
+            % SILAH_FAZI_AZAMI_SURE_S)
+        self._silah_fazi_aktif = False
+        self._silah_fazi_baslangici = None
+        self._silah_modeli_acildi = False
+        self._silah_fazi_pub.publish(Bool(data=False))
+        self._silah_fazini_bitir()
+        # Rampa tepesinde bekliyorsak inise gecilmeli - yoksa dizi
+        # _R_SILAH_BEKLE'de takili kalir ve inis hic baslamaz.
+        if self._rampa_durum == _R_SILAH_BEKLE:
+            self._rampa_durum = _R_INIS_BEKLE
+            self._rampa_esik_zamani = None
+
     def _rampa_dizisini_isle(self):
         """IMU egimine gore rampa dizisi (her /odom'da cagrilir)."""
+        # Emniyet suresi surus modundan BAGIMSIZ islemeli.
+        self._silah_emniyet_suresini_kontrol_et()
         if self._surus_modu != 'OTONOM':
             return
         su_an = time.time()
         d = self._rampa_durum
 
         if d == _R_TIRMANIS_BEKLE:
+            # TIRMANIS ALGILANDI -> DURMA YOK (2026-09-11). Sadece
+            # "tepede duzlesmeyi bekle" durumuna gecilir; arac egimi
+            # kesintisiz cikar (surus_koprusu egimde tam gaz veriyor).
             if self._egim_derece >= RAMPA_IMU_ESIGI_DERECE:
+                self._rampa_durum = _R_DUZLESME_BEKLE
+                self._rampa_esik_zamani = None
+                self.get_logger().warn(
+                    '⛰️ TIRMANIS ALGILANDI (IMU %.1f derece) - DURMADAN devam '
+                    'ediliyor. Tepede IMU duzlesince (|egim| <= %.0f derece, '
+                    '%.1f sn teyit) DURULACAK ve silah fazi baslayacak.'
+                    % (self._egim_derece, RAMPA_DUZ_ESIGI_DERECE,
+                       RAMPA_DUZLESME_GECIKMESI_S))
+
+        elif d == _R_DUZLESME_BEKLE:
+            # Tepeye cikip yataya oturdu mu? Anlik sarsintiyi "duzlesme"
+            # sanmamak icin esik SURE boyunca korunmali.
+            if abs(self._egim_derece) <= RAMPA_DUZ_ESIGI_DERECE:
                 if self._rampa_esik_zamani is None:
                     self._rampa_esik_zamani = su_an
-                    self.get_logger().warn(
-                        '⛰️ TIRMANIS ALGILANDI (IMU %.1f derece) - %.0f sn sonra '
-                        'durulacak.' % (self._egim_derece, RAMPA_DURMA_GECIKMESI_S))
-                elif (su_an - self._rampa_esik_zamani) >= RAMPA_DURMA_GECIKMESI_S:
-                    self._rampa_durum = _R_TEPEDE_DUR
-                    self._rampa_bekleme_zamani = su_an
+                elif (su_an - self._rampa_esik_zamani) >= RAMPA_DUZLESME_GECIKMESI_S:
+                    self._rampa_durum = _R_SILAH_BEKLE
                     self._rampa_esik_zamani = None
                     self._gecici_dur()
                     self._otonom_surus_ayarla(False)
                     self.get_logger().warn(
-                        '🛑 TIRMANISTA DURULDU (IMU %.1f derece) - %.0f sn '
-                        'bekleniyor.' % (self._egim_derece, RAMPA_BEKLEME_S))
+                        '🛑 TEPEDE DUZLESTI (IMU %.1f derece) - DURULDU. '
+                        'Silah fazi baslatiliyor (9. tabela BEKLENMIYOR).'
+                        % self._egim_derece)
+                    self._silah_fazini_tetikle('rampa tepesi (IMU duzlesti)')
+            else:
+                # Henuz duz degil - teyit sayacini sifirla.
+                self._rampa_esik_zamani = None
 
-        elif d == _R_TEPEDE_DUR:
-            if (su_an - self._rampa_bekleme_zamani) >= RAMPA_BEKLEME_S:
-                self._rampa_durum = _R_INIS_BEKLE
-                self._otonom_surus_ayarla(True)
-                self.get_logger().warn(
-                    '✅ Tirmanis beklemesi bitti - DEVAM. Simdi IMU -%.0f derece '
-                    '(inis) bekleniyor.' % RAMPA_IMU_ESIGI_DERECE)
+        elif d == _R_SILAH_BEKLE:
+            # Silah fazi calisiyor; devam karari _hedef_vuruldu_cb'den
+            # (3 atis + SILAH_SONRASI_DEVAM_GECIKMESI_S) geliyor.
+            pass
 
         elif d == _R_INIS_BEKLE:
             if self._egim_derece <= -RAMPA_IMU_ESIGI_DERECE:
@@ -961,8 +1065,24 @@ class TabelaEtapYoneticisi(Node):
         # bunu VETO olarak kullaniyor. Ates bitince GERI ACILMALI, yoksa
         # arac asagidaki ileri hedefi tamamlayip bir daha hic hedef
         # almaz ve parkurun geri kalaninda hareketsiz kalirdi.
-        self._otonom_surus_ayarla(True)
         self._silah_fazi_aktif = False
+        self._silah_fazi_baslangici = None
+
+        # DEVAM GECIKMESI (2026-09-11, kullanici: "silah 3 saniye attiktan
+        # sonra devam etsin"): otonom surusu HEMEN acmak yerine kisa bir
+        # pay birakilir - son atisin lazeri sonerken arac kalkmasin.
+        # Rampa dizisi tepede (_R_SILAH_BEKLE) bekliyorsa ayni anda
+        # inis adimina gecirilir.
+        if self._silah_devam_zamanlayici is not None:
+            try:
+                self._silah_devam_zamanlayici.cancel()
+            except Exception:
+                pass
+        self._silah_devam_zamanlayici = self.create_timer(
+            SILAH_SONRASI_DEVAM_GECIKMESI_S, self._silah_sonrasi_devam)
+        self.get_logger().info(
+            '⏳ %.0f sn sonra otonom surus geri acilacak.'
+            % SILAH_SONRASI_DEVAM_GECIKMESI_S)
 
         inis_mesafesi = SON_ILERI_PAY_M
         if self._rampa_baslangic_pozu is not None and self._son_odom is not None:

@@ -198,7 +198,12 @@ class TufanGCS(QMainWindow):
         # butonu terminal içinde olsun").
         terminal_konteyner = QWidget(self.ui.log_ekran)
         konteyner_duzen = QVBoxLayout(terminal_konteyner)
-        konteyner_duzen.setContentsMargins(0, 0, 0, 0)
+        # 2026-10-28 (kullanici: "canli log ekraninin asagi kaydirma alanini
+        # biraz kisalt, curve oldugu icin az miktarda tasiyor"):
+        # kenar bosluklari SIFIRDI, icerik log_ekran'in 16px kavisinin
+        # DISINA tasiyordu (koseli icerik yuvarlak cerceveyi asiyordu).
+        # Kucuk bir ic bosluk, icerigi kavisin icinde tutuyor.
+        konteyner_duzen.setContentsMargins(10, 8, 10, 10)
         konteyner_duzen.setSpacing(2)
 
         arac_cubugu = QWidget(terminal_konteyner)
@@ -396,7 +401,7 @@ class TufanGCS(QMainWindow):
         basliklar = [
             self.ui.label_ayarlarYazi, self.ui.label_genelAyarlarYazi, 
             self.ui.label_kontrolAyarlariYazi, self.ui.label_guvenlikKontrolleriYazi, 
-            self.ui.label_goruntuAyarlari, self.ui.label_veriYedeklemeYazi,
+            self.ui.label_veriYedeklemeYazi,
             self.ui.label_arac, self.ui.label_yer
         ]
         for baslik in basliklar:
@@ -1789,7 +1794,11 @@ class TufanGCS(QMainWindow):
                          + (f" -> {klasor}" if klasor else ""))
 
     def yedekleme_tetikle(self):
-        hedef_klasor = self.ui.lineEdit_hedefKlasor.text() 
+        # 2026-10-28: "Hedef Klasor" kutusu kaldirildi (islevsizdi, kullanici
+        # istegi). Yedekleme artik kamera kayitlariyla AYNI yere yaziyor -
+        # bkz. kamera_sistemi.KAYIT_KOK_KLASORU.
+        hedef_klasor = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "kayitlar")
         dil = CEVIRILER.get(self.aktif_dil, CEVIRILER["Türkçe"])
         if not self.yedekleme_yapiyor_mu:
             self.ui.pushButton_simdiYedekle.setStyleSheet(YEDEK_AKTIF)
@@ -1881,24 +1890,21 @@ class TufanGCS(QMainWindow):
         self.ui.pushButton_KAYIT.setText(dil["veri_kaydet"])
         self.ui.label_baslik.setText("TUFAN YER KONTROL İSTASYONU" if self.current_lang == "Türkçe" else "TUFAN GROUND CONTROL STATION")
         
-        if secilen_dil == "English":
-            p_genel = "18px" 
-            p_sifre = "19px"
-        else:
-            p_genel = "24px" 
-            p_sifre = "24px"
+        # p_sifre KALDIRILDI (2026-10-28): tek kullanicisi olan
+        # label_sifre ayarlar ekranindan silindi.
+        p_genel = "18px" if secilen_dil == "English" else "24px"
 
         self.ui.label_genelAyarlarYazi.setText(f"<span style='font-size: {p_genel}; font-weight: bold;'>{dil['genel_ayarlar']}</span>")
-        self.ui.label_sifre.setText(f"<span style='font-size: {p_sifre}; font-weight: bold;'>{dil['sifre']}</span>")
         self.ui.label_guvenlikKontrolleriYazi.setText(dil["guvenlik_kontrolleri"])
-        self.ui.label_kullaniciAdi.setText(dil["kullanici_adi"])
+        # 2026-10-28: Ayarlar ekranindan KALDIRILAN alanlar (yayin
+        # kalitesi, FPS, hedef klasor, kullanici adi, sifre, VPN) -
+        # hicbiri bir ise baglanmamisti (olu arayuz). Ilgili widget'lar
+        # tasarim.ui'den silindi, buradaki setText cagrilari da bu
+        # yuzden kaldirildi.
         self.ui.label_telefon.setText(dil["telefon"])
         self.ui.label_canliSistemLog.setText(dil["canli_log"])
         self.ui.label_bildirimler.setText(dil["bildirimler"])
         self.ui.label_sifreleme.setText(dil["sifreleme"])
-        self.ui.label_goruntuAyarlari.setText(dil["goruntu_ayarlari"])
-        self.ui.label_yayinKalite.setText(dil["yayin_kalitesi"])
-        self.ui.label_FPS.setText(dil["fps_siniri"])
         
         durum_klavye = getattr(self, 'klavye_aktif', False)
         self.ui.pushButton_klavye.setText(dil["btn_aktif"] if durum_klavye else dil["btn_pasif"])
@@ -1910,7 +1916,6 @@ class TufanGCS(QMainWindow):
         self.ui.pushButton_joystick.setStyleSheet(AYAR_AKTIF if durum_joy else AYAR_PASIF)
         
         self.ui.label_veriYedeklemeYazi.setText(dil["veri_yedekleme"])
-        self.ui.label_hedefKlasor.setText(dil["hedef_klasor"])
         
         durum_sifre = getattr(self, 'sifreleme_acik', True)
         self.ui.pushButton_sifreleme.setText(dil["btn_acik"] if durum_sifre else dil["btn_kapali"])
@@ -1925,11 +1930,6 @@ class TufanGCS(QMainWindow):
 
         self.ui.comboBox_temaSecimi.setItemText(0, dil["tema_koyu"])
         self.ui.comboBox_temaSecimi.setItemText(1, dil["tema_acik"])
-        self.ui.comboBox_yayinKalite.setItemText(0, dil["kalite_1080"])
-        self.ui.comboBox_yayinKalite.setItemText(1, dil["kalite_720"])
-        self.ui.comboBox_yayinKalite.setItemText(2, dil["kalite_480"])
-        self.ui.comboBox_FPS.setItemText(0, dil["fps_60"])
-        self.ui.comboBox_FPS.setItemText(1, dil["fps_30"])
 
         self.ui.label_sistemBilgisiVeLisans.setText(dil["hakkinda_baslik"])
         self.ui.label_sistemBilgisiVeLisans.setAlignment(Qt.AlignCenter)
@@ -1940,11 +1940,9 @@ class TufanGCS(QMainWindow):
         
         if secilen_dil == "English":
             self.dinamik_punto_ayarla(self.ui.label_genelAyarlarYazi, 10) 
-            self.dinamik_punto_ayarla(self.ui.label_sifre, 11)
             self.dinamik_punto_ayarla(self.ui.pushButton_joystick, 9)
         else: 
             self.dinamik_punto_ayarla(self.ui.label_genelAyarlarYazi, 14) 
-            self.dinamik_punto_ayarla(self.ui.label_sifre, 14)
             self.dinamik_punto_ayarla(self.ui.pushButton_joystick, 11)
 
         try:
@@ -1971,16 +1969,105 @@ class TufanGCS(QMainWindow):
 
         self.log_yaz(f"Sistem: Dil / Language -> {secilen_dil}")
 
+    # Acik temada da KOYU kalmasi gereken alanlar - kamera goruntusu,
+    # log terminali ve bilgi karti. Stilleri tema gecisinde DEGISTIRILMEZ.
+    KOYU_KALAN_WIDGETLAR = frozenset({
+        "frame_anaKamera", "frame_yanKamera1", "frame_yanKamera2",
+        "frame_yanKamera3", "log_ekran", "frame_BilgiKart",
+        "frame_navigasyonAlan", "textEdit_canliSistemLog",
+        # SSH terminali: log_ekran'in ICINDE ve onu TAMAMEN dolduruyor.
+        # Listeye alinmazsa rengi soyulup BEYAZ cikiyor ve log_ekran'in
+        # siyah zemini hic gorunmuyordu (render ile tespit edildi).
+        "terminal_ekrani",
+    })
+
+    # ACIK TEMAYA OZEL TAM STILLER (2026-10-28).
+    # NEDEN GEREKLI: renkleri soyulan bir widget'in zeminini uygulama
+    # seviyesindeki TEMA_ACIK'tan vermek HER ZAMAN tutmuyor - Qt, kendi
+    # stili olan bir QFrame'in zeminini palete gore ciziyor ve varsayilan
+    # GRI cikiyor. Ana menudeki halka tam bunu yasadi: acik temada ortada
+    # gri bir disk olarak gorunuyordu (kullanici bildirdi, render ile
+    # dogrulandi; "#frame_halka" yerine "QFrame#frame_halka" yazmak bile
+    # yetmedi). Bu sozlukteki widget'lara stil DOGRUDAN yaziliyor.
+    ACIK_TEMA_OZEL = {
+        # Dekoratif halka: koyu temada bu cerceve rgba(0,0,0,50) ile hafif bir "cukur"
+        # olusturur ve koyu zeminde hic belli olmaz. Ayni mantikla acik
+        # temada herhangi bir dolgu (alfa 10 bile) zemini 6 ton
+        # koyultarak EKRANIN ORTASINDA GRI BIR DISK olarak gorunuyordu
+        # (olculdu: zemin #EDF2F7 -> disk #E7EDF3). Bu yuzden acik temada
+        # cerceve TAMAMEN SAYDAM; radar halkasini zaten ustundeki
+        # label_radar_cember kesikli #00bfff elips olarak ciziyor.
+        "frame_halka": ("QFrame#frame_halka { "
+                        "background-color: transparent; "
+                        "border: none; "
+                        "border-radius: 175px; }"),
+    }
+
+    # Stil icindeki RENK bildirimlerini yakalayan desen (bkz. _stil_renklerini_soy).
+    _RENK_BILDIRIMI = re.compile(
+        r'\s*(?:background(?:-color|-image)?|color|border-color|'
+        r'border-(?:top|right|bottom|left)-color|'
+        r'selection-background-color|selection-color|'
+        r'alternate-background-color|gridline-color)\s*:[^;}]*;?',
+        re.IGNORECASE)
+    # "border: 2px solid #334155" gibi KISA YAZIM - genislik/bicim KALMALI,
+    # renk gitmeli. "border: none" ayrica ele alinir.
+    _BORDER_KISA = re.compile(
+        r'\bborder\s*:\s*(\d+(?:px|pt)?)\s+'
+        r'(solid|dashed|dotted|double|groove|ridge|inset|outset)[^;}]*;?',
+        re.IGNORECASE)
+
+    @classmethod
+    def _stil_renklerini_soy(cls, stil):
+        """Bir widget stilinden SADECE renkleri cikarir, YAPIYI korur.
+
+        AÇIK TEMA HATASI (2026-10-28, kullanici: "acik temaya gecince
+        yazilar kutular bozuluyor, curveli objeler dik koseli oluyor"):
+        eski kod her QFrame'in stilini setStyleSheet("") ile TAMAMEN
+        siliyordu; TEMA_ACIK ise sadece ISIM ISIM sayilan frame'leri geri
+        boyuyordu. Listede olmayan her sey kavisini kaybediyordu - olcum:
+        frame_halka (175px, bir HALKA -> kare oluyordu), frame_navigasyonAlan
+        (32px) ve alt_bar (16px).
+
+        Dogru yaklasim: stili SILME, sadece RENK bildirimlerini soy.
+        border-radius / padding / margin / font / border-width hepsi yerinde
+        kalir; renkleri uygulama seviyesindeki TEMA_ACIK verir. Boylece
+        acik temaya YENI eklenen bir widget da kendiliginden dogru calisir -
+        isim listesine eklemeyi unutmak diye bir risk kalmaz."""
+        if not stil:
+            return stil
+        stil = cls._BORDER_KISA.sub(
+            lambda m: 'border-width: %s; border-style: %s;' % (m.group(1), m.group(2)),
+            stil)
+        return cls._RENK_BILDIRIMI.sub('', stil)
+
     def tema_degistir(self, index):
-        if index == 1: 
-            for cerceve in self.findChildren(QFrame):
-                korunacaklar = ["frame_anaKamera", "frame_yanKamera1", "frame_yanKamera2", "frame_yanKamera3", "log_ekran", "frame_BilgiKart"]
-                if cerceve.objectName() not in korunacaklar:
-                    cerceve.setStyleSheet("") 
+        if index == 1:
+            # ACIK TEMA - bkz. _stil_renklerini_soy'daki ayrintili not.
+            for widget in self.findChildren(QWidget):
+                ad = widget.objectName()
+                if ad not in self.orijinal_tasarim_hafizasi:
+                    continue
+                if ad in self.ACIK_TEMA_OZEL:
+                    widget.setStyleSheet(self.ACIK_TEMA_OZEL[ad])
+                    continue
+                if ad in self.KOYU_KALAN_WIDGETLAR:
+                    # Bu alanlar acik temada da KOYU kalmali (kamera
+                    # goruntusu, log terminali, bilgi karti). Stillerine
+                    # HIC DOKUNULMUYOR: hem rengi hem kavisi zaten dogru.
+                    # ONCEKI DENEME: renkleri soyulup TEMA_ACIK'tan
+                    # verilmesi denendi - Qt, kendi stili olan bir
+                    # QFrame'in zeminini palete gore cizdigi icin log
+                    # terminali BEYAZ cikti (render ile goruldu).
+                    widget.setStyleSheet(self.orijinal_tasarim_hafizasi[ad])
+                    continue
+                widget.setStyleSheet(
+                    self._stil_renklerini_soy(
+                        self.orijinal_tasarim_hafizasi[ad]))
             self.setStyleSheet(TEMA_ACIK)
             self.log_yaz("Sistem: Açık Tema Aktif Edildi.")
-        elif index == 0: 
-            self.setStyleSheet("") 
+        elif index == 0:
+            self.setStyleSheet("")
             for widget in self.findChildren(QWidget):
                 if widget.objectName() in self.orijinal_tasarim_hafizasi:
                     widget.setStyleSheet(self.orijinal_tasarim_hafizasi[widget.objectName()])

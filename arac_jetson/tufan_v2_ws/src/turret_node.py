@@ -611,7 +611,20 @@ class TurretNode(Node):
         # akim ayari duzeltmesinden SONRA yeniden kalibre edildi (sahada
         # ikili arama ile: 6.8/8.8 arasi -> 7.8 -> 8.3 X icin dogrulandi,
         # Y tek denemede -14.3 ile tam oturdu).
-        self.declare_parameter('nisan_bias_x_px', 9.4)
+        # 2026-09-10, montaj degisikligi sonrasi yatay trim: sahada
+        # "20 cm sola al" istendi. 8 m'de 1 px = 2.694 cm -> 20 cm = 7.42 px
+        # -> 9.4 + 7.42 = 16.82.
+        # ISARET KURALI (Y icin SAHADA dogrulanmis kuraldan TURETILDI,
+        # ayni mekanizma): dx ARTAR -> nisangah goruntude SAGA kayar ->
+        # hedefi oraya getirmek icin taret SOLA doner -> LAZER SOLA gider.
+        # Yani: nisan_bias_x_px ARTIRILIR -> lazer SOLA
+        #       nisan_bias_x_px AZALTILIR -> lazer SAGA
+        # *** X ISARETI ARTIK SAHADA DOGRULANDI (2026-09-10) ***
+        # 9.4 -> 16.82 yapildi ("20 cm sola"), operator ardindan "10 cm
+        # DAHA sola" istedi - yani lazer gercekten SOLA gitmisti. Yon
+        # tartismasiz: ARTIRMAK = SOLA. Son deger 16.82 + 3.71 = 20.53
+        # (toplam 30 cm sola).
+        self.declare_parameter('nisan_bias_x_px', 20.53)
         # 2026-09-06: "lazer hep yukari vuruyor" sikayeti uzerine bias
         # ONCE -17.3, SONRA -11.3 denendi; IKISINDE DE "daha yukari vurdu".
         # SABIT bir nisan trim'i iki ZIT yonde birden kotulesemez - demek ki
@@ -622,7 +635,18 @@ class TurretNode(Node):
         # Olcek (ileride gerekirse): 1 px ~ 3.4 cm @ 10m, ARTIRMAK lazeri
         # ASAGI indirir. Ama once backlash'in dogru oldugundan emin ol -
         # trim sabit, backlash yone bagli; biri digerini telafi EDEMEZ.
-        self.declare_parameter('nisan_bias_y_px', -25.0)
+        # 2026-09-10: FIZIKSEL MONTAJ DEGISTI, nisangah kaydi. Sahada
+        # olculdu: hedef nisangaha ortalaninca lazer 15 cm ASAGI vuruyordu
+        # (~8 m mesafede). Odak 296.92 px oldugu icin 8 m'de 1 px = 2.694 cm
+        # -> 15 cm = 5.57 px. Lazeri YUKARI almak icin bias ARTIRILIR
+        # (yukaridaki nota bakiniz): -25.0 + 5.57 = -19.43.
+        # ARDINDAN sahada 30 cm daha yukari istendi: 30 cm = 11.13 px
+        # -> -19.43 + 11.13 = -8.30. Toplam duzeltme 45 cm (16.7 px).
+        # NOT: bu trim MESAFEDEN BAGIMSIZ (sabit acisal sapma) - montaj
+        # kaynakli egiklik boyle davranir. Baska bir mesafede de dogrulanmali;
+        # hata mesafeyle DEGISIYORSA sebep acisal degil paralakstir ve
+        # kamera_lazer_dikey_mm ayarlanmalidir.
+        self.declare_parameter('nisan_bias_y_px', -8.30)
         # GUVENLIK: TF02-Pro ara sira (yansima/multipath, checksum'dan gecen
         # ama fiziksel olarak imkansiz) COK yakin bir mesafe raporlayabiliyor
         # (sahada 6-36cm gibi degerler gorduk) - bu esigin ALTINDAKI ham
@@ -836,6 +860,11 @@ class TurretNode(Node):
         # heartbeat, hassas surunme ve ates - hepsi TEK noktadan kesiliyor,
         # yeni bir cagri yolu eklense bile acik kalmiyor.
         self._acil_stop = False
+        # Seri yazma hatasi sayaci (bkz. _seri_portu_yenile). Ard arda bu
+        # kadar hata = baglanti olmus demektir; tek tuk hata (mesgul port,
+        # gecici EAGAIN) yeniden acmayi tetiklemesin diye esik var.
+        self._yazma_hatasi_sayaci = 0
+        self._YAZMA_HATASI_ESIGI = 20
         self._manuel_adim_sayisi = 20
         self._MANUEL_ADIM_MIN = 2
         self._MANUEL_ADIM_MAX = 100
@@ -1012,6 +1041,14 @@ class TurretNode(Node):
         karti) VID:PID'e, bulamazsa tanimlayicida "arduino mega" gecen porta,
         o da yoksa sadece "arduino" gecen ilk porta gore bulur. Hicbiri yoksa
         None doner (bu durumda serial_port parametresine geri dusulur)."""
+        # KARARLI UDEV SEMBOLU ONCE (2026-09-10): /dev/tufan_turret_arduino
+        # cekirdek tarafindan ACILMA aninda cozuluyor, yani ACM numarasi
+        # kaysa bile dogru cihaza gider. VID:PID taramasi o ANIN gercegini
+        # donduruyor - hub yeniden baglanip cihaz ACM0'dan ACM4'e kayinca
+        # (10 Eylul'de tam bu oldu) eski numara gecersiz kaliyordu.
+        if os.path.exists('/dev/tufan_turret_arduino'):
+            return '/dev/tufan_turret_arduino'
+
         yedek = None
         for p in serial.tools.list_ports.comports():
             if (p.vid, p.pid) in ARDUINO_MEGA_VID_PID:
@@ -1180,6 +1217,26 @@ class TurretNode(Node):
         else:
             self._lazer_gonder('k')
 
+    def _seri_portu_yenile(self, kaynak):
+        """Ölü seri baglantiyi kapatip YENIDEN acar (bkz. yazici thread'ler).
+
+        Portu yeniden ARAR - cihaz baska bir ACM numarasina kaymis
+        olabilir. Basarisiz olursa bir sonraki esikte tekrar denenir;
+        sureç ASLA olmez, taret cihaz geri gelince kendiliginden calisir."""
+        self._yazma_hatasi_sayaci = 0
+        self.get_logger().warn(
+            'Taret seri baglantisi olu (%s) - port yeniden aciliyor...' % kaynak)
+        try:
+            if self._arduino is not None:
+                self._arduino.close()
+        except Exception:
+            pass
+        self._arduino = None
+        try:
+            self._baglanti_kur()
+        except Exception as e:
+            self.get_logger().error('Taret portu yeniden acilamadi: %s' % e)
+
     def _arduino_yazici_thread(self):
         while self._calisiyor:
             try:
@@ -1192,11 +1249,25 @@ class TurretNode(Node):
                         self._arduino.write(b'x')
                     else:
                         self._arduino.write(karakter.encode('utf-8') + bytes([max(0, min(255, hiz))]))
+                    # Basarili yazim: hata sayacini SIFIRLA - aksi halde
+                    # aylar icinde birikip saglikli bir portu bosuna
+                    # yeniden actirirdi (esik ARD ARDA hata icin).
+                    self._yazma_hatasi_sayaci = 0
                 self._arduino_kuyruk.task_done()
             except queue.Empty:
                 continue
             except Exception as e:
-                self.get_logger().error(f'Seri port yazma hatasi: {e}')
+                # KENDINI TOPARLAMA (2026-09-10, sahada olculdu: 1824 hata):
+                # USB hub'i yeniden baglaninca cihaz ACM0 -> ACM4 olarak
+                # yeniden numaralandi; node OLU dosya tanimlayicisini
+                # tutmaya devam etti ve taret/lazer SESSIZCE calismaz oldu
+                # (sureç ayakta, log doluyor, kimse fark etmiyor). Artik
+                # ard arda hata birikince port kapatilip YENIDEN aciliyor.
+                self._yazma_hatasi_sayaci += 1
+                if self._yazma_hatasi_sayaci >= self._YAZMA_HATASI_ESIGI:
+                    self._seri_portu_yenile('hareket')
+                else:
+                    self.get_logger().error(f'Seri port yazma hatasi: {e}')
                 time.sleep(0.1)
 
     def _komut_gonder(self, karakter, hiz=255):
@@ -1223,7 +1294,11 @@ class TurretNode(Node):
             except queue.Empty:
                 continue
             except Exception as e:
-                self.get_logger().error(f'Lazer seri port yazma hatasi: {e}')
+                self._yazma_hatasi_sayaci += 1
+                if self._yazma_hatasi_sayaci >= self._YAZMA_HATASI_ESIGI:
+                    self._seri_portu_yenile('lazer')
+                else:
+                    self.get_logger().error(f'Lazer seri port yazma hatasi: {e}')
                 time.sleep(0.1)
 
     def _lazer_gonder(self, karakter):
@@ -1246,11 +1321,16 @@ class TurretNode(Node):
                     self._arduino.write(
                         b'b' + yon.encode('utf-8') + bytes([max(1, min(255, adim_sayisi))])
                     )
+                    self._yazma_hatasi_sayaci = 0
                 self._adim_kuyruk.task_done()
             except queue.Empty:
                 continue
             except Exception as e:
-                self.get_logger().error(f'Adim seri port yazma hatasi: {e}')
+                self._yazma_hatasi_sayaci += 1
+                if self._yazma_hatasi_sayaci >= self._YAZMA_HATASI_ESIGI:
+                    self._seri_portu_yenile('adim')
+                else:
+                    self.get_logger().error(f'Adim seri port yazma hatasi: {e}')
                 time.sleep(0.1)
 
     def _coklu_adim_gonder(self, yon, adim_sayisi):

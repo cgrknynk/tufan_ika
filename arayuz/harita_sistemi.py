@@ -66,12 +66,18 @@ else:
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QPoint, QRectF, QPointF, QEvent, QTimer
 from PyQt5.QtGui import (QPainter, QColor, QPen, QFont, QPolygon, 
                          QLinearGradient, QBrush, QRadialGradient, QPolygonF,
-                         QPixmap)
+                         QPixmap, QPainterPath)
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QLabel, QFrame, QTabWidget,
                              QListWidget, QListWidgetItem, QDoubleSpinBox,
                              QGridLayout)
 from uydu_harita_widget import UyduHaritaWidget
+from cizim_yardimcilari import yuvarlak_kirp, yuvarlak_cerceve_ciz
+
+# Qt stil sayfasindaki url() GECERLI CALISMA DIZININE gore cozulur; arayuz
+# baska bir dizinden baslatilirsa ikonlar sessizce kaybolur. Bu yuzden
+# ikon yollari her zaman BU DOSYANIN dizininden mutlak olarak uretilir.
+_BU_DIZIN = os.path.dirname(os.path.abspath(__file__))
 
 # ==============================================================================
 # 1. ROS 2 ARKA PLAN MOTORU (Orijinal Çalışan QThread + Thread-Safe Nav2)
@@ -699,9 +705,13 @@ class Ros2GcsMotoru(QThread):
 # 2. SOL PANEL: GERÇEK ZAMANLI SUNİ UFUK GÖSTERGESİ
 # ==============================================================================
 class SuniUfukEkrani(QFrame):
+    _KOSE_YARICAP = 15   # stil sayfasindaki border-radius ile AYNI olmali
     def __init__(self):
         super().__init__()
         self.setMinimumSize(300, 300)
+        # Stil sayfasi burada SADECE belgeleyici: paintEvent super()'i
+        # cagirmadigi icin Qt bunu cizmiyor. Gercek cizim paintEvent
+        # icinde _KOSE_YARICAP ile yapiliyor - ikisi ayni kalmali.
         self.setStyleSheet("background-color: #11141a; border: 2px solid #222b38; border-radius: 15px;")
         self.roll = 0.0
         self.pitch = 0.0
@@ -744,7 +754,15 @@ class SuniUfukEkrani(QFrame):
         ressam = QPainter(self)
         try:
             ressam.setRenderHint(QPainter.Antialiasing)
+            # YUVARLAK KOSE (2026-10-28): stil sayfasindaki
+            # "border-radius: 15px" bu widget'ta OLU - super().paintEvent()
+            # hic cagrilmadigi icin Qt zemini/cerceveyi cizmiyor. Mavi
+            # gokyuzu dolgusu dikdortgen oldugundan koselere kadar tasiyip
+            # kutuyu KOSELI gosteriyordu. Bkz. cizim_yardimcilari.py.
+            yuvarlak_kirp(ressam, self, self._KOSE_YARICAP)
+            ressam.fillRect(self.rect(), QColor("#11141a"))
             self._paintEvent_govde(ressam)
+            yuvarlak_cerceve_ciz(ressam, self, self._KOSE_YARICAP, "#222b38", 2)
         finally:
             ressam.end()
 
@@ -756,7 +774,20 @@ class SuniUfukEkrani(QFrame):
 
         ressam.save()
         ressam.translate(merkez_x, merkez_y)
-        ressam.setClipRect(int(-yaricap), int(-yaricap), int(yaricap * 2), int(yaricap * 2))
+        # DAIRESEL KIRPMA (2026-10-28, kullanici: "bazi objelerin koseleri
+        # silik gibi gozukmuyordu"):
+        # Eskiden burada KARE bir kirpma vardi (setClipRect) - gokyuzu/yer
+        # dolgusu kare cikiyor, uzerine asagida AYNI yaricapla cyan bir
+        # DAIRE ciziliyordu. Sonuc: karenin dort kosesi dairenin DISINA
+        # tasiyordu; suni ufuk "bitmemis", koseleri duzensiz goruniyordu.
+        # Artik dolgu tam olarak o dairenin icine kirpiliyor - gercek bir
+        # attitude topu. Kirpma rotate'ten ONCE kuruldugu icin daire roll
+        # ile donse de ayni kaliyor (daire donmeye duyarsiz).
+        # IntersectClip: varsayilan ReplaceClip, paintEvent'te kurulan
+        # widget hattindaki yuvarlak kirpmayi silerdi.
+        top_yolu = QPainterPath()
+        top_yolu.addEllipse(QRectF(-yaricap, -yaricap, yaricap * 2, yaricap * 2))
+        ressam.setClipPath(top_yolu, Qt.IntersectClip)
         
         ressam.rotate(self.roll)
         pitch_piksel = self.pitch * 2.5
@@ -823,12 +854,16 @@ class SuniUfukEkrani(QFrame):
 # 3. SAĞ PANEL: KOORDİNELİ 3D TAKTİK RADAR (Nav2 + Mouse Kontrolü)
 # ==============================================================================
 class TaktikRadarEkrani(QFrame):
+    _KOSE_YARICAP = 15   # stil sayfasindaki border-radius ile AYNI olmali
     hedef_belirlendi = pyqtSignal(float, float, float, float)  # ARTIK KULLANILMIYOR (bkz. rota_gonder_istendi) - geriye dönük uyumluluk için tutuldu
     rota_gonder_istendi = pyqtSignal(list)  # [(x, y, q_z, q_w), ...] - "ROTAYI GÖNDER" tıklanınca
 
     def __init__(self):
         super().__init__()
         self.setMinimumSize(450, 450)
+        # Bkz. SuniUfukEkrani: paintEvent super()'i cagirmadigi icin bu
+        # satiri Qt CIZMIYOR; kavis ve cerceve paintEvent icinde
+        # _KOSE_YARICAP ile el ile uygulaniyor.
         self.setStyleSheet("background-color: #0b0e14; border: 2px solid #1e2836; border-radius: 15px;")
         
         self.noktalar = []
@@ -988,9 +1023,14 @@ class TaktikRadarEkrani(QFrame):
         panel - kullanıcı isteği: 'sağ tarafta atılan işaretlerin mesafesi
         olsun'. resizeEvent'te sağa hizalanır (bkz. resizeEvent)."""
         self._panel = QWidget(self)
+        # 2026-10-28 (kullanici: "navigasyon ve gorev planlama ekraninda
+        # sonradan ekledigimiz seyler genel tasarima gore cok koseli").
+        # Uygulamanin tasarim dili: panel 15-16px, ic kart 10-12px kavis.
+        # Bu panel 0px idi - keskin bir dikdortgen olarak duruyordu.
+        # Renkler ve davranis AYNEN korundu, sadece kavis/kenar eklendi.
         self._panel.setStyleSheet(
             "QWidget { background-color: rgba(8, 12, 18, 235); "
-            "border-left: 2px solid #1e2836; }"
+            "border: 2px solid #1e2836; border-radius: 16px; }"
         )
         duzen = QVBoxLayout(self._panel)
         duzen.setContentsMargins(8, 8, 8, 8)
@@ -1006,13 +1046,15 @@ class TaktikRadarEkrani(QFrame):
         self._nokta_listesi_w = QListWidget()
         self._nokta_listesi_w.setStyleSheet(
             "QListWidget { background-color:#0b0e14; color:#e6edf3; "
-            "border:1px solid #1e2836; font-family:'DejaVu Sans Mono'; "
+            "border:1px solid #1e2836; border-radius:12px; padding:4px; "
+            "font-family:'DejaVu Sans Mono'; "
             "font-size:12px; }"
             # DOKUNMATIK (2026-09-04, kullanici: "silme dokunmatik ekranda
             # algilamiyor") - satir yuksekligi (padding) buyutuldu, tek
             # parmakla dogru satiri secmek kolaylassin diye.
             "QListWidget::item { padding:10px 4px; }"
-            "QListWidget::item:selected { background-color:#1a3b5c; }"
+            "QListWidget::item:selected { background-color:#1a3b5c; "
+            "border-radius:8px; }"
         )
         self._nokta_listesi_w.setToolTip("Kaldırmak için: seçip aşağıdaki SİL'e basın (veya çift tıklayın)")
         self._nokta_listesi_w.itemDoubleClicked.connect(self._nokta_sil)
@@ -1027,7 +1069,7 @@ class TaktikRadarEkrani(QFrame):
         self._sil_btn.setMinimumHeight(48)
         self._sil_btn.setStyleSheet(
             "QPushButton { background-color:#5c2e2e; color:white; "
-            "font-weight:bold; font-size:12px; border-radius:6px; padding:8px; }"
+            "font-weight:bold; font-size:12px; border-radius:12px; padding:8px; }"
             "QPushButton:hover { background-color:#763939; }"
         )
         self._sil_btn.clicked.connect(self._secili_noktayi_sil)
@@ -1064,9 +1106,35 @@ class TaktikRadarEkrani(QFrame):
             sb.setSingleStep(0.5)
             sb.setDecimals(1)
             sb.setSuffix(" m")
+            # Ok dugmeleri (up/down-button) stilsiz birakilirsa Qt onlari
+            # varsayilan KOSELI kutu olarak cizer ve kutunun 10px yuvarlak
+            # kenarinin disina tasip "centik" gorunumu olusturur. Bu yuzden
+            # alt kontroller de burada bilerek sekillendiriliyor: saydam
+            # zemin, cercevesiz, oklar ayri ikon olarak. Davranis aynidir -
+            # sadece gorunum panelin yuvarlak diline uyduruldu.
             sb.setStyleSheet(
                 "QDoubleSpinBox { background-color:#0b0e14; color:#e6edf3; "
-                "border:1px solid #1e2836; padding:2px; }"
+                "border:1px solid #1e2836; border-radius:10px; "
+                "padding:4px 24px 4px 8px; }"
+                "QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { "
+                "subcontrol-origin:border; width:18px; height:14px; "
+                "background:transparent; border:none; margin-right:5px; }"
+                "QDoubleSpinBox::up-button { subcontrol-position:top right; }"
+                "QDoubleSpinBox::down-button { subcontrol-position:bottom right; }"
+                "QDoubleSpinBox::up-button:hover, "
+                "QDoubleSpinBox::down-button:hover { "
+                "background:#162130; border-radius:6px; }"
+                # OK CIZIMI: CSS'in "seffaf kenarli ucgen" hilesi Qt stil
+                # motorunda ucgen degil KUCUK BIR KUTU olarak ciziliyor
+                # (denendi, goruldu); alt kontrolu cercevesiz birakinca da
+                # Qt yerel oku hic cizmedi. Bu yuzden ucgenler hazir ikon
+                # olarak veriliyor (icons/spin_*.png, 18x12, #9FB8D0).
+                "QDoubleSpinBox::up-arrow { image:url(%s); "
+                "width:18px; height:12px; }"
+                "QDoubleSpinBox::down-arrow { image:url(%s); "
+                "width:18px; height:12px; }"
+                % (os.path.join(_BU_DIZIN, 'icons', 'spin_yukari.png').replace('\\', '/'),
+                   os.path.join(_BU_DIZIN, 'icons', 'spin_asagi.png').replace('\\', '/'))
             )
             return sb
 
@@ -1087,7 +1155,7 @@ class TaktikRadarEkrani(QFrame):
         self._goreceli_ekle_btn.setMinimumHeight(48)
         self._goreceli_ekle_btn.setStyleSheet(
             "QPushButton { background-color:#1a5276; color:white; "
-            "font-weight:bold; font-size:12px; border-radius:6px; padding:8px; }"
+            "font-weight:bold; font-size:12px; border-radius:12px; padding:8px; }"
             "QPushButton:hover { background-color:#21618c; }"
         )
         self._goreceli_ekle_btn.clicked.connect(self._goreceli_nokta_ekle)
@@ -1104,7 +1172,7 @@ class TaktikRadarEkrani(QFrame):
         self._gonder_btn.setMinimumHeight(52)
         self._gonder_btn.setStyleSheet(
             "QPushButton { background-color:#00994d; color:white; "
-            "font-weight:bold; font-size:13px; border-radius:6px; padding:8px; }"
+            "font-weight:bold; font-size:13px; border-radius:12px; padding:8px; }"
             "QPushButton:hover { background-color:#00b359; }"
             "QPushButton:disabled { background-color:#2a3038; color:#5c6470; }"
         )
@@ -1115,7 +1183,7 @@ class TaktikRadarEkrani(QFrame):
         self._temizle_btn.setMinimumHeight(48)
         self._temizle_btn.setStyleSheet(
             "QPushButton { background-color:#992222; color:white; "
-            "font-weight:bold; font-size:12px; border-radius:6px; padding:8px; }"
+            "font-weight:bold; font-size:12px; border-radius:12px; padding:8px; }"
             "QPushButton:hover { background-color:#b32d2d; }"
         )
         self._temizle_btn.clicked.connect(self._listeyi_temizle)
@@ -1594,7 +1662,13 @@ class TaktikRadarEkrani(QFrame):
         ressam = QPainter(self)
         try:
             ressam.setRenderHint(QPainter.Antialiasing)
+            # YUVARLAK KOSE (2026-10-28) - bkz. cizim_yardimcilari.py.
+            # Radar zemini/izgarasi dikdortgen cizildigi icin kutunun
+            # koseleri KOSELI gorunuyordu.
+            yuvarlak_kirp(ressam, self, self._KOSE_YARICAP)
+            ressam.fillRect(self.rect(), QColor("#0b0e14"))
             self._paintEvent_govde(ressam)
+            yuvarlak_cerceve_ciz(ressam, self, self._KOSE_YARICAP, "#1e2836", 2)
         finally:
             ressam.end()
         self._profil_kaydet((time.perf_counter() - _t0) * 1000.0)
@@ -2098,11 +2172,33 @@ class HaritaYoneticisi:
         self.uydu_harita = UyduHaritaWidget()
 
         self.harita_sekmeleri = QTabWidget()
+
+        # SEKME YAZISI KIRPILMASI (2026-10-28, kullanici: "taktik lidar ve
+        # uydu haritasi yazilari sigmiyor"): sekme metinleri iki yanindan
+        # kesiliyordu ("TAKTIK LIDAR" -> "AKTIK LIDA").
+        # KOK NEDEN: stil sayfasi "font-weight: bold" diyor, ama Qt sekmenin
+        # GENISLIGINI widget'in KENDI fontuyla (kalin DEGIL) hesapliyor.
+        # Kalin metin daha genis oldugu icin ortalanmis yazi iki yandan
+        # tasip kirpiliyor. Stil sayfasina yazilan font, olcumu etkilemiyor.
+        # COZUM: fontu sekme cubuguna KODDAN ver - boylece sizeHint kalin
+        # metrige gore hesaplanir. min-width ek emniyet.
+        sekme_fontu = QFont("Arial", 11, QFont.Bold)
+        self.harita_sekmeleri.tabBar().setFont(sekme_fontu)
         self.harita_sekmeleri.setStyleSheet(
-            "QTabWidget::pane { border: none; } "
-            "QTabBar::tab { background: #11161f; color: #e0e6ed; padding: 8px 18px; "
-            "font-weight: bold; } "
-            "QTabBar::tab:selected { background: #0088cc; color: #000000; }"
+            # Sekmelerin bulundugu alan da yuvarlatildi (kullanici:
+            # "bulunduklari alan koseli"): ust koseler 12px, govdeyle
+            # birlesik dursun diye alt koseler duz birakildi.
+            "QTabWidget::pane { border: 2px solid #1e2836; border-radius: 14px; "
+            "top: -2px; background: #07090e; } "
+            "QTabBar { qproperty-drawBase: 0; } "
+            "QTabBar::tab { background: #11161f; color: #e0e6ed; "
+            "padding: 9px 26px; margin-right: 6px; "
+            "border: 2px solid #1e2836; border-bottom: none; "
+            "border-top-left-radius: 12px; border-top-right-radius: 12px; "
+            "min-width: 150px; } "
+            "QTabBar::tab:hover { background: #18212e; } "
+            "QTabBar::tab:selected { background: #0088cc; color: #000000; "
+            "border-color: #0088cc; }"
         )
         self.harita_sekmeleri.addTab(self.taktik_radar, "TAKTİK LİDAR")
         self.harita_sekmeleri.addTab(self.uydu_harita, "UYDU HARİTASI")

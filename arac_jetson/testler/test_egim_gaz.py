@@ -55,9 +55,45 @@ print(f"  sol={sol} sag={sag}  (FARKLI olmali = direksiyon calisiyor)")
 
 print()
 print(f"duz={duz:.0f}  tabelasiz_egim={tabelasiz:.0f}  egim+tabela={egimli:.0f}  inis={inis:.0f}")
-assert tabelasiz < duz*1.2, "8. tabela YOKKEN tam gaz verildi!"
+# 2026-09-11 SARTNAME DEGISTI (kullanici: "dik engelin tabelasini
+# okumayabilir, ondan da IMU'dan dik engeli tirmandigimizi anlayabiliriz;
+# egim 5 derecenin uzerine cikmadikca hiz artmasin, 5 derece ve uzeri
+# egimlerde hiz artsin"). Yani "tabela yoksa gaz YOK" kurali KALKTI.
+# KORUNAN asil guvenlik amaci: KUCUK egimlerde TAM GAZ verilmemeli.
+# 2026-09-12 GUVENLIK KARARI: imu_tek_basina_gaz VARSAYILAN KAPALI
+# (sahada beklenmedik hizlanmalar yasandi, ozellik dogrulanmadi).
+# Bu yuzden tabelasiz egimde gaz ARTMAMALI - varsayilan davranis budur.
+assert abs(tabelasiz - duz) < 1.0, \
+    "imu_tek_basina_gaz varsayilan KAPALI olmali (guvenlik)"
+# Ozellik ACILDIGINDA orantili gaz vermeli - ayri dogrulama.
+# TABELA BAYRAGI KAPATILMALI: acik kalirsa tabela yolu zaten 255 verir
+# ve IMU yolunu olcmus olmayiz (bu tuzaga bu dosyada ikinci kez dusuldu).
+n._rampa_etabi_cb(_B(data=False))
+n._imu_tek_aktif = True
+egim(8.0); komut(0.4); cikti.clear(); n._dongu()
+_acik = abs(cikti[-1][0])
+print(f"  ozellik ACIKKEN 8 derece -> {_acik:.0f}  (110'dan buyuk olmali)")
+assert _acik > duz, "ozellik acikken gaz artmadi"
+assert _acik < 255.0 - 1.0, "ozellik acikken 8 derecede TAM GAZ verildi"
+n._imu_tek_aktif = False
+# 5 derece ALTINDA hic artmamali - eski korumanin ozu burada test ediliyor.
+# TABELA BAYRAGI KAPATILMALI: acik kalirsa tabela yolu 3 derecenin
+# uzerinde zaten tam gaz veriyor ve IMU yolunu test etmis olmayiz.
+# 4 derece secildi: eski tabela esiginin (3) USTU, yeni IMU esiginin (5)
+# ALTI - tam kritik nokta.
+n._rampa_etabi_cb(_B(data=False))
+egim(4.0); komut(0.4); cikti.clear(); n._dongu()
+_kucuk = abs(cikti[-1][0])
+print(f"  4 derece, tabela YOK -> {_kucuk:.0f}  (duz yol tavani {duz:.0f} olmali)")
+assert abs(_kucuk - duz) < 1.0, "5 derece ALTINDA gaz artti - kucuk tumsek korumasi bozuldu"
 assert egimli > duz*1.5, "egimde gaz artmadi!"
-assert abs(inis-duz)<1.0, "iniste de tam gaz verildi - TEHLIKELI"
+# 2026-09-11 SARTNAME DEGISTI (kullanici: "imu assagiya baktiginda
+# minimum hiz ile insin, 85 ile insin"). Bu satir ESKIDEN "inis == duz
+# yol tavani (110)" bekliyordu; asil amaci "iniste TAM GAZ verilmesin"di.
+# O amac KORUNUYOR, ustune yeni sartname de dogrulaniyor: inis SABIT 85.
+assert inis < duz, "iniste hiz duz yoldan dusuk olmali"
+assert inis < egimli*0.5, "iniste tam gaz verildi - TEHLIKELI"
+assert abs(inis-90.0) < 1.0, f"inis sabit 90 olmali, {inis:.0f} cikti"
 assert abs(sol-sag)>1.0, "egimde direksiyon kayboldu"
 print("TUM TESTLER GECTI")
 n.destroy_node(); rclpy.shutdown()

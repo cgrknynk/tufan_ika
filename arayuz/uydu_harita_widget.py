@@ -19,6 +19,7 @@ from PyQt5.QtCore import Qt, QPointF, QRectF, QUrl, QTimer
 from PyQt5.QtGui import QPainter, QPixmap, QColor, QPen, QPolygonF, QFont
 from PyQt5.QtWidgets import QWidget
 from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkRequest
+from cizim_yardimcilari import yuvarlak_kirp, yuvarlak_cerceve_ciz
 
 TILE_BOYUTU = 256
 TILE_URL_SABLON = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
@@ -35,6 +36,8 @@ def enlem_boylam_to_tile(lat, lon, zoom):
 
 
 class UyduHaritaWidget(QWidget):
+    _KOSE_YARICAP = 15   # taktik radar ekraniyla AYNI kavis
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumSize(300, 300)
@@ -313,15 +316,26 @@ class UyduHaritaWidget(QWidget):
         ressam = QPainter(self)
         try:
             ressam.setRenderHint(QPainter.Antialiasing)
+            # YUVARLAK KOSE (2026-10-28): bu widget da paintEvent'i tamamen
+            # kendisi ciziyor; uydu karolari ve zemin dikdortgen oldugu icin
+            # sekme icinde KOSELI duruyordu. Yan taraftaki taktik radar ile
+            # ayni dil olsun diye ayni yaricap/cerceve kullaniliyor.
+            # Bkz. cizim_yardimcilari.py.
+            yuvarlak_kirp(ressam, self, self._KOSE_YARICAP)
             ressam.fillRect(self.rect(), QColor("#0d1117"))
 
+            # ERKEN RETURN KALDIRILDI: cerceve her iki yolda da cizilmeli.
+            # (Eskiden buradaki `return` yuzunden GNSS yokken cerceve hic
+            # cizilmezdi; ayrica erken return bu dosyada daha once GERCEK
+            # bir SIGSEGV'e yol acmisti - bkz. yukaridaki not.)
             if self.enlem is None or self.boylam is None:
                 ressam.setPen(QColor("#8b98a5"))
                 ressam.setFont(QFont("Arial", 13, QFont.Bold))
                 ressam.drawText(self.rect(), Qt.AlignCenter,
                                  "GNSS konumu bekleniyor...\n(Here4 baglanip /fix yayinlamaya baslayinca harita gorunecek)")
-                return
-            self._paintEvent_govde(ressam)
+            else:
+                self._paintEvent_govde(ressam)
+            yuvarlak_cerceve_ciz(ressam, self, self._KOSE_YARICAP, "#1e2836", 2)
         finally:
             ressam.end()
 

@@ -3953,6 +3953,48 @@ aynı kalır. Doğrulama: roll **0°, +25°, −40°** için dört köşe de
 iki sekme ayrı ayrı; sekme genişlikleri `QFontMetrics` ile sayısal
 ölçüldü; suni ufuk köşeleri üç roll açısında pikselle okundu.
 
+### Navigasyon sol paneli: telemetri başlığı ve suni ufuk (2026-11-23)
+
+*İstek:* "tufan telemetri panels yazısı, attitude kısmı — sığmıyor, üstüne
+biniyor."
+
+**Kök neden 1 — seçicisiz stil.** `sol_panel` stili
+`"background-color: ...; border: 1px solid ...; border-radius: 15px;"`
+şeklinde **seçicisiz** yazılmıştı. Qt'de seçicisiz stil **tüm alt
+widget'lara** uygulanır: başlık, Roll/Pitch/Yaw satırları ve ROS durum
+yazısı **her biri kendi çerçeve kutusunu** alıyor, kutular metni sıkıştırıp
+birbirine değiyordu. Artık `QFrame#solPanel` / `QFrame#dijitalEkran`
+seçicileriyle yalnızca panelin kendisine uygulanıyor; etiketlere açıkça
+`border: none; background: transparent`.
+
+> **Kural:** bir konteynere stil verirken HER ZAMAN `QFrame#ad { ... }`
+> biçiminde seçici yaz — seçicisiz stil tüm çocuklara sızar.
+
+**Kök neden 2 — taşan minimum boyut.** `SuniUfukEkrani`
+`setMinimumSize(300, 300)` istiyordu; panelin geri kalanıyla toplam
+yükseklik ekrandaki alanı (~586 px) aşıyordu ve Qt kutuları üst üste
+bindiriyordu. Minimum **200×200**'e indi; ufuk artık kalan alanı dolduran
+esnek öğe (`stretch=1`).
+
+**Kök neden 3 — başlık halkanın üstünde.** "ATTITUDE (SUNİ UFUK)" sabit
+`(20, 30)` noktasına, top ise widget'ın tam ortasına çiziliyordu; top
+büyüdükçe yazı halkanın üstüne biniyordu. Artık üstte `_BASLIK_BANDI = 30`
+px'lik ayrı bir bant var, başlık orada ortalı; top kalan alanın ortasına
+ve o alana sığan yarıçapla çiziliyor.
+
+**Diğer:** başlık yazım hatası "PANELS" → **"PANELİ"**; durum yazısı
+ortalı + satır kaydırmalı, stili tek yardımcıdan (`_durum_stili`);
+TARE butonu 12px kavis.
+
+> ⚠️ `solPanel` ve `dijitalEkran` **`KOYU_KALAN_WIDGETLAR`'a eklendi.**
+> `main.py`'de tema hafızası harita kurulduktan **sonra** alınıyor; listede
+> olmasalar açık temada renkleri soyulur ve koyu navigasyon alanının
+> ortasında açık renkli kutular kalırdı.
+
+*Doğrulama:* tam pencere (1920×1080) `page_navigasyon` iki temada render
+edildi; sol panel öğelerinin dikey konumları ölçüldü — çakışma yok, son öğe
+572 / 586 px'te bitiyor. Açık temada panel zemini (13,17,23) = koyu tema.
+
 ---
 *Bu doküman, `~/Desktop/tufan` altındaki kodun mevcut haline göre otomatik
 olarak (kod incelemesiyle) hazırlanmıştır.*

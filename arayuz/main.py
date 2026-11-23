@@ -1979,6 +1979,11 @@ class TufanGCS(QMainWindow):
         # Listeye alinmazsa rengi soyulup BEYAZ cikiyor ve log_ekran'in
         # siyah zemini hic gorunmuyordu (render ile tespit edildi).
         "terminal_ekrani",
+        # Navigasyon sol paneli (harita_sistemi.py) - 2026-11-23'te secicili
+        # stil icin nesne adi aldi. Hafiza kaydi harita kurulduktan SONRA
+        # alindigi icin listede olmasalar acik temada renkleri soyulur ve
+        # KOYU navigasyon alaninin ortasinda acik renkli kutular kalirdi.
+        "solPanel", "dijitalEkran",
     })
 
     # ACIK TEMAYA OZEL TAM STILLER (2026-10-28).

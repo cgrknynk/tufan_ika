@@ -706,9 +706,13 @@ class Ros2GcsMotoru(QThread):
 # ==============================================================================
 class SuniUfukEkrani(QFrame):
     _KOSE_YARICAP = 15   # stil sayfasindaki border-radius ile AYNI olmali
+    _BASLIK_BANDI = 30   # ustteki "ATTITUDE" yazisina ayrilan yukseklik (px)
     def __init__(self):
         super().__init__()
-        self.setMinimumSize(300, 300)
+        # 300 -> 200: panelin geri kalaniyla birlikte ekrana sigmiyordu
+        # (bkz. HaritaYoneticisi sol panel notu). Top buyuklugu artik
+        # alana gore olcekleniyor.
+        self.setMinimumSize(200, 200)
         # Stil sayfasi burada SADECE belgeleyici: paintEvent super()'i
         # cagirmadigi icin Qt bunu cizmiyor. Gercek cizim paintEvent
         # icinde _KOSE_YARICAP ile yapiliyor - ikisi ayni kalmali.
@@ -769,8 +773,15 @@ class SuniUfukEkrani(QFrame):
     def _paintEvent_govde(self, ressam):
         g = self.width()
         y = self.height()
-        merkez_x, merkez_y = g / 2, y / 2
-        yaricap = min(g, y) / 2 - 20
+        # BASLIK BANDI (2026-11-23, kullanici: "attitude kismi ustune
+        # biniyor"): eskiden top widget'in TAM ORTASINA cizilip baslik
+        # (20, 30)'a yaziliyordu - top buyudukce baslik halkanin USTUNE
+        # biniyordu. Artik ustte baslik icin ayri bir bant var; top
+        # kalan alanin ortasina ve o alana sigacak yaricapla ciziliyor.
+        bant = self._BASLIK_BANDI
+        merkez_x = g / 2
+        merkez_y = bant + (y - bant) / 2
+        yaricap = max(30.0, min(g, y - bant) / 2 - 12)
 
         ressam.save()
         ressam.translate(merkez_x, merkez_y)
@@ -847,7 +858,8 @@ class SuniUfukEkrani(QFrame):
         
         ressam.setPen(QPen(QColor("#ffffff"), 1))
         ressam.setFont(QFont("Arial", 10, QFont.Bold))
-        ressam.drawText(20, 30, "ATTITUDE (SUNİ UFUK)")
+        ressam.drawText(QRectF(0, 4, g, bant - 4), Qt.AlignCenter,
+                        "ATTITUDE (SUNİ UFUK)")
 
 
 # ==============================================================================
@@ -2128,22 +2140,48 @@ class HaritaYoneticisi:
         ana_layout.setContentsMargins(5, 5, 5, 5)
         ana_layout.setSpacing(15)
 
+        # SOL PANEL DUZENI (2026-11-23, kullanici: "tufan telemetri panels
+        # yazisi, attitude kismi - sigmiyor, ustune biniyor"). Iki kok neden:
+        #  1) Stil SECICISIZ yaziliydi ("border: 1px solid; border-radius:
+        #     15px;"). Qt'de secicisiz stil TUM ALT WIDGET'LARA uygulanir -
+        #     baslik, Roll/Pitch/Yaw satirlari, ROS durum yazisi HER BIRI
+        #     kendi cerceve kutusunu aliyordu; kutular metni sikistirip
+        #     birbirine degiyordu. Artik "QFrame#solPanel" ile SADECE
+        #     panelin kendisine uygulaniyor.
+        #  2) Suni ufuk setMinimumSize(300, 300) istiyordu. Panelin geri
+        #     kalaniyla toplam yukseklik ekrandaki alani (~590px) ASIYORDU,
+        #     Qt de kutulari ust uste bindiriyordu. Minimum 200'e indi ve
+        #     ufuk artik KALAN alani dolduran esnek oge (stretch=1).
         sol_panel = QFrame()
+        sol_panel.setObjectName("solPanel")
         sol_panel.setFixedWidth(360)
-        sol_panel.setStyleSheet("background-color: #0d1117; border: 1px solid #1e2836; border-radius: 15px;")
+        sol_panel.setStyleSheet(
+            "QFrame#solPanel { background-color: #0d1117; "
+            "border: 1px solid #1e2836; border-radius: 15px; }")
         sol_layout = QVBoxLayout(sol_panel)
-        sol_layout.setContentsMargins(15, 15, 15, 15)
+        sol_layout.setContentsMargins(14, 12, 14, 12)
+        sol_layout.setSpacing(8)
 
-        baslik = QLabel("TUFAN TELEMETRİ PANELS")
-        baslik.setStyleSheet("font-size: 15px; color: #00ffcc; border-bottom: 2px solid #1e2836; padding-bottom: 10px;")
+        baslik = QLabel("TUFAN TELEMETRİ PANELİ")
+        baslik.setAlignment(Qt.AlignCenter)
+        baslik.setMinimumHeight(34)
+        baslik.setStyleSheet(
+            "QLabel { font-size: 14px; color: #00ffcc; letter-spacing: 1px; "
+            "background: transparent; border: none; "
+            "border-bottom: 2px solid #1e2836; padding: 2px 0 8px 0; }")
         sol_layout.addWidget(baslik)
 
         self.suni_ufuk = SuniUfukEkrani()
-        sol_layout.addWidget(self.suni_ufuk)
+        sol_layout.addWidget(self.suni_ufuk, 1)
 
         dijital_ekran = QFrame()
-        dijital_ekran.setStyleSheet("background-color: #11161f; border-radius: 10px; padding: 10px;")
+        dijital_ekran.setObjectName("dijitalEkran")
+        dijital_ekran.setStyleSheet(
+            "QFrame#dijitalEkran { background-color: #11161f; "
+            "border: 1px solid #1e2836; border-radius: 12px; }")
         dijital_layout = QVBoxLayout(dijital_ekran)
+        dijital_layout.setContentsMargins(12, 8, 12, 8)
+        dijital_layout.setSpacing(2)
 
         self.lbl_roll = QLabel("Roll  (Yatma)    : 0.0°")
         self.lbl_pitch = QLabel("Pitch (Yunuslama): 0.0°")
@@ -2151,20 +2189,24 @@ class HaritaYoneticisi:
         self.lbl_lidar = QLabel("Lidar Engeller : Bekleniyor...")
         
         for lbl in [self.lbl_roll, self.lbl_pitch, self.lbl_yaw, self.lbl_lidar]:
-            lbl.setStyleSheet("font-size: 13px; padding: 4px; color: #00ffcc;")
+            lbl.setStyleSheet("QLabel { font-size: 13px; padding: 3px 2px; "
+                              "color: #00ffcc; background: transparent; border: none; }")
             dijital_layout.addWidget(lbl)
 
         sol_layout.addWidget(dijital_ekran)
 
         self.btn_sifirla = QPushButton("SENSÖR KONUMUNU SIFIRLA (TARE)")
+        self.btn_sifirla.setMinimumHeight(42)
+        self.btn_sifirla.setStyleSheet("QPushButton { border-radius: 12px; padding: 8px; }")
         self.btn_sifirla.clicked.connect(self.konum_sifirla)
         sol_layout.addWidget(self.btn_sifirla)
 
         self.lbl_durum = QLabel("ROS 2 Bağlantısı Bekleniyor...")
-        self.lbl_durum.setStyleSheet("font-size: 11px; color: #ffaa00; padding-top: 5px;")
+        self.lbl_durum.setWordWrap(True)
+        self.lbl_durum.setAlignment(Qt.AlignCenter)
+        self.lbl_durum.setStyleSheet(self._durum_stili("#ffaa00"))
         sol_layout.addWidget(self.lbl_durum)
 
-        sol_layout.addStretch()
         ana_layout.addWidget(sol_panel)
 
         self.taktik_radar = TaktikRadarEkrani()
@@ -2243,10 +2285,17 @@ class HaritaYoneticisi:
         SuniUfukEkrani.silah_kare_guncelle/paintEvent)."""
         self.suni_ufuk.silah_kare_guncelle(pixmap)
 
+    @staticmethod
+    def _durum_stili(renk):
+        """ROS durum yazisi - cercevesiz, ortali, tek yerden (iki yerde
+        ayni stil elle tekrarlaniyordu)."""
+        return ("QLabel { font-size: 11px; color: %s; background: transparent; "
+                "border: none; padding: 2px 4px; }" % renk)
+
     def konum_sifirla(self):
         self.sifirla_istendi = True
         self.lbl_durum.setText("Sensör Konumu Sıfırlandı (0°, 0°, 0°)")
-        self.lbl_durum.setStyleSheet("font-size: 11px; color: #00ff00; padding-top: 5px;")
+        self.lbl_durum.setStyleSheet(self._durum_stili("#00ff00"))
 
     def lidar_guncelle(self, noktalar):
         # GEÇİCİ PROFİLLEME (2026-09-06) - bkz. scan_callback'teki not:
